@@ -34,9 +34,36 @@ else:
     _refresh_macos_cameras = None
 
 
-def _open_capture_source(source: int | str) -> cv2.VideoCapture:
+def _open_capture_source(
+    source: int | str,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+    fps: int | None = None,
+    fourcc: str | None = None,
+) -> cv2.VideoCapture:
     if isinstance(source, int) and platform.system() == "Darwin":
         return cv2.VideoCapture(source, cv2.CAP_AVFOUNDATION)
+    if isinstance(source, int) and platform.system() == "Linux":
+        params: list[int] = []
+        if isinstance(fourcc, str) and len(fourcc.strip()) >= 4:
+            params.extend(
+                [
+                    cv2.CAP_PROP_FOURCC,
+                    cv2.VideoWriter_fourcc(*fourcc.strip()[:4].upper()),
+                ]
+            )
+        if isinstance(width, int) and width > 0:
+            params.extend([cv2.CAP_PROP_FRAME_WIDTH, width])
+        if isinstance(height, int) and height > 0:
+            params.extend([cv2.CAP_PROP_FRAME_HEIGHT, height])
+        if isinstance(fps, int) and fps > 0:
+            params.extend([cv2.CAP_PROP_FPS, fps])
+        if params:
+            try:
+                return cv2.VideoCapture(source, cv2.CAP_V4L2, params)
+            except Exception:
+                pass
     return cv2.VideoCapture(source)
 
 
@@ -716,7 +743,13 @@ class CaptureThread:
                     continue
 
                 with self._cap_lock:
-                    candidate = _open_capture_source(source)
+                    candidate = _open_capture_source(
+                        source,
+                        width=width,
+                        height=height,
+                        fps=fps,
+                        fourcc=fourcc,
+                    )
                     if not candidate.isOpened():
                         candidate.release()
                         cap = None
