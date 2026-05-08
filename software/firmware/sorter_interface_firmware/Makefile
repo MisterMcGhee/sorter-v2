@@ -35,11 +35,9 @@ build-distribution: setup
 	@echo "Distribution firmware built: build-distribution/sorter_interface_firmware.uf2"
 
 flash-feeder: build-feeder
-	cp build-feeder/sorter_interface_firmware.uf2 /Volumes/RPI-RP2/
-	@echo "Feeder firmware flashed."
+	python3 flash.py --board feeder
 
 flash-distribution: build-distribution
-	cp build-distribution/sorter_interface_firmware.uf2 /Volumes/RPI-RP2/
-	@echo "Distribution firmware flashed."
+	python3 flash.py --board distribution
 
 

@@ -95,6 +95,7 @@ endif()
 target_link_libraries(sorter_interface_firmware
         pico_multicore
         pico_stdlib
+        pico_bootrom
         pico_time
         hardware_i2c
         hardware_timer

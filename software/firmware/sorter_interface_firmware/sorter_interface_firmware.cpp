@@ -34,17 +34,20 @@
 #include "Stepper.h"
 #include "TMC2209.h"
 #include "TMC_UART.h"
+#include "pico/bootrom.h"
 
 #include "message.h"
 
 void CMDH_init(const BusMessage *msg, BusMessage *resp);
 void CMDH_ping(const BusMessage *msg, BusMessage *resp);
+void CMDH_reboot_bootloader(const BusMessage *msg, BusMessage *resp);
 
 const struct CommandTable baseCmdTable = { //
     .prefix = NULL,
     .commands = {{
         {"INIT", "", "s", 0, NULL, CMDH_init},
         {"PING", "", "", 255, NULL, CMDH_ping},
+        {"REBOOT_BOOTLOADER", "", "", 0, NULL, CMDH_reboot_bootloader},
     }}};
 
 void CMDH_stepper_move_steps(const BusMessage *msg, BusMessage *resp);
@@ -291,7 +294,7 @@ void initialize_hardware() {
         steppers[i].setSpeedLimits(16, 4000);
         tmc_drivers[i].initialize();
         tmc_drivers[i].enableDriver(true);
-        tmc_drivers[i].setCurrent(16, 4, 10);
+        tmc_drivers[i].setCurrent(0, 0, 0);
         tmc_drivers[i].setMicrosteps(MICROSTEP_8);
         tmc_drivers[i].enableStealthChop(true);
     }
@@ -352,6 +355,11 @@ void CMDH_ping(const BusMessage *msg, BusMessage *resp) {
     // Echo back the payload from the message into the response
     memcpy(resp->payload, msg->payload, msg->payload_length);
     resp->payload_length = msg->payload_length;
+}
+
+void CMDH_reboot_bootloader(const BusMessage *msg, BusMessage *resp) {
+    resp->payload_length = 0;
+    reset_usb_boot(0, 0);
 }
 
 bool VAL_stepper_channel(uint8_t channel) { return channel < STEPPER_COUNT; }
