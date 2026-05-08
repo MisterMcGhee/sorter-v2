@@ -267,6 +267,18 @@ class CameraService:
                 config.device_settings = dict(settings or {})
         return device.set_device_settings(settings, persist=persist)
 
+    def clear_persisted_device_settings_for_role(self, role: str) -> bool:
+        device = self._device_for_role(role)
+        config_attr = _ROLE_TO_CONFIG_ATTR.get(role)
+        if config_attr is None:
+            return False
+        config = getattr(self._irl_config, config_attr, None)
+        if config is not None:
+            config.device_settings = {}
+        if device is not None:
+            device.config.device_settings = {}
+        return True
+
     def set_capture_mode_for_role(
         self,
         role: str,

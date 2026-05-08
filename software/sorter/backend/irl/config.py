@@ -759,7 +759,25 @@ def parseCameraDeviceSettings(raw: object) -> dict[str, int | float | bool]:
     for key in float_keys:
         value = raw.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
+            # Driver sentinel: cap.get() returns -1 for properties the device
+            # does not actually expose. Persisting/applying these poisons the
+            # camera — drop them.
+            if float(value) == -1.0 and key in {"focus", "gain", "exposure", "white_balance_temperature"}:
+                continue
             result[key] = float(value)
+
+    # Drop manual settings that fight their auto-mode counterpart. A UVC camera
+    # silently flips `auto_exposure` to Manual the moment a manual exposure value
+    # is written, so persisting both leaves the device in a self-contradictory
+    # state and the manual value always wins on reopen. Auto wins here: if the
+    # user wants manual control, they explicitly turn auto off.
+    if result.get("auto_exposure") is True:
+        result.pop("exposure", None)
+        result.pop("gain", None)
+    if result.get("auto_white_balance") is True:
+        result.pop("white_balance_temperature", None)
+    if result.get("autofocus") is True:
+        result.pop("focus", None)
 
     return result
 
