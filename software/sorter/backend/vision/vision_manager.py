@@ -229,6 +229,32 @@ class VisionManager:
             return "classification_channel"
         return None
 
+    def _savedResolution(self, raw: Any, fallback: tuple[int, int] = (1920, 1080)) -> tuple[int, int]:
+        if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+            try:
+                width = int(raw[0])
+                height = int(raw[1])
+            except (TypeError, ValueError):
+                return fallback
+            if width > 0 and height > 0:
+                return width, height
+        return fallback
+
+    def _channelSavedResolution(self, saved: dict, polygon_key: str) -> tuple[int, int]:
+        fallback = self._savedResolution(saved.get("resolution") or [1920, 1080])
+        angle_key = self._channelAngleKeyForPolygonKey(polygon_key)
+        if angle_key is not None:
+            arc_params = saved.get("arc_params") or {}
+            raw_arc = arc_params.get(angle_key) if isinstance(arc_params, dict) else None
+            if isinstance(raw_arc, dict):
+                return self._savedResolution(raw_arc.get("resolution"), fallback)
+
+        quad_params = saved.get("quad_params") or {}
+        raw_quad = quad_params.get(polygon_key) if isinstance(quad_params, dict) else None
+        if isinstance(raw_quad, dict):
+            return self._savedResolution(raw_quad.get("resolution"), fallback)
+        return fallback
+
     # ---- Capture-thread property delegates (CameraService owns the threads) ----
 
     @property
@@ -793,12 +819,12 @@ class VisionManager:
         saved = getChannelPolygons()
         if saved is not None:
             polygon_data = saved.get("polygons", {})
-            saved_res = saved.get("resolution", [1920, 1080])
-            src_w, src_h = int(saved_res[0]), int(saved_res[1])
+            polygon_key = "classification_channel" if self._usesClassificationChannelSetup() else "carousel"
+            src_w, src_h = self._channelSavedResolution(saved, polygon_key)
             self._loadCarouselPolygon(polygon_data, source_resolution=(src_w, src_h))
             # Configure handoff zones right away so the tracker works even
             # before the user runs System Home.
-            self._configureHandoffZonesFromSaved(polygon_data, saved_res)
+            self._configureHandoffZonesFromSaved(polygon_data, saved)
 
     def _configureChannelGeometryFromSaved(self, saved: dict) -> None:
         """Push channel center + inner/outer radii into feeder trackers.
@@ -812,25 +838,23 @@ class VisionManager:
             from subsystems.feeder.analysis import parseSavedChannelArcZones
         except Exception:
             return
-        saved_res = saved.get("resolution") or [1920, 1080]
-        try:
-            src_w = int(saved_res[0])
-            src_h = int(saved_res[1])
-        except (TypeError, ValueError):
-            return
-        if src_w <= 0 or src_h <= 0:
-            return
         channel_angles = saved.get("channel_angles") or {}
         arc_params = saved.get("arc_params") or {}
-        role_to_key = {"c_channel_2": "second", "c_channel_3": "third"}
+        role_to_key = {
+            "c_channel_2": ("second_channel", "second"),
+            "c_channel_3": ("third_channel", "third"),
+        }
         if self._usesClassificationChannelSetup():
-            role_to_key["carousel"] = "classification_channel"
-        for role, channel_key in role_to_key.items():
+            role_to_key["carousel"] = ("classification_channel", "classification_channel")
+        for role, (polygon_key, channel_key) in role_to_key.items():
             arc = parseSavedChannelArcZones(channel_key, channel_angles, arc_params)
             if arc is None or arc.outer_radius <= arc.inner_radius or arc.inner_radius <= 0:
                 continue
             tracker = self._feeder_trackers.get(role)
             if tracker is None:
+                continue
+            src_w, src_h = self._channelSavedResolution(saved, polygon_key)
+            if src_w <= 0 or src_h <= 0:
                 continue
             capture = self.getCaptureThreadForRole(role)
             frame = capture.latest_frame if capture is not None else None
@@ -848,20 +872,13 @@ class VisionManager:
             r_out = arc.outer_radius * rs
             tracker.set_channel_geometry((cx, cy), r_in, r_out, sector_count=18)
 
-    def _configureHandoffZonesFromSaved(self, polygon_data: dict, saved_res) -> None:
+    def _configureHandoffZonesFromSaved(self, polygon_data: dict, saved: dict) -> None:
         """Set up c_channel_2 exit / c_channel_3 entry zones from saved polygons.
 
-        Polygon coordinates are stored in the capture resolution written to
-        disk (``saved_res``); the active camera may run at a different
-        resolution (e.g. 1280×720 on the live feed while the stored polygon
-        is in 1920×1080). Rescale per role using the role's current capture.
+        Polygon coordinates are stored in each channel's editor resolution.
+        The active camera may run at a different resolution, so rescale per
+        role using the role's current capture.
         """
-        try:
-            src_w, src_h = int(saved_res[0]), int(saved_res[1])
-        except (TypeError, ValueError):
-            return
-        if src_w <= 0 or src_h <= 0:
-            return
         role_to_key = {"c_channel_2": "second_channel", "c_channel_3": "third_channel"}
         if self._usesClassificationChannelSetup():
             role_to_key["carousel"] = "classification_channel"
@@ -869,7 +886,10 @@ class VisionManager:
         def _rect_to_polygon(x1, y1, x2, y2):
             return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
 
-        def _role_scale(role: str) -> tuple[float, float]:
+        def _role_scale(role: str, key: str) -> tuple[float, float]:
+            src_w, src_h = self._channelSavedResolution(saved, key)
+            if src_w <= 0 or src_h <= 0:
+                return 1.0, 1.0
             capture = self.getCaptureThreadForRole(role)
             frame = capture.latest_frame if capture is not None else None
             if frame is None:
@@ -886,7 +906,7 @@ class VisionManager:
             except (TypeError, ValueError):
                 continue
             x, y, w, h = cv2.boundingRect(poly)
-            sx, sy = _role_scale(role)
+            sx, sy = _role_scale(role, key)
             if role == "c_channel_2":
                 ex1 = (x + w // 2) * sx
                 self._piece_handoff_manager.set_zones(
@@ -969,8 +989,8 @@ class VisionManager:
             elif pts:
                 polys[key] = np.array(pts, dtype=np.int32)
 
-        saved_res = saved.get("resolution", [1920, 1080])
-        src_w, src_h = int(saved_res[0]), int(saved_res[1])
+        carousel_key = "classification_channel" if self._usesClassificationChannelSetup() else "carousel"
+        src_w, src_h = self._channelSavedResolution(saved, carousel_key)
         carousel_ready = self._loadCarouselPolygon(
             polygon_data,
             source_resolution=(src_w, src_h),
@@ -1074,8 +1094,7 @@ class VisionManager:
         from subsystems.feeder.analysis import parseSavedChannelArcZones, zoneSectionsForChannel
 
         saved = getChannelPolygons()
-        saved_res = saved.get("resolution", [1920, 1080]) if saved else [1920, 1080]
-        src_w, src_h = int(saved_res[0]), int(saved_res[1])
+        saved = saved if isinstance(saved, dict) else {}
 
         channel_map = {
             "second_channel": ("c_channel_2", self._c_channel_2_capture),
@@ -1087,6 +1106,7 @@ class VisionManager:
         for key, (role, capture) in channel_map.items():
             if key not in polys or capture is None:
                 continue
+            src_w, src_h = self._channelSavedResolution(saved, key)
 
             # Wait briefly for first frame to get actual camera resolution
             frame = capture.latest_frame
@@ -2059,11 +2079,7 @@ class VisionManager:
         pts = polygon_data.get(key)
         if not isinstance(pts, list) or len(pts) < 3:
             return None
-        saved_res = saved.get("resolution") or [1920, 1080]
-        try:
-            src_w, src_h = int(saved_res[0]), int(saved_res[1])
-        except (TypeError, ValueError):
-            return None
+        src_w, src_h = self._channelSavedResolution(saved, key)
         if src_w <= 0 or src_h <= 0:
             return None
         sx = float(target_w) / float(src_w)
@@ -2107,10 +2123,7 @@ class VisionManager:
             return
         if not isinstance(saved, dict):
             return
-        self._configureHandoffZonesFromSaved(
-            saved.get("polygons") or {},
-            saved.get("resolution") or [1920, 1080],
-        )
+        self._configureHandoffZonesFromSaved(saved.get("polygons") or {}, saved)
         self._configureChannelGeometryFromSaved(saved)
 
     def setFeederTrackerActive(self, active: bool) -> None:

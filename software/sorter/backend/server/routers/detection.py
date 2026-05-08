@@ -1347,6 +1347,32 @@ def classification_channel_debug() -> Dict[str, Any]:
     }
 
 
+@router.post("/api/classification-channel/wall-phase")
+def classification_channel_wall_phase(
+    include_lines: bool = Query(False),
+) -> Dict[str, Any]:
+    vm = shared_state.vision_manager
+    if vm is None or not hasattr(vm, "getCaptureThreadForRole"):
+        raise HTTPException(status_code=503, detail="Vision manager not available.")
+
+    capture = vm.getCaptureThreadForRole("carousel")
+    if capture is None:
+        capture = vm.getCaptureThreadForRole("classification_channel")
+    if capture is None:
+        raise HTTPException(status_code=503, detail="Classification-channel camera not available.")
+    frame = capture.latest_frame
+    if frame is None:
+        raise HTTPException(status_code=503, detail="No live classification-channel frame available.")
+
+    from vision.c4_wall_phase import detect_c4_wall_phase
+
+    result = detect_c4_wall_phase(frame.raw)
+    return {
+        "ok": True,
+        **result.as_dict(include_lines=include_lines),
+    }
+
+
 @router.post("/api/carousel/detect/current")
 def debug_carousel_detection() -> Dict[str, Any]:
     if shared_state.vision_manager is None:

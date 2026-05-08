@@ -31,6 +31,38 @@ class FeederArcConfigTests(unittest.TestCase):
         self.assertEqual(314.0, zones.exit_start_angle)
         self.assertEqual(350.0, zones.exit_end_angle)
 
+    def test_chord_arc_config_uses_outer_angles_for_runtime_sections(self) -> None:
+        zones = parseSavedChannelArcZones(
+            "classification_channel",
+            {"classification_channel": 0.0},
+            {
+                "classification_channel": {
+                    "center": [500, 400],
+                    "inner_radius": 120,
+                    "outer_radius": 260,
+                    "drop_zone": {
+                        "start_inner_angle": 35,
+                        "start_outer_angle": 44,
+                        "end_inner_angle": 108,
+                        "end_outer_angle": 118,
+                    },
+                    "exit_zone": {
+                        "start_inner_angle": 300,
+                        "start_outer_angle": 314,
+                        "end_inner_angle": 342,
+                        "end_outer_angle": 350,
+                    },
+                }
+            },
+        )
+
+        self.assertIsNotNone(zones)
+        assert zones is not None
+        self.assertEqual(44.0, zones.drop_start_angle)
+        self.assertEqual(118.0, zones.drop_end_angle)
+        self.assertEqual(314.0, zones.exit_start_angle)
+        self.assertEqual(350.0, zones.exit_end_angle)
+
 
 if __name__ == "__main__":
     unittest.main()

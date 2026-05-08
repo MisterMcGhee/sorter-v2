@@ -109,27 +109,36 @@ def parseSavedChannelArcZones(
     ):
         return legacyChannelArcZones(channel_key, section_zero_angle)
 
-    def _zone(zone_key: str, legacy_sections: range) -> tuple[float, float]:
-        raw_zone = raw.get(zone_key)
-        if isinstance(raw_zone, dict):
-            start_angle = raw_zone.get("start_angle")
-            end_angle = raw_zone.get("end_angle")
-            if isinstance(start_angle, (int, float)) and isinstance(end_angle, (int, float)):
-                return normalizeAngle(float(start_angle)), normalizeAngle(float(end_angle))
-        return (
-            normalizeAngle(section_zero_angle + legacy_sections.start * CHANNEL_SECTION_DEG),
-            normalizeAngle(section_zero_angle + legacy_sections.stop * CHANNEL_SECTION_DEG),
-        )
-
-    def _optional_zone(zone_key: str) -> tuple[float, float] | None:
-        raw_zone = raw.get(zone_key)
+    def _zone_angles(raw_zone: Any) -> tuple[float, float] | None:
         if not isinstance(raw_zone, dict):
             return None
         start_angle = raw_zone.get("start_angle")
         end_angle = raw_zone.get("end_angle")
         if isinstance(start_angle, (int, float)) and isinstance(end_angle, (int, float)):
             return normalizeAngle(float(start_angle)), normalizeAngle(float(end_angle))
+
+        # Newer zone-editor payloads can describe a non-radial chord by storing
+        # separate inner/outer angles for both edges. Runtime section ownership
+        # is still angular, so use the outer edge as the operator-visible control
+        # line while the crop polygon carries the full chord precision.
+        start_outer = raw_zone.get("start_outer_angle")
+        end_outer = raw_zone.get("end_outer_angle")
+        if isinstance(start_outer, (int, float)) and isinstance(end_outer, (int, float)):
+            return normalizeAngle(float(start_outer)), normalizeAngle(float(end_outer))
         return None
+
+    def _zone(zone_key: str, legacy_sections: range) -> tuple[float, float]:
+        raw_zone = raw.get(zone_key)
+        parsed = _zone_angles(raw_zone)
+        if parsed is not None:
+            return parsed
+        return (
+            normalizeAngle(section_zero_angle + legacy_sections.start * CHANNEL_SECTION_DEG),
+            normalizeAngle(section_zero_angle + legacy_sections.stop * CHANNEL_SECTION_DEG),
+        )
+
+    def _optional_zone(zone_key: str) -> tuple[float, float] | None:
+        return _zone_angles(raw.get(zone_key))
 
     if channel_key == "third":
         legacy_drop = CH3_DROPZONE_SECTIONS
