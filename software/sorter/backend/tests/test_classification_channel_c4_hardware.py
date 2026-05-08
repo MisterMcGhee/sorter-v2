@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from irl.config import mkIRLConfig
+from server import shared_state
 from server.routers import setup, steppers
 
 
@@ -82,3 +83,86 @@ type = "classification_channel"
             "c_channel_4",
             {entry["name"] for entry in response["steppers"]},
         )
+
+    def test_c4_sector_move_can_plan_without_live_hardware(self) -> None:
+        with patch("server.routers.steppers.shared_state.controller_ref", None):
+            response = steppers.classification_channel_sector_move(
+                from_sector=0,
+                to_sector=1,
+                direction="cw",
+                execute=False,
+            )
+
+        self.assertTrue(response.success)
+        self.assertFalse(response.executed)
+        self.assertEqual("c_channel_4", response.stepper)
+        self.assertEqual(1, response.sector_delta)
+        self.assertEqual(3467, response.motor_microsteps)
+        self.assertAlmostEqual(130 / 12, response.gear_ratio)
+        self.assertEqual(8, response.microsteps)
+
+    def test_c4_sector_move_executes_exact_microsteps_on_c4_axis(self) -> None:
+        class Stepper:
+            def __init__(self) -> None:
+                self.enabled = False
+                self.stopped = True
+                self.speed_limits: list[tuple[int, int]] = []
+                self.accelerations: list[int] = []
+                self.moves: list[int] = []
+
+            def set_speed_limits(self, min_speed: int, max_speed: int) -> None:
+                self.speed_limits.append((int(min_speed), int(max_speed)))
+
+            def set_acceleration(self, acceleration: int) -> None:
+                self.accelerations.append(int(acceleration))
+
+            def move_steps(self, steps: int) -> bool:
+                self.moves.append(int(steps))
+                return True
+
+        stepper = Stepper()
+        irl_config = SimpleNamespace(
+            classification_channel_config=SimpleNamespace(),
+            feeder_config=SimpleNamespace(
+                classification_channel_eject=SimpleNamespace(
+                    microsteps_per_second=3400,
+                    acceleration_microsteps_per_second_sq=2500,
+                )
+            ),
+            c_channel_4_rotor_stepper=SimpleNamespace(microsteps=8),
+        )
+        controller = SimpleNamespace(coordinator=SimpleNamespace(irl_config=irl_config))
+        irl = SimpleNamespace(c_channel_4_rotor_stepper=stepper)
+
+        old_controller = shared_state.controller_ref
+        shared_state.controller_ref = controller
+        try:
+            with patch("server.routers.steppers.shared_state.getActiveIRL", return_value=irl):
+                response = steppers.classification_channel_sector_move(
+                    from_sector=0,
+                    to_sector=4,
+                    direction="shortest",
+                    execute=True,
+                )
+        finally:
+            shared_state.controller_ref = old_controller
+            shared_state.pulse_locks.pop("c_channel_4", None)
+
+        self.assertTrue(response.success)
+        self.assertTrue(response.executed)
+        self.assertEqual(-1, response.sector_delta)
+        self.assertEqual(-3466, response.motor_microsteps)
+        self.assertTrue(stepper.enabled)
+        self.assertEqual([(16, 3400)], stepper.speed_limits)
+        self.assertEqual([2500], stepper.accelerations)
+        self.assertEqual([-3466], stepper.moves)
+
+    def test_c4_sector_move_rejects_unknown_direction(self) -> None:
+        with self.assertRaises(Exception) as excinfo:
+            steppers.classification_channel_sector_move(
+                from_sector=0,
+                to_sector=1,
+                direction="sideways",
+                execute=False,
+            )
+        self.assertEqual(400, getattr(excinfo.exception, "status_code", None))

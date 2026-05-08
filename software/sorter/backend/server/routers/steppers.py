@@ -68,6 +68,25 @@ class StepperStopAllResponse(BaseModel):
     steppers: List[str]
 
 
+class C4SectorMoveResponse(BaseModel):
+    success: bool
+    executed: bool
+    stepper: str
+    from_sector: int
+    to_sector: int
+    sector_delta: int
+    output_delta_deg: float
+    motor_delta_deg: float
+    motor_microsteps: int
+    direction: str
+    gear_ratio: float
+    microsteps: int
+    motor_steps_per_revolution: int
+    min_speed_microsteps_per_second: int
+    max_speed_microsteps_per_second: int
+    acceleration_microsteps_per_second_sq: int | None = None
+
+
 class TmcSettingsRequest(BaseModel):
     irun: Optional[int] = None
     ihold: Optional[int] = None
@@ -119,6 +138,16 @@ def _resolve_stepper(stepper_name: str) -> Any:
     if stepper is None:
         raise HTTPException(status_code=500, detail=f"Stepper '{stepper_name}' unavailable")
     return stepper
+
+
+def _active_irl_config() -> Any | None:
+    controller = shared_state.controller_ref
+    if controller is not None and hasattr(controller, "coordinator"):
+        coordinator = controller.coordinator
+        config = getattr(coordinator, "irl_config", None)
+        if config is not None:
+            return config
+    return None
 
 
 def _halt_stepper(stepper: Any) -> None:
@@ -473,6 +502,85 @@ def move_stepper_degrees(
         stepper=stepper,
         degrees=degrees,
         speed=speed,
+    )
+
+
+@router.post(
+    "/api/classification-channel/sector-move",
+    response_model=C4SectorMoveResponse,
+)
+def classification_channel_sector_move(
+    from_sector: int,
+    to_sector: int,
+    direction: str = "shortest",
+    execute: bool = False,
+) -> C4SectorMoveResponse:
+    """Plan or execute one discrete C4 sector move on the C-channel axis."""
+    if direction not in ("shortest", "cw", "ccw"):
+        raise HTTPException(status_code=400, detail="direction must be one of: shortest, cw, ccw")
+
+    from subsystems.classification_channel.five_sector_platter import C4FiveSectorPlatter
+
+    platter = C4FiveSectorPlatter.from_irl_config(_active_irl_config())
+    try:
+        plan = platter.sector_move_plan(
+            from_sector,
+            to_sector,
+            direction=direction,  # type: ignore[arg-type]
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if execute:
+        target = _resolve_stepper("c_channel_4")
+        lock = shared_state.pulse_locks.setdefault("c_channel_4", threading.Lock())
+        if not lock.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="Stepper 'c_channel_4' is already moving")
+        try:
+            target.enabled = True
+            accepted = plan.apply_to_stepper(target)
+            if not accepted:
+                raise HTTPException(status_code=500, detail="C4 sector move was rejected by the stepper")
+        except HTTPException:
+            lock.release()
+            raise
+        except Exception as exc:
+            lock.release()
+            raise HTTPException(status_code=500, detail=f"C4 sector move failed: {exc}") from exc
+
+        def _release_after_move() -> None:
+            try:
+                start = time.monotonic()
+                while not target.stopped and (time.monotonic() - start) < 30:
+                    time.sleep(0.02)
+            finally:
+                lock.release()
+
+        threading.Thread(target=_release_after_move, daemon=True).start()
+
+    return C4SectorMoveResponse(
+        success=True,
+        executed=bool(execute),
+        stepper="c_channel_4",
+        from_sector=plan.from_sector,
+        to_sector=plan.to_sector,
+        sector_delta=plan.sector_delta,
+        output_delta_deg=plan.output_delta_deg,
+        motor_delta_deg=plan.motor_delta_deg,
+        motor_microsteps=plan.motor_microsteps,
+        direction=plan.direction,
+        gear_ratio=platter.gear_ratio,
+        microsteps=platter.microsteps,
+        motor_steps_per_revolution=platter.motor_steps_per_revolution,
+        min_speed_microsteps_per_second=(
+            plan.motion_profile.min_speed_microsteps_per_second
+        ),
+        max_speed_microsteps_per_second=(
+            plan.motion_profile.max_speed_microsteps_per_second
+        ),
+        acceleration_microsteps_per_second_sq=(
+            plan.motion_profile.acceleration_microsteps_per_second_sq
+        ),
     )
 
 
