@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from irl.config import mkIRLConfig
@@ -26,6 +28,7 @@ def test_sector_motion_uses_c_channel_gear_ratio_and_microsteps() -> None:
     assert move.output_delta_deg == pytest.approx(72.0)
     assert move.motor_microsteps == 3467
     assert move.motor_delta_deg == pytest.approx(780.075)
+    assert platter.motor_microsteps_to_motor_degrees(1600) == pytest.approx(360.0)
     assert platter.motor_microsteps_to_output_degrees(move.motor_microsteps) == (
         pytest.approx(72.006923, rel=1e-6)
     )
@@ -146,6 +149,86 @@ def test_detections_roll_up_to_sector_occupancy() -> None:
     assert snapshot[2].detection_count == 1
     assert snapshot[3].occupied is False
     assert snapshot[4].occupied is False
+
+
+def test_suggest_move_to_exit_plans_from_first_occupied_sector() -> None:
+    platter = C4FiveSectorPlatter()
+    snapshot = platter.occupancy_from_detections(
+        [
+            C4SectorDetection(angle_deg=180.0, confidence=0.9),
+            C4SectorDetection(angle_deg=36.0, confidence=0.7),
+        ],
+        exit_sector=4,
+    )
+
+    suggestion = platter.suggest_move_to_exit(snapshot, exit_sector=4, direction="cw")
+
+    assert suggestion.ok is True
+    assert suggestion.blocked_reason is None
+    assert suggestion.from_sector == 0
+    assert suggestion.to_sector == 4
+    assert suggestion.move is not None
+    assert suggestion.move.sector_delta == 4
+
+
+def test_suggest_move_to_exit_blocks_unknown_or_occupied_exit() -> None:
+    platter = C4FiveSectorPlatter()
+    snapshot = platter.occupancy_from_detections(
+        [
+            C4SectorDetection(angle_deg=36.0, confidence=0.8),
+            C4SectorDetection(angle_deg=324.0, confidence=0.9),
+        ],
+        exit_sector=4,
+    )
+
+    assert (
+        platter.suggest_move_to_exit(snapshot, exit_sector=None).blocked_reason
+        == "exit_sector_unknown"
+    )
+    assert (
+        platter.suggest_move_to_exit(snapshot, exit_sector=4).blocked_reason
+        == "exit_sector_occupied"
+    )
+
+
+def test_suggest_move_to_exit_blocks_when_no_source_sector_is_occupied() -> None:
+    platter = C4FiveSectorPlatter()
+    snapshot = platter.occupancy_from_detections([], exit_sector=4)
+
+    suggestion = platter.suggest_move_to_exit(snapshot, exit_sector=4)
+
+    assert suggestion.ok is False
+    assert suggestion.blocked_reason == "no_occupied_sector"
+    assert suggestion.move is None
+
+
+def test_motion_profile_surfaces_requested_speed_above_configured_default() -> None:
+    config = SimpleNamespace(
+        classification_channel_config=SimpleNamespace(),
+        feeder_config=SimpleNamespace(
+            classification_channel_eject=SimpleNamespace(
+                microsteps_per_second=6400,
+                acceleration_microsteps_per_second_sq=2500,
+            )
+        ),
+        c_channel_4_rotor_stepper=SimpleNamespace(
+            microsteps=8,
+            default_steps_per_second=4000,
+        ),
+    )
+
+    platter = C4FiveSectorPlatter.from_irl_config(config)
+    move = platter.sector_move_plan(0, 1, direction="cw")
+
+    assert move.motion_profile.max_speed_microsteps_per_second == 6400
+    assert move.motion_profile.requested_max_speed_microsteps_per_second == 6400
+    assert move.motion_profile.requested_acceleration_microsteps_per_second_sq == 2500
+    assert (
+        move.motion_profile.configured_stepper_default_speed_microsteps_per_second
+        == 4000
+    )
+    assert move.motion_profile.warnings
+    assert "exceeds the configured stepper default" in move.motion_profile.warnings[0]
 
 
 def test_from_irl_config_uses_classification_c_channel_axis(tmp_path, monkeypatch) -> None:

@@ -89,14 +89,21 @@ def _auto_move_params_from_occupancy(
         raise ProbeError("occupancy response has no exit_sector")
 
     occupied: list[dict[str, Any]] = []
+    exit_entry: dict[str, Any] | None = None
     for sector in sectors:
-        if not isinstance(sector, dict) or not sector.get("occupied"):
+        if not isinstance(sector, dict):
             continue
         sector_index = sector.get("sector_index")
         if not isinstance(sector_index, int):
             continue
+        if sector_index == exit_sector:
+            exit_entry = sector
+        if not sector.get("occupied"):
+            continue
         occupied.append(sector)
 
+    if exit_entry is not None and exit_entry.get("occupied"):
+        raise ProbeError("exit sector is occupied; refusing to auto-plan into it")
     if not occupied:
         raise ProbeError("occupancy response has no occupied sector to plan from")
 

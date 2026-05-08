@@ -115,3 +115,33 @@ def test_probe_auto_plan_requires_occupied_sector(monkeypatch) -> None:
     args = c4_sector_probe.parse_args(["--auto-plan"])
     with pytest.raises(c4_sector_probe.ProbeError, match="no occupied sector"):
         c4_sector_probe.run_probe(args)
+
+
+def test_probe_auto_plan_refuses_occupied_exit_sector(monkeypatch) -> None:
+    def fake_request_json(
+        base_url: str,
+        method: str,
+        path: str,
+        *,
+        params=None,
+        timeout: float,
+    ):
+        if path == "/api/classification-channel/sector-occupancy":
+            return {
+                "ok": True,
+                "exit_sector": 4,
+                "sectors": [
+                    {"sector_index": 0, "occupied": True},
+                    {"sector_index": 1, "occupied": False},
+                    {"sector_index": 2, "occupied": False},
+                    {"sector_index": 3, "occupied": False},
+                    {"sector_index": 4, "occupied": True},
+                ],
+            }
+        return {"ok": True}
+
+    monkeypatch.setattr(c4_sector_probe, "_request_json", fake_request_json)
+
+    args = c4_sector_probe.parse_args(["--auto-plan"])
+    with pytest.raises(c4_sector_probe.ProbeError, match="exit sector is occupied"):
+        c4_sector_probe.run_probe(args)

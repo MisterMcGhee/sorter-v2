@@ -1358,8 +1358,29 @@ def classification_channel_wall_phase(
     result = detect_c4_wall_phase(frame.raw)
     return {
         "ok": True,
+        "frame_luma": _frame_luma_payload(frame.raw),
         **result.as_dict(include_lines=include_lines),
     }
+
+
+def _frame_luma_payload(frame_bgr: Any) -> Dict[str, Any]:
+    if frame_bgr is None or not hasattr(frame_bgr, "shape"):
+        return {}
+    try:
+        if len(frame_bgr.shape) == 3:
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = frame_bgr
+        if gray.size == 0:
+            return {}
+        return {
+            "mean": float(np.mean(gray)),
+            "p95": float(np.percentile(gray, 95)),
+            "max": int(np.max(gray)),
+            "nonblack_gt25_ratio": float(np.mean(gray > 25)),
+        }
+    except Exception:
+        return {}
 
 
 def _classification_channel_live_frame() -> Any:
@@ -1405,6 +1426,7 @@ def classification_channel_sector_occupancy(
         return {
             "ok": False,
             "message": phase.message,
+            "frame_luma": _frame_luma_payload(frame.raw),
             "wall_phase": phase.as_dict(include_lines=include_lines),
             "sectors": [],
             "candidate_bboxes": [],
@@ -1460,6 +1482,7 @@ def classification_channel_sector_occupancy(
     return {
         "ok": True,
         "frame_resolution": [int(frame.raw.shape[1]), int(frame.raw.shape[0])],
+        "frame_luma": _frame_luma_payload(frame.raw),
         "sector_count": platter.sector_count,
         "sector_size_deg": platter.sector_size_deg,
         "sector_offset_deg": phase.sector_offset_deg,

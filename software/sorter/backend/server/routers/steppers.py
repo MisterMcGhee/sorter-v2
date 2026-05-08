@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from toml_config import loadTomlFile
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from defs.events import (
     PauseCommandData,
@@ -85,6 +85,10 @@ class C4SectorMoveResponse(BaseModel):
     min_speed_microsteps_per_second: int
     max_speed_microsteps_per_second: int
     acceleration_microsteps_per_second_sq: int | None = None
+    requested_max_speed_microsteps_per_second: int | None = None
+    requested_acceleration_microsteps_per_second_sq: int | None = None
+    configured_stepper_default_speed_microsteps_per_second: int | None = None
+    warnings: List[str] = Field(default_factory=list)
 
 
 class TmcSettingsRequest(BaseModel):
@@ -581,6 +585,16 @@ def classification_channel_sector_move(
         acceleration_microsteps_per_second_sq=(
             plan.motion_profile.acceleration_microsteps_per_second_sq
         ),
+        requested_max_speed_microsteps_per_second=(
+            plan.motion_profile.requested_max_speed_microsteps_per_second
+        ),
+        requested_acceleration_microsteps_per_second_sq=(
+            plan.motion_profile.requested_acceleration_microsteps_per_second_sq
+        ),
+        configured_stepper_default_speed_microsteps_per_second=(
+            plan.motion_profile.configured_stepper_default_speed_microsteps_per_second
+        ),
+        warnings=list(plan.motion_profile.warnings),
     )
 
 

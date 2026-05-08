@@ -31,6 +31,10 @@ class C4MotionProfile:
     acceleration_microsteps_per_second_sq: int | None = (
         DEFAULT_C4_ACCELERATION_MICROSTEPS_PER_SECOND_SQ
     )
+    requested_max_speed_microsteps_per_second: int | None = None
+    requested_acceleration_microsteps_per_second_sq: int | None = None
+    configured_stepper_default_speed_microsteps_per_second: int | None = None
+    warnings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.min_speed_microsteps_per_second <= 0:
@@ -44,6 +48,20 @@ class C4MotionProfile:
         acceleration = self.acceleration_microsteps_per_second_sq
         if acceleration is not None and acceleration <= 0:
             raise ValueError("acceleration_microsteps_per_second_sq must be > 0")
+        requested_speed = self.requested_max_speed_microsteps_per_second
+        if requested_speed is not None and requested_speed <= 0:
+            raise ValueError("requested_max_speed_microsteps_per_second must be > 0")
+        requested_acceleration = self.requested_acceleration_microsteps_per_second_sq
+        if requested_acceleration is not None and requested_acceleration <= 0:
+            raise ValueError("requested_acceleration_microsteps_per_second_sq must be > 0")
+        configured_default = self.configured_stepper_default_speed_microsteps_per_second
+        if configured_default is not None and configured_default <= 0:
+            raise ValueError("configured_stepper_default_speed_microsteps_per_second must be > 0")
+        object.__setattr__(
+            self,
+            "warnings",
+            tuple(str(warning) for warning in self.warnings if str(warning)),
+        )
 
     @classmethod
     def from_irl_config(cls, irl_config: Any) -> "C4MotionProfile":
@@ -54,23 +72,72 @@ class C4MotionProfile:
             "carousel_stepper",
             None,
         )
-        max_speed = getattr(eject_config, "microsteps_per_second", None)
-        if not isinstance(max_speed, int) or max_speed <= 0:
-            max_speed = getattr(
-                stepper_config,
-                "default_steps_per_second",
-                DEFAULT_C4_MAX_SPEED_MICROSTEPS_PER_SECOND,
+        warnings: list[str] = []
+        configured_default = getattr(stepper_config, "default_steps_per_second", None)
+        if not (
+            isinstance(configured_default, int)
+            and not isinstance(configured_default, bool)
+            and configured_default > 0
+        ):
+            configured_default = None
+
+        requested_speed = getattr(eject_config, "microsteps_per_second", None)
+        if (
+            isinstance(requested_speed, int)
+            and not isinstance(requested_speed, bool)
+            and requested_speed > 0
+        ):
+            max_speed = int(requested_speed)
+            if configured_default is not None and max_speed > int(configured_default):
+                warnings.append(
+                    "requested C4 sector speed exceeds the configured stepper default; "
+                    "planner keeps the request, hardware validation must confirm it"
+                )
+        else:
+            if requested_speed is not None:
+                warnings.append(
+                    "invalid C4 sector speed in classification_channel_eject; "
+                    "using configured stepper default"
+                )
+            requested_speed = None
+            max_speed = int(
+                configured_default or DEFAULT_C4_MAX_SPEED_MICROSTEPS_PER_SECOND
             )
-        acceleration = getattr(
+
+        raw_acceleration = getattr(
             eject_config,
             "acceleration_microsteps_per_second_sq",
             DEFAULT_C4_ACCELERATION_MICROSTEPS_PER_SECOND_SQ,
         )
-        if acceleration is not None:
-            acceleration = int(acceleration)
+        if raw_acceleration is None:
+            acceleration = None
+            requested_acceleration = None
+        elif (
+            isinstance(raw_acceleration, int)
+            and not isinstance(raw_acceleration, bool)
+            and raw_acceleration > 0
+        ):
+            acceleration = int(raw_acceleration)
+            requested_acceleration = int(raw_acceleration)
+        else:
+            warnings.append(
+                "invalid C4 sector acceleration in classification_channel_eject; "
+                "using default acceleration"
+            )
+            acceleration = DEFAULT_C4_ACCELERATION_MICROSTEPS_PER_SECOND_SQ
+            requested_acceleration = None
+
         return cls(
             max_speed_microsteps_per_second=int(max_speed),
             acceleration_microsteps_per_second_sq=acceleration,
+            requested_max_speed_microsteps_per_second=(
+                int(requested_speed) if requested_speed is not None else None
+            ),
+            requested_acceleration_microsteps_per_second_sq=requested_acceleration,
+            configured_stepper_default_speed_microsteps_per_second=(
+                int(configured_default) if configured_default is not None else None
+            ),
+            warnings=tuple(warnings),
         )
 
     def apply_to_stepper(self, stepper: Any) -> None:
@@ -166,6 +233,16 @@ class C4SectorMove:
             "acceleration_microsteps_per_second_sq": (
                 self.motion_profile.acceleration_microsteps_per_second_sq
             ),
+            "requested_max_speed_microsteps_per_second": (
+                self.motion_profile.requested_max_speed_microsteps_per_second
+            ),
+            "requested_acceleration_microsteps_per_second_sq": (
+                self.motion_profile.requested_acceleration_microsteps_per_second_sq
+            ),
+            "configured_stepper_default_speed_microsteps_per_second": (
+                self.motion_profile.configured_stepper_default_speed_microsteps_per_second
+            ),
+            "warnings": list(self.motion_profile.warnings),
         }
 
     def apply_to_stepper(self, stepper: Any) -> bool:
@@ -427,6 +504,73 @@ class C4FiveSectorPlatter:
             )
             for idx in range(self.sector_count)
         )
+
+    def suggest_move_to_exit(
+        self,
+        sectors: Iterable[C4SectorSnapshot],
+        *,
+        exit_sector: int | None,
+        direction: C4Direction = "shortest",
+    ) -> "C4SectorMoveSuggestion":
+        if exit_sector is None:
+            return C4SectorMoveSuggestion(
+                ok=False,
+                blocked_reason="exit_sector_unknown",
+            )
+        target = int(exit_sector) % self.sector_count
+        by_index = {
+            int(sector.sector_index) % self.sector_count: sector
+            for sector in sectors
+        }
+        exit_snapshot = by_index.get(target)
+        if exit_snapshot is not None and exit_snapshot.occupied:
+            return C4SectorMoveSuggestion(
+                ok=False,
+                blocked_reason="exit_sector_occupied",
+                to_sector=target,
+            )
+        candidates = sorted(
+            (
+                sector
+                for index, sector in by_index.items()
+                if index != target and sector.occupied
+            ),
+            key=lambda sector: int(sector.sector_index) % self.sector_count,
+        )
+        if not candidates:
+            return C4SectorMoveSuggestion(
+                ok=False,
+                blocked_reason="no_occupied_sector",
+                to_sector=target,
+            )
+        source = int(candidates[0].sector_index) % self.sector_count
+        return C4SectorMoveSuggestion(
+            ok=True,
+            blocked_reason=None,
+            from_sector=source,
+            to_sector=target,
+            move=self.sector_move_plan(source, target, direction=direction),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class C4SectorMoveSuggestion:
+    ok: bool
+    blocked_reason: str | None
+    from_sector: int | None = None
+    to_sector: int | None = None
+    move: C4SectorMove | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "ok": self.ok,
+            "blocked_reason": self.blocked_reason,
+            "from_sector": self.from_sector,
+            "to_sector": self.to_sector,
+        }
+        if self.move is not None:
+            payload["move"] = self.move.as_dict()
+        return payload
 
 
 def angle_deg_for_point(

@@ -6,6 +6,9 @@ import tomllib
 import unittest
 from unittest.mock import patch
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
 from irl.config import mkIRLConfig
 from server import shared_state
 from server.routers import setup, steppers
@@ -100,6 +103,64 @@ type = "classification_channel"
         self.assertEqual(3467, response.motor_microsteps)
         self.assertAlmostEqual(130 / 12, response.gear_ratio)
         self.assertEqual(8, response.microsteps)
+
+    def test_c4_sector_move_endpoint_defaults_to_plan_only(self) -> None:
+        app = FastAPI()
+        app.include_router(steppers.router)
+
+        with patch("server.routers.steppers.shared_state.controller_ref", None):
+            with TestClient(app) as client:
+                response = client.post(
+                    "/api/classification-channel/sector-move",
+                    params={
+                        "from_sector": 0,
+                        "to_sector": 1,
+                        "direction": "cw",
+                    },
+                )
+
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        self.assertFalse(payload["executed"])
+        self.assertEqual("c_channel_4", payload["stepper"])
+        self.assertEqual(3467, payload["motor_microsteps"])
+
+    def test_c4_sector_move_surfaces_motion_profile_warnings_without_executing(self) -> None:
+        irl_config = SimpleNamespace(
+            classification_channel_config=SimpleNamespace(),
+            feeder_config=SimpleNamespace(
+                classification_channel_eject=SimpleNamespace(
+                    microsteps_per_second=6400,
+                    acceleration_microsteps_per_second_sq=2500,
+                )
+            ),
+            c_channel_4_rotor_stepper=SimpleNamespace(
+                microsteps=8,
+                default_steps_per_second=4000,
+            ),
+        )
+        controller = SimpleNamespace(coordinator=SimpleNamespace(irl_config=irl_config))
+
+        old_controller = shared_state.controller_ref
+        shared_state.controller_ref = controller
+        try:
+            response = steppers.classification_channel_sector_move(
+                from_sector=0,
+                to_sector=1,
+                direction="cw",
+                execute=False,
+            )
+        finally:
+            shared_state.controller_ref = old_controller
+
+        self.assertTrue(response.success)
+        self.assertFalse(response.executed)
+        self.assertEqual(6400, response.max_speed_microsteps_per_second)
+        self.assertEqual(6400, response.requested_max_speed_microsteps_per_second)
+        self.assertEqual(4000, response.configured_stepper_default_speed_microsteps_per_second)
+        self.assertTrue(response.warnings)
+        self.assertIn("exceeds the configured stepper default", response.warnings[0])
 
     def test_c4_sector_move_executes_exact_microsteps_on_c4_axis(self) -> None:
         class Stepper:

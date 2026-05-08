@@ -3,7 +3,8 @@ from types import SimpleNamespace
 
 import cv2
 import numpy as np
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 from server import shared_state
 from server.routers import detection
@@ -96,6 +97,8 @@ class DetectionRouteTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertGreaterEqual(payload["wall_count"], 4)
         self.assertAlmostEqual(22.0, payload["sector_offset_deg"], delta=3.0)
+        self.assertGreater(payload["frame_luma"]["mean"], 100.0)
+        self.assertGreater(payload["frame_luma"]["nonblack_gt25_ratio"], 0.5)
 
     def test_classification_channel_sector_occupancy_rolls_candidates_into_sectors(self) -> None:
         frame = _synthetic_rotor_frame(phase_deg=22.0)
@@ -154,6 +157,7 @@ class DetectionRouteTests(unittest.TestCase):
 
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["phase_ok"])
+        self.assertGreater(payload["frame_luma"]["mean"], 100.0)
         self.assertEqual(5, payload["sector_count"])
         self.assertEqual(candidates, payload["candidate_bboxes"])
         self.assertEqual([0, 2], [entry["sector_index"] for entry in payload["detections"]])
@@ -165,6 +169,56 @@ class DetectionRouteTests(unittest.TestCase):
         self.assertEqual(1, len(fake_vision.calls))
         self.assertFalse(fake_vision.calls[0][0])
         self.assertIs(fake_vision.calls[0][1].raw, frame)
+
+    def test_classification_channel_sector_occupancy_reports_dark_frame_diagnostics(self) -> None:
+        frame = np.zeros((720, 720, 3), dtype=np.uint8)
+
+        class FakeVision:
+            def getCaptureThreadForRole(self, role: str):
+                if role == "carousel":
+                    return SimpleNamespace(latest_frame=SimpleNamespace(raw=frame))
+                return None
+
+            def getClassificationChannelDetectionCandidates(self, *, force: bool = False, frame=None):
+                raise AssertionError("detection should not run before wall phase succeeds")
+
+        shared_state.vision_manager = FakeVision()
+
+        payload = detection.classification_channel_sector_occupancy()
+
+        self.assertFalse(payload["ok"])
+        self.assertIn("disc fit failed", payload["message"])
+        self.assertEqual(0, payload["frame_luma"]["max"])
+        self.assertEqual(0.0, payload["frame_luma"]["nonblack_gt25_ratio"])
+        self.assertEqual([], payload["sectors"])
+        self.assertEqual([], payload["candidate_bboxes"])
+        self.assertEqual([], payload["detections"])
+
+    def test_classification_channel_sector_occupancy_endpoint_reports_dark_frame_diagnostics(self) -> None:
+        frame = np.zeros((720, 720, 3), dtype=np.uint8)
+
+        class FakeVision:
+            def getCaptureThreadForRole(self, role: str):
+                if role == "carousel":
+                    return SimpleNamespace(latest_frame=SimpleNamespace(raw=frame))
+                return None
+
+            def getClassificationChannelDetectionCandidates(self, *, force: bool = False, frame=None):
+                raise AssertionError("detection should not run before wall phase succeeds")
+
+        shared_state.vision_manager = FakeVision()
+        app = FastAPI()
+        app.include_router(detection.router)
+
+        with TestClient(app) as client:
+            response = client.post("/api/classification-channel/sector-occupancy")
+
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertIn("disc fit failed", payload["message"])
+        self.assertEqual(0, payload["frame_luma"]["max"])
+        self.assertEqual([], payload["sectors"])
 
 
 if __name__ == "__main__":
