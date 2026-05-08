@@ -88,7 +88,7 @@
 									<a
 										href={downloadUrl(variant.id)}
 										class="bg-primary px-3 py-1 text-xs font-medium text-white hover:bg-primary-hover"
-										download={variant.file_name}
+										download
 									>
 										Download
 									</a>
