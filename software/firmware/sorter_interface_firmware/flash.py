@@ -165,27 +165,32 @@ def main() -> None:
 
     target_name = "FEEDER MB" if args.board == "feeder" else "DISTRIBUTION MB"
 
-    print("Scanning for Pico boards...")
-    ports = _enumerate_picos()
-    if not ports:
-        sys.exit("No Pico boards found over USB")
-
-    target_port = None
-    for port in ports:
-        name = _identify_board(port)
-        marker = " <-- target" if name == target_name else ""
-        print(f"  {port}: {name or '(unresponsive)'}{marker}")
-        if name == target_name:
-            target_port = port
-
-    if not target_port:
-        if platform.system() != "Darwin" and _find_rpi_rp2_blockdev():
-            print(f"Board '{target_name}' not found on serial but RPI-RP2 is in bootloader — flashing directly.")
-        else:
-            sys.exit(f"Board '{target_name}' not found")
+    # Check if board is already in bootloader mode before scanning serial ports
+    if _find_rpi_rp2():
+        print(f"RPI-RP2 already mounted in bootloader mode — flashing directly.")
+        target_port = None
     else:
-        print(f"Rebooting {target_name} to bootloader...")
-        _reboot_to_bootloader(target_port)
+        print("Scanning for Pico boards...")
+        ports = _enumerate_picos()
+        if not ports:
+            sys.exit("No Pico boards found over USB")
+
+        target_port = None
+        for port in ports:
+            name = _identify_board(port)
+            marker = " <-- target" if name == target_name else ""
+            print(f"  {port}: {name or '(unresponsive)'}{marker}")
+            if name == target_name:
+                target_port = port
+
+        if not target_port:
+            if platform.system() != "Darwin" and _find_rpi_rp2_blockdev():
+                print(f"Board '{target_name}' not found on serial but RPI-RP2 is in bootloader — flashing directly.")
+            else:
+                sys.exit(f"Board '{target_name}' not found")
+        else:
+            print(f"Rebooting {target_name} to bootloader...")
+            _reboot_to_bootloader(target_port)
 
     print("Waiting for RPI-RP2 drive...")
     try:

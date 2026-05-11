@@ -40,4 +40,20 @@ flash-feeder: build-feeder
 flash-distribution: build-distribution
 	python3 flash.py --board distribution
 
+build-feeder-v1: setup
+	@mkdir -p build-feeder-v1
+	@cd build-feeder-v1 && CC=$(HOST_CC) CXX=$(HOST_CXX) cmake -DFIRMWARE_ROLE=feeder -DHW_BASICALLY_V1=ON $(CMAKE_FLAGS) .. && CC=$(HOST_CC) CXX=$(HOST_CXX) make -j$(NPROC)
+	@echo "Feeder v1 firmware built: build-feeder-v1/sorter_interface_firmware.uf2"
+
+build-distribution-v1: setup
+	@mkdir -p build-distribution-v1
+	@cd build-distribution-v1 && CC=$(HOST_CC) CXX=$(HOST_CXX) cmake -DFIRMWARE_ROLE=distribution -DHW_BASICALLY_V1=ON $(CMAKE_FLAGS) .. && CC=$(HOST_CC) CXX=$(HOST_CXX) make -j$(NPROC)
+	@echo "Distribution v1 firmware built: build-distribution-v1/sorter_interface_firmware.uf2"
+
+flash-feeder-v1: build-feeder-v1
+	python3 flash.py --board feeder --uf2 build-feeder-v1/sorter_interface_firmware.uf2
+
+flash-distribution-v1: build-distribution-v1
+	python3 flash.py --board distribution --uf2 build-distribution-v1/sorter_interface_firmware.uf2
+
 
