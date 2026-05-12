@@ -74,6 +74,20 @@ import os as _os
 HIVE_INFERENCE_MIN_INTERVAL_S: float = float(
     _os.environ.get("SORTER_HIVE_INFERENCE_INTERVAL_S", "0.2")
 )
+# Per-role override: the carousel (C4) needs much higher detection cadence so
+# the polar-tracker free-fall burst window can grab ≥10 frames per drop. The
+# carousel feed runs on its own thread / model so it doesn't share the
+# dashboard encode budget the global cap is protecting. Override via
+# ``SORTER_HIVE_INFERENCE_INTERVAL_S_CAROUSEL``.
+HIVE_INFERENCE_MIN_INTERVAL_S_CAROUSEL: float = float(
+    _os.environ.get("SORTER_HIVE_INFERENCE_INTERVAL_S_CAROUSEL", "0.05")
+)
+
+
+def _hive_inference_min_interval_s_for_role(role: str | None) -> float:
+    if role == "carousel":
+        return HIVE_INFERENCE_MIN_INTERVAL_S_CAROUSEL
+    return HIVE_INFERENCE_MIN_INTERVAL_S
 
 
 class VisionManager:
@@ -2899,7 +2913,7 @@ class VisionManager:
             now = frame.timestamp
             if cached is not None and not force:
                 last_ts, last_det = cached
-                if now - float(last_ts) < HIVE_INFERENCE_MIN_INTERVAL_S:
+                if now - float(last_ts) < _hive_inference_min_interval_s_for_role(role):
                     return self._filterFeederDetectionResultToChannel(role, last_det)
             detection = self._filterFeederDetectionResultToChannel(
                 role,
@@ -3017,7 +3031,7 @@ class VisionManager:
             cached = self._carousel_dynamic_detection_cache
             if cached is not None and not force:
                 last_ts, last_det = cached
-                if now - float(last_ts) < HIVE_INFERENCE_MIN_INTERVAL_S:
+                if now - float(last_ts) < _hive_inference_min_interval_s_for_role("carousel"):
                     return last_det
             detection = self._runHiveDetection(algorithm, frame.raw, scope="carousel", role="carousel")
             self._carousel_dynamic_detection_cache = (now, detection)
