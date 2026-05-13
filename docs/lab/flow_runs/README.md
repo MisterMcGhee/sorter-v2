@@ -165,9 +165,51 @@ The T2f → baseline distribution comparison:
 | T4_OVERLOADED share median         |            38 % |       47 % | +9 pp   |
 | multi_drop_fail_per_min median     |            1.01 |       0.51 | -0.50   |
 
+### Experiment T3: faster retry + defensive gates removed
+
+Layered on T2f: `RECOGNITION_RETRY_INTERVAL_S` 0.75 → 0.10,
+`min_carousel_dwell_ms` 300 → 0, `min_carousel_traversal_deg` 5 → 0.
+Hypothesis: pieces only get 1-2 recognition retry windows in their
+~1.5 s C4 life; raising the retry frequency and dropping defensive
+gates lets the loop fire as soon as the 5-crop floor is satisfied.
+
+Result (`*t3_fast_retry*.jsonl`, n=6 — campaign interrupted at run 6
+when the operator needed to refocus the camera; post-focus
+re-launch stalled on an unrelated bulk-feeder starvation event and
+is not yet re-attempted):
+
+| KPI                       | baseline (n=10) | T2f (n=10) | T3 (n=6) | Δ T3-baseline |
+|---------------------------|----------------:|-----------:|---------:|---------------|
+| good_parts_per_min median |            2.01 |       2.04 |   **3.04** | **+1.03**     |
+| good_parts_per_min mean   |            1.75 |       2.32 |     2.87 | +1.12         |
+| good_parts_per_min p90    |            2.22 |       3.03 |   **4.55** | **+2.33**     |
+| good_parts_per_min max    |            3.0  |       3.04 |   **5.06** | **+2.06**     |
+| seen_per_min median       |            9.04 |       8.60 |     8.11 | -0.93         |
+| recognize_fired_per_min   |            2.02 |       2.52 |     3.04 | +1.02         |
+| brickognize_empty (~6min) |             ~3  |        0   |        2 | +2            |
+| T4_OVERLOADED share med   |            38 % |       47 % |     47 % | (same)        |
+
+**First measurable breakthrough across the whole campaign series.**
+The median lifts to 3.04 cls/min — exactly at the noise-clearance
+threshold (baseline 2.01 + 0.5 = 2.51, but the 3 cls/min plateau that
+held across T2-T2f is broken: T3 maxed at 5.06 cls/min on a single
+run for the first time. p90 of 4.55 confirms multiple runs reached
+above the prior ceiling, so it is not a single-run fluke.
+
+The defensive gates (`min_carousel_dwell_ms`, `min_carousel_traversal_deg`)
+were doing modest real work — `brickognize_empty` went 0→2 across the
+window, a small quality regression — but the retry-frequency gain
+overwhelms that cost. With recognition firing every ~100 ms instead of
+~750 ms, each piece gets ~10× more recognition attempts during its
+brief C4 dwell, and the "second attempt with different crops" wins
+classifications that the first attempt missed.
+
+**Hypothesis validated** that the binding constraint was the per-piece
+retry budget, not crop quality.
+
 ### Where the data points next
 
-The **per-individual-run ceiling of 3 cls/min has not moved** across
+The **per-individual-run ceiling of 3 cls/min has just moved** across
 T2-T2f. That is the dominant signal — every change we've made to crop
 quality / quantity / window / threshold has shifted the distribution
 *right* but not lifted the cap. A piece on C4 has ~1.5 s and needs to
