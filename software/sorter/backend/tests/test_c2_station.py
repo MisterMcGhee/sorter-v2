@@ -49,11 +49,26 @@ class _Stepper:
         return True
 
 
+class _SeparationDriver:
+    def __init__(self, *, active: bool = False) -> None:
+        self.active = active
+        self.step_calls: list[tuple[float, bool]] = []
+        self.cancel_reasons: list[str] = []
+
+    def step(self, now_mono: float, allowed: bool) -> None:
+        self.step_calls.append((float(now_mono), bool(allowed)))
+
+    def cancel(self, reason: str) -> None:
+        self.cancel_reasons.append(str(reason))
+        self.active = False
+
+
 def _make_station(
     stats: _RuntimeStats,
     stepper: _Stepper,
     *,
     agitation_enabled: bool = False,
+    separation_driver: _SeparationDriver | None = None,
 ) -> C2Station:
     return C2Station(
         gc=SimpleNamespace(
@@ -68,7 +83,7 @@ def _make_station(
             second_rotor_precision=SimpleNamespace(),
             second_rotor_normal=SimpleNamespace(),
         ),
-        separation_driver=SimpleNamespace(active=False, step=lambda *_args: None, cancel=lambda *_args: None),
+        separation_driver=separation_driver or _SeparationDriver(),
         gear_ratio=1.0,
         agitation_enabled=agitation_enabled,
         agitation_reverse_deg_output=45.0,
@@ -276,6 +291,46 @@ class C2StationTests(unittest.TestCase):
         station.run_exit_wiggle(ctx2)
         self.assertEqual(0, stats.exit_wiggle_c2)
         self.assertEqual([], stepper.moves)
+
+    def test_sample_collection_mode_skips_exit_wiggle(self) -> None:
+        stats = _RuntimeStats()
+        stepper = _Stepper()
+        station = _make_station(stats, stepper)
+
+        ctx1 = _make_wiggle_ctx(
+            now_mono=0.0,
+            ch2_exit_overlap=0.8,
+            ch3_dropzone_occupied=True,
+        )
+        ctx1.sample_collection_mode = True
+        station.run_exit_wiggle(ctx1)
+        ctx2 = _make_wiggle_ctx(
+            now_mono=1.0,
+            ch2_exit_overlap=0.8,
+            ch3_dropzone_occupied=True,
+        )
+        ctx2.sample_collection_mode = True
+        station.run_exit_wiggle(ctx2)
+
+        self.assertEqual(0, stats.exit_wiggle_c2)
+        self.assertEqual([], stepper.moves)
+
+    def test_sample_collection_mode_cancels_idle_separation(self) -> None:
+        stats = _RuntimeStats()
+        stepper = _Stepper()
+        separation = _SeparationDriver(active=True)
+        station = _make_station(stats, stepper, separation_driver=separation)
+        ctx = _make_idle_ctx(
+            detections=[_c2_detection(angle_deg=40.0), _c2_detection(angle_deg=45.0)],
+            now_mono=1.0,
+        )
+        ctx.ch2_action = ChannelAction.PULSE_NORMAL
+        ctx.sample_collection_mode = True
+
+        station.run_idle_strategies(ctx)
+
+        self.assertEqual(["sample collection mode"], separation.cancel_reasons)
+        self.assertEqual([], separation.step_calls)
 
 
 class C2IdleClusterGateTests(unittest.TestCase):

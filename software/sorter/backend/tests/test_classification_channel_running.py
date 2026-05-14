@@ -60,6 +60,9 @@ class _Stepper:
     def set_acceleration(self, acceleration: int) -> None:
         self.accelerations.append(int(acceleration))
 
+    def estimateMoveDegreesMs(self, degrees: float) -> float:
+        return 123.0
+
 
 class _Transport:
     def __init__(self) -> None:
@@ -99,6 +102,7 @@ class _Shared:
     def __init__(self) -> None:
         self.classification_gate_calls: list[tuple[bool, str | None]] = []
         self.distribution_ready = True
+        self.sample_collection_mode = False
 
     def set_classification_gate(self, open: bool, reason: str | None = None) -> None:
         self.classification_gate_calls.append((bool(open), reason))
@@ -116,6 +120,23 @@ class _EventQueue:
 
     def put(self, item) -> None:
         self.items.append(item)
+
+
+class _Vision:
+    def __init__(self) -> None:
+        self.teacher_capture_calls: list[dict[str, object]] = []
+        self.empty_state_calls = 0
+        self.latest_crop_by_id: dict[int, dict[str, object]] = {}
+
+    def scheduleClassificationChannelTeacherCaptureAfterMove(self, **kwargs) -> None:
+        self.teacher_capture_calls.append(dict(kwargs))
+
+    def saveClassificationChannelEmptyStateCapture(self) -> bool:
+        self.empty_state_calls += 1
+        return True
+
+    def getLatestFeederTrackPieceCrop(self, global_id: int):
+        return self.latest_crop_by_id.get(int(global_id))
 
 
 def _make_running() -> tuple[Running, _Transport, _Shared, _EventQueue]:
@@ -296,6 +317,47 @@ def test_running_fires_recognition_for_oldest_pending_piece() -> None:
     assert older_piece.carousel_snapping_started_at == 10.0
     assert older_piece.carousel_snapping_completed_at == 10.0
     assert younger_piece.carousel_snapping_started_at is None
+
+
+def test_running_refreshes_latest_captured_crop_from_tracker() -> None:
+    running, transport, _shared, events = _make_running()
+    vision = _Vision()
+    vision.latest_crop_by_id[41] = {
+        "jpeg_b64": "crop-b64",
+        "captured_ts": 12.5,
+        "source_role": "carousel",
+    }
+    running.vision = vision
+    piece = KnownObject(
+        uuid="piece-crop",
+        tracked_global_id=41,
+        classification_status=ClassificationStatus.pending,
+    )
+    transport._pieces_by_track = {41: piece}
+
+    changed = running._refreshLatestCapturedCrop(piece, now_wall=13.0, emit=True)
+
+    assert changed is True
+    assert piece.latest_captured_crop == "crop-b64"
+    assert piece.latest_captured_crop_ts == 12.5
+    assert events.items[-1].data.latest_captured_crop == "crop-b64"
+
+
+def test_exit_release_candidate_includes_piece_after_center_crosses_exit_line() -> None:
+    running, transport, _shared, _events = _make_running()
+    running._config.exit_release_overlap_ratio = 0.95
+    piece = KnownObject(
+        uuid="piece-stuck",
+        tracked_global_id=55,
+        classification_status=ClassificationStatus.unknown,
+    )
+    piece.classification_channel_zone_center_deg = 51.5
+    piece.classification_channel_zone_half_width_deg = 4.0
+    transport._pieces_by_track = {55: piece}
+
+    assert running._pickExitReleaseCandidate() == "piece-stuck"
+    assert running._startExitReleaseShimmyIfNeeded("piece-stuck") is True
+    assert running.irl.carousel_stepper.moves == [1.5]
 
 
 def _make_running_with_carousel_gate(
@@ -562,6 +624,97 @@ def test_start_exit_release_shimmy_builds_small_returning_motion_plan() -> None:
     started = running._startExitReleaseShimmyIfNeeded(piece.uuid)
 
     assert started is True
-    assert running.irl.carousel_stepper.moves[:1] == [-1.5]
+    assert running.irl.carousel_stepper.moves[:1] == [1.5]
     assert running._exit_release_drop_uuid == piece.uuid
-    assert running._exit_release_plan_deg == [3.0, -1.5, -1.5, 3.0, -1.5]
+    assert running._exit_release_plan_deg == [-3.0, 1.5, 1.5, -3.0, 1.5]
+
+
+def test_sample_collection_mode_skips_exit_release_shimmy() -> None:
+    running, transport, shared, _events = _make_running()
+    shared.sample_collection_mode = True
+    piece = KnownObject(
+        uuid="piece-drop",
+        tracked_global_id=99,
+        classification_status=ClassificationStatus.classified,
+    )
+    piece.classification_channel_zone_center_deg = 30.0
+    piece.classification_channel_zone_half_width_deg = 12.0
+    transport._pieces_by_track = {99: piece}
+
+    started = running._startExitReleaseShimmyIfNeeded(piece.uuid)
+
+    assert started is False
+    assert running.irl.carousel_stepper.moves == []
+    assert running._exit_release_drop_uuid is None
+    assert running._exit_release_plan_deg == []
+
+
+def test_sample_collection_mode_aborts_existing_exit_release_plan() -> None:
+    running, _transport, shared, _events = _make_running()
+    shared.sample_collection_mode = True
+    running._exit_release_drop_uuid = "piece-drop"
+    running._exit_release_plan_deg = [-1.5, 3.0, -1.5]
+
+    advanced = running._advanceExitReleaseShimmy()
+
+    assert advanced is False
+    assert running.irl.carousel_stepper.moves == []
+    assert running._exit_release_drop_uuid == "piece-drop"
+    assert running._exit_release_plan_deg == []
+
+
+def test_sample_collection_mode_queues_c4_teacher_capture_after_pulse() -> None:
+    running, _transport, shared, _events = _make_running()
+    vision = _Vision()
+    running.vision = vision
+    shared.sample_collection_mode = True
+
+    sent = running._sendPulse(None)
+
+    assert sent is True
+    assert len(vision.teacher_capture_calls) == 1
+    assert vision.teacher_capture_calls[0]["move_label"] == "sample_c4_pulse"
+    assert vision.teacher_capture_calls[0]["pulse_degrees"] == 9.0
+    assert vision.teacher_capture_calls[0]["delay_s"] == 0.123
+
+
+def test_normal_mode_does_not_queue_c4_teacher_capture_after_pulse() -> None:
+    running, _transport, _shared, _events = _make_running()
+    vision = _Vision()
+    running.vision = vision
+
+    sent = running._sendPulse(None)
+
+    assert sent is True
+    assert vision.teacher_capture_calls == []
+
+
+def test_sample_collection_mode_archives_empty_state_when_c4_is_empty() -> None:
+    running, _transport, shared, _events = _make_running()
+    vision = _Vision()
+    running.vision = vision
+    shared.sample_collection_mode = True
+
+    running._maybeCaptureSampleModeEmptyState([], [], now_mono=10.0)
+    running._maybeCaptureSampleModeEmptyState([], [], now_mono=11.0)
+    running._maybeCaptureSampleModeEmptyState([], [], now_mono=16.0)
+
+    assert vision.empty_state_calls == 2
+
+
+def test_sample_collection_mode_does_not_archive_empty_state_with_tracks() -> None:
+    running, _transport, shared, _events = _make_running()
+    vision = _Vision()
+    running.vision = vision
+    shared.sample_collection_mode = True
+    track = TrackAngularExtent(
+        global_id=41,
+        center_deg=2.0,
+        half_width_deg=6.0,
+        last_seen_ts=1.0,
+        hit_count=3,
+    )
+
+    running._maybeCaptureSampleModeEmptyState([track], [], now_mono=10.0)
+
+    assert vision.empty_state_calls == 0

@@ -7,7 +7,6 @@
 	import { WifiOff, Loader2, VideoOff } from 'lucide-svelte';
 
 	type ControlKey = 'annotations' | 'color' | 'crop' | 'zones' | 'fullscreen';
-	type FeedSource = 'ws' | 'mjpeg';
 
 	let {
 		camera,
@@ -22,7 +21,6 @@
 		defaultCropped = undefined,
 		defaultZones = true,
 		controls = ['annotations'],
-		source = 'mjpeg',
 		layer = $bindable('annotated')
 	}: {
 		camera: string;
@@ -37,7 +35,6 @@
 		defaultCropped?: boolean;
 		defaultZones?: boolean;
 		controls?: ControlKey[];
-		source?: FeedSource;
 		layer?: 'raw' | 'annotated';
 	} = $props();
 
@@ -109,6 +106,7 @@
 	const showCrop = $derived(controls.includes('crop'));
 	const showZones = $derived(controls.includes('zones'));
 	const showFullscreen = $derived(controls.includes('fullscreen'));
+	const effectiveZones = $derived(showZones ? zones : defaultZones);
 
 	let fullscreenOpen = $state(false);
 
@@ -119,20 +117,8 @@
 	}
 
 	const mjpeg_src = $derived(
-		`${effectiveBaseUrl()}/api/cameras/feed/${camera}?annotated=${annotated}&color_correct=${colorCorrect}&dashboard=${cropped}&show_regions=${zones}&_=${mountId}`
+		`${effectiveBaseUrl()}/api/cameras/feed/${camera}?annotated=${annotated}&color_correct=${colorCorrect}&dashboard=${cropped}&show_regions=${effectiveZones}&_=${mountId}`
 	);
-
-	// WS source reads the latest FrameData from the machine context and emits a
-	// data:image URL. One shared WS connection feeds all cameras → no per-camera
-	// HTTP slot is consumed, so the 6-connection-per-origin browser limit stops
-	// biting when four CameraFeeds render side-by-side on the dashboard.
-	const ws_frame = $derived(ctx.machine?.frames.get(camera as any));
-	const ws_src = $derived.by(() => {
-		const frame = ws_frame;
-		if (!frame) return '';
-		const payload = annotated && frame.annotated ? frame.annotated : frame.raw;
-		return payload ? `data:image/jpeg;base64,${payload}` : '';
-	});
 
 	const health = $derived(ctx.cameraHealth.get(camera) ?? 'online');
 	const is_healthy = $derived(health === 'online');
@@ -155,45 +141,12 @@
 		</div>
 	{/if}
 	<div class={`relative flex-1 overflow-hidden ${showOverlay ? 'bg-[#04070B]' : 'setup-card-body'}`}>
-		{#if source === 'ws'}
-			{#if cropped && crop}
-				{@const box = crop.viewBox}
-				{@const rc = crop.rotationCenter ?? [box.x + box.width / 2, box.y + box.height / 2]}
-				{@const rot = crop.rotationDeg ?? 0}
-				<svg
-					viewBox="{box.x} {box.y} {box.width} {box.height}"
-					preserveAspectRatio="xMidYMid meet"
-					class="absolute inset-0 h-full w-full"
-					class:opacity-30={!is_healthy}
-					aria-label={display_label}
-				>
-					<g transform="rotate({rot} {rc[0]} {rc[1]})">
-						<image
-							href={ws_src}
-							x="0"
-							y="0"
-							width={crop.sourceWidth}
-							height={crop.sourceHeight}
-							preserveAspectRatio="none"
-						/>
-					</g>
-				</svg>
-			{:else}
-				<img
-					src={ws_src}
-					alt={display_label}
-					class="absolute inset-0 h-full w-full object-contain"
-					class:opacity-30={!is_healthy}
-				/>
-			{/if}
-		{:else}
-			<img
-				use:mjpegStream={mjpeg_src}
-				alt={display_label}
-				class="absolute inset-0 h-full w-full object-contain"
-				class:opacity-30={!is_healthy}
-			/>
-		{/if}
+		<img
+			use:mjpegStream={mjpeg_src}
+			alt={display_label}
+			class="absolute inset-0 h-full w-full object-contain"
+			class:opacity-30={!is_healthy}
+		/>
 
 		{#if !is_healthy}
 			<div class="absolute inset-0 flex items-center justify-center">

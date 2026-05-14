@@ -152,7 +152,7 @@ def vastai_group() -> None:
 @vastai_group.command("package")
 @click.option("--zone", required=True)
 @click.option("--name", "dataset_name", default="v1", help="Dataset subdir under datasets/<zone>/")
-@click.option("--track", type=click.Choice(["yolo", "nanodet"]), default="yolo")
+@click.option("--track", type=click.Choice(["yolo", "nanodet", "rfdetr"]), default="yolo")
 @click.option("--model-ids", multiple=True, help="Optional track-script model IDs (e.g. A3 A5)")
 @click.option("--output", default=None, type=click.Path(), help="Target tarball path")
 def vastai_package(
@@ -190,7 +190,7 @@ def vastai_offers(query: str | None, order: str, limit: int) -> None:
 @vastai_group.command("fetch")
 @click.option("--instance", "instance_id", required=True, help="Vast.ai instance id")
 @click.option("--zone", required=True)
-@click.option("--track", type=click.Choice(["yolo", "nanodet"]), default="yolo")
+@click.option("--track", type=click.Choice(["yolo", "nanodet", "rfdetr"]), default="yolo")
 @click.option("--dataset-name", default=None)
 @click.option("--remote-dir", default="/workspace/results")
 def vastai_fetch(

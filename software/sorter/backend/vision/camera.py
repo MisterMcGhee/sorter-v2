@@ -647,7 +647,9 @@ class CaptureThread:
                 self._config.height = height
             if isinstance(fps, int) and fps > 0:
                 self._config.fps = fps
-            if isinstance(fourcc, str) and fourcc.strip():
+            if fourcc is None:
+                self._config.fourcc = None
+            elif isinstance(fourcc, str) and fourcc.strip():
                 self._config.fourcc = fourcc.strip()
         self._reopen_event.set()
 

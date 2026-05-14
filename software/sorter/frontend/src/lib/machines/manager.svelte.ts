@@ -1,7 +1,5 @@
 import type {
 	SocketEvent,
-	CameraName,
-	FrameData,
 	KnownObjectData,
 	CameraHealthData,
 	SystemStatusData,
@@ -12,7 +10,6 @@ import type {
 import type { MachineState, MachineIdentity } from './types';
 import {
 	isIdentityEvent,
-	isFrameEvent,
 	isHeartbeatEvent,
 	isKnownObjectEvent,
 	isCameraHealthEvent,
@@ -25,27 +22,71 @@ import {
 
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30000;
+const RECENT_OBJECT_BUFFER_LIMIT = 32;
+const RECENT_OBJECT_REMOVAL_GRACE_MS = 1500;
+
+function newerCapturedCrop(
+	existing: KnownObjectData | undefined,
+	incoming: KnownObjectData
+): Pick<KnownObjectData, 'latest_captured_crop' | 'latest_captured_crop_ts'> {
+	const incoming_ts = incoming.latest_captured_crop_ts;
+	const existing_ts = existing?.latest_captured_crop_ts;
+	if (
+		incoming.latest_captured_crop &&
+		((typeof incoming_ts === 'number' && (existing_ts == null || incoming_ts >= existing_ts)) ||
+			!existing?.latest_captured_crop)
+	) {
+		return {
+			latest_captured_crop: incoming.latest_captured_crop,
+			latest_captured_crop_ts: incoming_ts ?? existing_ts ?? null
+		};
+	}
+	return {
+		latest_captured_crop: existing?.latest_captured_crop ?? incoming.latest_captured_crop,
+		latest_captured_crop_ts: existing_ts ?? incoming_ts
+	};
+}
+
+function mergeKnownObject(existing: KnownObjectData | undefined, incoming: KnownObjectData): KnownObjectData {
+	if (!existing) return incoming;
+	const captured_crop = newerCapturedCrop(existing, incoming);
+	return {
+		...existing,
+		...incoming,
+		first_carousel_seen_ts: incoming.first_carousel_seen_ts ?? existing.first_carousel_seen_ts,
+		first_carousel_seen_angle_deg:
+			incoming.first_carousel_seen_angle_deg ?? existing.first_carousel_seen_angle_deg,
+		classification_channel_zone_state:
+			incoming.classification_channel_zone_state ?? existing.classification_channel_zone_state,
+		classification_channel_zone_center_deg:
+			incoming.classification_channel_zone_center_deg ??
+			existing.classification_channel_zone_center_deg,
+		classification_channel_zone_half_width_deg:
+			incoming.classification_channel_zone_half_width_deg ??
+			existing.classification_channel_zone_half_width_deg,
+		classification_channel_exit_offset_deg:
+			incoming.classification_channel_exit_offset_deg ??
+			existing.classification_channel_exit_offset_deg,
+		...captured_crop,
+		thumbnail: incoming.thumbnail ?? existing.thumbnail,
+		top_image: incoming.top_image ?? existing.top_image,
+		bottom_image: incoming.bottom_image ?? existing.bottom_image,
+		drop_snapshot: incoming.drop_snapshot ?? existing.drop_snapshot,
+		brickognize_preview_url: incoming.brickognize_preview_url ?? existing.brickognize_preview_url,
+		brickognize_source_view: incoming.brickognize_source_view ?? existing.brickognize_source_view,
+		recognition_used_crop_ts:
+			incoming.recognition_used_crop_ts?.length ? incoming.recognition_used_crop_ts : existing.recognition_used_crop_ts
+	};
+}
 
 function shouldKeepRecentObject(obj: KnownObjectData): boolean {
-	const hasLocalPreview = Boolean(obj.thumbnail || obj.top_image || obj.bottom_image);
-	if (obj.stage !== 'created') return true;
-	if (obj.classification_status !== 'pending') {
-		if (
-			obj.classification_status === 'unknown' ||
-			obj.classification_status === 'not_found' ||
-			obj.classification_status === 'multi_drop_fail'
-		) {
-			return hasLocalPreview || Boolean(obj.carousel_snapping_started_at);
-		}
-		return true;
-	}
-	return Boolean(
-		obj.carousel_snapping_started_at ||
-			obj.carousel_snapping_completed_at ||
-			obj.classified_at ||
-			obj.part_id ||
-			hasLocalPreview
-	);
+	// Recent Pieces is a C4-only view: a piece enters the list when it is
+	// first observed on the classification channel and stays until it is
+	// distributed. `first_carousel_seen_ts` is set by piece_transport.py
+	// the first tick a polar-tracker zone reports this piece on the
+	// carousel, so it's the canonical "this piece is on / has been on C4"
+	// signal. Pieces still on C2/C3 lack this stamp and are excluded.
+	return obj.first_carousel_seen_ts != null;
 }
 
 export class MachineManager {
@@ -54,6 +95,7 @@ export class MachineManager {
 	private pending_connections = new Map<WebSocket, string>();
 	private reconnect_attempts = new Map<string, number>();
 	private reconnect_timers = new Map<string, ReturnType<typeof setTimeout>>();
+	private recent_removal_timers = new Map<string, ReturnType<typeof setTimeout>>();
 	private manually_disconnected = new Set<string>();
 
 	selectedMachine = $derived.by(() => {
@@ -131,6 +173,7 @@ export class MachineManager {
 	disconnect(machineId: string): void {
 		const machine = this.machines.get(machineId);
 		if (machine) {
+			this.clearRecentRemovalTimersForMachine(machineId);
 			const url = this.findUrlBySocket(machine.connection);
 			if (url) {
 				this.manually_disconnected.add(url);
@@ -172,9 +215,7 @@ export class MachineManager {
 				return;
 			}
 
-			if (isFrameEvent(event)) {
-				this.handleFrame(machineId, event.data);
-			} else if (isHeartbeatEvent(event)) {
+			if (isHeartbeatEvent(event)) {
 				this.handleHeartbeat(machineId, event.data.timestamp);
 			} else if (isKnownObjectEvent(event)) {
 				this.handleKnownObject(machineId, event.data);
@@ -209,7 +250,6 @@ export class MachineManager {
 			connection: ws,
 			url: url ?? existing?.url ?? null,
 			status: 'connected',
-			frames: existing?.frames ?? new Map(),
 			cameraHealth: existing?.cameraHealth ?? new Map(),
 			lastHeartbeat: null,
 			recentObjects: existing?.recentObjects ?? [],
@@ -232,24 +272,6 @@ export class MachineManager {
 		console.log(`[MachineManager] Machine identified: ${identity.machine_id}`);
 	}
 
-	private handleFrame(machineId: string, frame: FrameData): void {
-		const machine = this.machines.get(machineId);
-		if (!machine) return;
-
-		const updated_frames = new Map();
-		updated_frames.set(frame.camera, frame);
-
-		for (const [camera, existingFrame] of machine.frames) {
-			if (camera !== frame.camera) {
-				updated_frames.set(camera, existingFrame);
-			}
-		}
-
-		const updated = new Map(this.machines);
-		updated.set(machineId, { ...machine, frames: updated_frames });
-		this.machines = updated;
-	}
-
 	private handleHeartbeat(machineId: string, timestamp: number): void {
 		const machine = this.machines.get(machineId);
 		if (!machine) return;
@@ -264,18 +286,23 @@ export class MachineManager {
 		if (!machine) return;
 
 		const existing_idx = machine.recentObjects.findIndex((o) => o.uuid === obj.uuid);
-		const keep = shouldKeepRecentObject(obj);
+		const existing_obj = existing_idx >= 0 ? machine.recentObjects[existing_idx] : undefined;
+		const merged_obj = mergeKnownObject(existing_obj, obj);
+		const keep = shouldKeepRecentObject(merged_obj);
 		let updated_objects: KnownObjectData[];
 
 		if (existing_idx >= 0) {
 			updated_objects = [...machine.recentObjects];
 			if (keep) {
-				updated_objects[existing_idx] = obj;
+				this.clearRecentRemovalTimer(machineId, merged_obj.uuid);
+				updated_objects[existing_idx] = merged_obj;
 			} else {
-				updated_objects.splice(existing_idx, 1);
+				this.scheduleRecentRemoval(machineId, merged_obj.uuid);
+				return;
 			}
 		} else if (keep) {
-			updated_objects = [obj, ...machine.recentObjects].slice(0, 10);
+			this.clearRecentRemovalTimer(machineId, merged_obj.uuid);
+			updated_objects = [merged_obj, ...machine.recentObjects].slice(0, RECENT_OBJECT_BUFFER_LIMIT);
 		} else {
 			return;
 		}
@@ -283,6 +310,45 @@ export class MachineManager {
 		const updated = new Map(this.machines);
 		updated.set(machineId, { ...machine, recentObjects: updated_objects });
 		this.machines = updated;
+	}
+
+	private recentRemovalKey(machineId: string, uuid: string): string {
+		return `${machineId}:${uuid}`;
+	}
+
+	private clearRecentRemovalTimer(machineId: string, uuid: string): void {
+		const key = this.recentRemovalKey(machineId, uuid);
+		const timer = this.recent_removal_timers.get(key);
+		if (!timer) return;
+		clearTimeout(timer);
+		this.recent_removal_timers.delete(key);
+	}
+
+	private clearRecentRemovalTimersForMachine(machineId: string): void {
+		for (const [key, timer] of this.recent_removal_timers) {
+			if (!key.startsWith(`${machineId}:`)) continue;
+			clearTimeout(timer);
+			this.recent_removal_timers.delete(key);
+		}
+	}
+
+	private scheduleRecentRemoval(machineId: string, uuid: string): void {
+		const key = this.recentRemovalKey(machineId, uuid);
+		if (this.recent_removal_timers.has(key)) return;
+		const timer = setTimeout(() => {
+			this.recent_removal_timers.delete(key);
+			const machine = this.machines.get(machineId);
+			if (!machine) return;
+			const existing = machine.recentObjects.find((o) => o.uuid === uuid);
+			if (!existing || shouldKeepRecentObject(existing)) return;
+			const updated = new Map(this.machines);
+			updated.set(machineId, {
+				...machine,
+				recentObjects: machine.recentObjects.filter((o) => o.uuid !== uuid)
+			});
+			this.machines = updated;
+		}, RECENT_OBJECT_REMOVAL_GRACE_MS);
+		this.recent_removal_timers.set(key, timer);
 	}
 
 	private handleCameraHealth(machineId: string, data: CameraHealthData): void {
@@ -309,6 +375,9 @@ export class MachineManager {
 			data.hardware_state === 'homing' ||
 			(data.hardware_state === 'standby' &&
 				machine.systemStatus?.hardware_state !== 'standby');
+		if (shouldClearRecentObjects) {
+			this.clearRecentRemovalTimersForMachine(machineId);
+		}
 		const updated = new Map(this.machines);
 		updated.set(machineId, {
 			...machine,

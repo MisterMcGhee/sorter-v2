@@ -96,20 +96,11 @@ class ClassificationChannelZoneOverlay:
                 color=colors["body_line"],
                 thickness=1,
             )
-            if hard_collision or status in {"pending", "classifying", "unknown", "not_found", "multi_drop_fail"}:
-                self._draw_label(
-                    annotated,
-                    center=center,
-                    annulus_inner=annulus_inner,
-                    annulus_outer=annulus_outer,
-                    angle_deg=center_deg,
-                    text=self._zone_label(
-                        size_class=size_class,
-                        status=status,
-                        hard_collision=hard_collision,
-                    ),
-                    color=colors["body_line"],
-                )
+            # Per-piece size_class / status labels (e.g. "XL?", "L!", "Mx")
+            # are intentionally suppressed: they cluttered the outer rim
+            # without adding actionable info. State remains visible via
+            # piece colour (orange=pending, green=classified, red=multi-drop,
+            # ...) and the body-outline arc.
 
         return annotated
 

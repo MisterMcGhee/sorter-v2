@@ -125,6 +125,12 @@ def build_feeder_tracker_system(
             # The dedicated classification channel is especially sensitive to
             # static ghost boxes when the plate is empty. Be more aggressive
             # there, while leaving c_channel_2 / c_channel_3 unchanged.
+            # T12 tried max_age=0.5s to kill ghosts faster but the
+            # tighter window also killed legitimate freshly-born pieces
+            # before they accumulated enough crops, dropping cls/min below
+            # baseline. Reverted to 1.5 s. The persistent ghost is
+            # physical (something visible at ~43° on the platter); the
+            # right fix is at the operator end, not in the filter timing.
             tracker_kwargs.update(
                 enable_stagnant_false_track_filter=True,
                 stagnant_false_track_max_age_s=1.5,

@@ -141,6 +141,10 @@ class C2Station(BaseStation):
         prof = self.gc.profiler
         now = ctx.now_mono
 
+        if ctx.sample_collection_mode:
+            self._separation_driver.cancel("sample collection mode")
+            return
+
         if (
             self._agitation_enabled
             and not ctx.pulse_sent
@@ -195,6 +199,10 @@ class C2Station(BaseStation):
         prof = self.gc.profiler
         now = ctx.now_mono
         overlap = float(getattr(ctx.analysis, "ch2_exit_overlap_max", 0.0))
+
+        if ctx.sample_collection_mode:
+            self._exit_overlap_since_mono = None
+            return
 
         if overlap >= self._exit_wiggle_overlap_threshold:
             if self._exit_overlap_since_mono is None:

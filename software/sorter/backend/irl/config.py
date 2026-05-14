@@ -85,6 +85,74 @@ def _run_stepper_init_command_with_retry(
     return False
 
 
+def _require_stepper_halted_for_init(
+    gc: GlobalConfig,
+    stepper_name: str,
+    stepper,
+    *,
+    attempts: int = HARDWARE_INIT_COMMAND_ATTEMPTS,
+    retry_delay_s: float = HARDWARE_INIT_RETRY_DELAY_S,
+) -> None:
+    """Fail hardware init unless the stepper is left disabled and stopped.
+
+    A backend restart can create fresh Python stepper objects while the MCU
+    still remembers an old motion command. The first operation on every bound
+    stepper must therefore be a hard halt/cancel, before speed/current setup or
+    any later enable can re-arm stale firmware motion.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            halt = getattr(stepper, "halt", None)
+            if callable(halt):
+                if not bool(halt(disable_driver=True)):
+                    raise RuntimeError("halt() timed out or was not acknowledged")
+            else:
+                stepper.enabled = False
+            return
+        except (MCUBusError, OSError, DecodeError, RuntimeError) as exc:
+            last_exc = exc
+            if attempt < attempts:
+                gc.logger.warning(
+                    f"Failed to halt stepper '{stepper_name}' during hardware init "
+                    f"on attempt {attempt}/{attempts}: {exc}. Retrying in {retry_delay_s:.2f}s..."
+                )
+                time.sleep(retry_delay_s)
+                continue
+            break
+
+    raise RuntimeError(
+        f"Refusing hardware init: stepper '{stepper_name}' could not be halted safely"
+    ) from last_exc
+
+
+def _require_stepper_cancel_firmware(gc: GlobalConfig, control_boards) -> None:
+    unsafe_boards: list[str] = []
+    for board in control_boards:
+        interface = getattr(board, "interface", None)
+        supports_cancel = bool(getattr(interface, "supports_stepper_cancel", False))
+        if supports_cancel:
+            continue
+        identity = getattr(board, "identity", None)
+        if identity is None:
+            unsafe_boards.append("<unknown board>")
+            continue
+        unsafe_boards.append(
+            f"{identity.device_name} ({identity.port}:{identity.address}, role={identity.role})"
+        )
+
+    if not unsafe_boards:
+        return
+
+    boards = "; ".join(unsafe_boards)
+    message = (
+        "Unsafe SorterInterface firmware: missing stepper_cancel capability on "
+        f"{boards}. Flash the updated firmware before starting real hardware."
+    )
+    gc.logger.error(message)
+    raise RuntimeError(message)
+
+
 def save_servo_states(servos: list, gc: GlobalConfig) -> None:
     states = {}
     for i, servo in enumerate(servos):
@@ -332,11 +400,10 @@ class ClassificationChannelConfig:
         self.recognition_window_deg = 170.0
         self.positioning_window_deg = 48.0
         self.exit_release_overlap_ratio = 0.5
-        # Wobble dislodges sticky pieces. 1.5° × 2 cycles was too gentle —
-        # white / smooth-bottomed parts would ride past exit without ever
-        # falling. Increased to 3° amplitude × 3 cycles for a stronger
-        # back-forward-back jerk; speed / acceleration unchanged so the
-        # neighbour-piece does not get flung forward into its own drop.
+        # T18 reverted: 5°×5 at 5200 µsteps/s collapsed fire rate
+        # (~2 fires/min vs T17's 4.7) — the long shimmy locked the
+        # step() loop and pieces in the chamber never reached
+        # _fireRecognition. Back to the T17 baseline.
         self.exit_release_shimmy_amplitude_deg = 3.0
         self.exit_release_shimmy_cycles = 3
         self.exit_release_shimmy_microsteps_per_second = 4200
@@ -357,11 +424,12 @@ class ClassificationChannelConfig:
         # recognizer may fire for a piece. Prevents recognition from
         # committing using only c_channel_2/c_channel_3 history (which, if
         # misbound, can belong to a different piece still upstream).
-        # Raised 1 → 5 per operator directive: trav5 A/B campaign showed
-        # firing on a single early crop produced empty Brickognize results
-        # (~48% of extra fires). 5 carousel-source crops gives Brickognize
-        # multiple viewing angles per piece — the higher fire-quality trade
-        # is preferred over more low-quality fires.
+        # Reverted to 5 in T11: T8 / T10 with min_crops=3 catastrophically
+        # increased ghost fires (a static platter feature at angle ~44°
+        # gets re-detected each frame and trivially clears 3 crops within
+        # the 1.2 s free-fall burst window where every sector_snapshot is
+        # captured). Net result: 5-6 fires/min of which 80 % returned
+        # bk_empty. Sticking with 5 keeps T7 throughput (median 3.54).
         self.min_carousel_crops_for_recognize = 5
         # Minimum elapsed time since the piece's first carousel-source
         # observation before recognition may fire. Guards against a
@@ -379,10 +447,12 @@ class ClassificationChannelConfig:
         # carousel rotates fast; this ensures the piece has physically
         # rotated enough to present multiple sides to the C4 camera, so the
         # accumulated crops cover meaningfully different viewpoints.
-        # Dropped to 0 in T3: like min_carousel_dwell_ms above, the
-        # traversal gate was a defence against ghost upstream crops.
-        # Carousel-only filter + min_crops=5 + free-fall burst already
-        # ensure the accumulated crops cover multiple orientations.
+        # Reverted to 0.0 after T14 (8° killed all fires) and T15 (4°
+        # killed all fires). Real pieces apparently don't accumulate
+        # enough angular displacement BEFORE recognition needs to fire,
+        # at least not measured at zone.center_deg granularity. The
+        # ghost-fire-blocking benefit doesn't materialize; T7's 0°
+        # setting still produces the best median (3.54).
         self.min_carousel_traversal_deg = 0.0
         self.size_downgrade_confirmations = 3
         # Leader-wins drop policy: when the drop candidate has an interferer
@@ -390,7 +460,7 @@ class ClassificationChannelConfig:
         # ``multi_drop_fail`` if the interferer is strictly trailing (hasn't
         # reached drop yet). Spares the trailer so it can take its own drop
         # cycle next rotation instead of being discarded with the leader.
-        self.leader_wins_policy = True
+        self.leader_wins_policy = False
         # When True, the spare-the-trailer path only activates if the leader
         # already has a part_id (i.e. status == classified). Keeps the old
         # "both fail" behavior for pending/classifying leaders where the
@@ -466,19 +536,23 @@ class FeederConfig:
             microsteps_per_second=2500,
             delay_between_ms=1000,
         )
+        # C3→C4 speed ratio: C4 ~40-50% faster than C3 so pieces don't
+        # accumulate on the carousel. Both kept slow overall — fast C4
+        # confused the upstream coupling (C2 backspin observed at 5000+).
+        # C3=2500, C4=3600 → C4 is ~44% faster than C3.
         self.third_rotor_normal = RotorPulseConfig(
             steps=1000,
-            microsteps_per_second=5000,
+            microsteps_per_second=2500,
             delay_between_ms=250,
         )
         self.third_rotor_precision = RotorPulseConfig(
             steps=300,
-            microsteps_per_second=3000,
+            microsteps_per_second=1600,
             delay_between_ms=1000,
         )
         self.classification_channel_eject = RotorPulseConfig(
             steps=1000,
-            microsteps_per_second=3400,
+            microsteps_per_second=3600,
             # 400 ms inter-pulse is the keeper. T2d tested 800 ms and
             # cls/min DROPPED to ~1 instead of rising — upstream blocking
             # (``classification_channel_occupied`` reasons exploded) dragged
@@ -569,16 +643,27 @@ class IRLInterface:
                 getattr(self, attr).enabled = True
 
     def disableSteppers(self) -> None:
+        seen: set[int] = set()
         for stepper_name in [
             "c_channel_1_rotor",
             "c_channel_2_rotor",
             "c_channel_3_rotor",
+            "c_channel_4_rotor",
             "carousel",
             "chute",
         ]:
             attr = f"{stepper_name}_stepper"
             if hasattr(self, attr):
-                getattr(self, attr).enabled = False
+                stepper = getattr(self, attr)
+                identity = id(stepper)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                halt = getattr(stepper, "halt", None)
+                if callable(halt):
+                    halt(disable_driver=True)
+                else:
+                    stepper.enabled = False
 
     def shutdown(self) -> None:
         if self.servo_controller is not None and hasattr(self.servo_controller, "shutdown"):
@@ -1176,6 +1261,7 @@ def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
         attempts=HARDWARE_DISCOVERY_ATTEMPTS,
         retry_delay_s=HARDWARE_DISCOVERY_RETRY_DELAY_S,
     )
+    _require_stepper_cancel_firmware(gc, control_boards)
     irl_interface.interfaces = {
         board.interface.name: board.interface for board in control_boards
     }
@@ -1250,6 +1336,7 @@ def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
         stepper_config: StepperConfig | None = getattr(config, attr, None)
         stepper.set_hardware_name(physical_name)
         stepper.set_name(attr_base)
+        _require_stepper_halted_for_init(gc, attr_base, stepper)
         if stepper_config is not None:
             microsteps = stepper_config.microsteps
             default_steps_per_second = stepper_config.default_steps_per_second

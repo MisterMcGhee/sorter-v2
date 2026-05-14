@@ -425,6 +425,17 @@ class PolarFeederTracker(Tracker):
         with self._lock:
             self._pending_drop_ids[int(global_id)] = now + duration
 
+    def unmark_pending_drop(self, global_id: int) -> None:
+        """Release a previously-set pending-drop protection. Called when a
+        piece backed by this track flips to a non-pending terminal state
+        (``unknown`` / ``multi_drop_fail``); if the underlying track was
+        actually a ghost (static feature on the platter), removing the
+        protection lets the stagnant-false-track filter purge it instead
+        of letting it survive each drop pulse and re-spawn.
+        """
+        with self._lock:
+            self._pending_drop_ids.pop(int(global_id), None)
+
     def update(
         self,
         bboxes: list[tuple[int, int, int, int]],

@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
+
 from server import shared_state
 from server.routers import cameras
 
@@ -27,7 +29,12 @@ def test_dashboard_crop_uses_c2_channel_resolution_metadata() -> None:
     with patch("server.routers.cameras.getChannelPolygons", return_value=saved):
         spec = cameras._dashboard_crop_spec("c_channel_2", 800, 800)
 
-    assert spec == {"kind": "bbox", "bbox": (144, 144, 656, 656)}
+    assert spec is not None
+    assert spec["kind"] == "bbox_masked"
+    np.testing.assert_allclose(
+        spec["polygons"][0],
+        np.array([[200, 200], [600, 200], [600, 600], [200, 600]], dtype=np.float32),
+    )
 
 
 def test_dashboard_crop_uses_c3_channel_resolution_metadata() -> None:
@@ -44,7 +51,12 @@ def test_dashboard_crop_uses_c3_channel_resolution_metadata() -> None:
     with patch("server.routers.cameras.getChannelPolygons", return_value=saved):
         spec = cameras._dashboard_crop_spec("c_channel_3", 800, 800)
 
-    assert spec == {"kind": "bbox", "bbox": (52, 52, 348, 348)}
+    assert spec is not None
+    assert spec["kind"] == "bbox_masked"
+    np.testing.assert_allclose(
+        spec["polygons"][0],
+        np.array([[100, 100], [300, 100], [300, 300], [100, 300]], dtype=np.float32),
+    )
 
 
 def test_dashboard_crop_uses_c4_classification_channel_resolution_metadata() -> None:
@@ -65,7 +77,28 @@ def test_dashboard_crop_uses_c4_classification_channel_resolution_metadata() -> 
     finally:
         shared_state.vision_manager = old_vm
 
-    assert spec == {"kind": "bbox", "bbox": (144, 144, 656, 656)}
+    assert spec is not None
+    assert spec["kind"] == "bbox_masked"
+    np.testing.assert_allclose(
+        spec["polygons"][0],
+        np.array([[200, 200], [600, 200], [600, 600], [200, 600]], dtype=np.float32),
+    )
+
+
+def test_dashboard_masked_crop_hides_pixels_outside_polygon() -> None:
+    frame = np.full((8, 8, 3), 100, dtype=np.uint8)
+    spec = {
+        "kind": "bbox_masked",
+        "polygons": [
+            np.array([[2, 2], [6, 2], [2, 6]], dtype=np.float32),
+        ],
+    }
+
+    cropped = cameras._apply_dashboard_crop(frame, spec)
+
+    assert cropped.shape == (4, 4, 3)
+    assert cropped[0, 0].tolist() == [100, 100, 100]
+    assert cropped[3, 3].tolist() == [0, 0, 0]
 
 
 def test_dashboard_classification_crop_uses_per_camera_quad_resolution() -> None:

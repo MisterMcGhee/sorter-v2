@@ -134,6 +134,10 @@ def _camera_source_for_role(config: Dict[str, Any], role: str) -> int | str | No
             source = _normalized_source(cameras.get("carousel"))
             if source is not None:
                 return source
+        if role == "carousel":
+            source = _normalized_source(cameras.get("classification_channel"))
+            if source is not None:
+                return source
 
     if role in {"feeder", "classification_top", "classification_bottom"}:
         camera_setup = getCameraSetup()
@@ -588,13 +592,28 @@ def _active_camera_indices() -> dict[int, tuple[int, int]]:
     return result
 
 
+def _is_ignored_camera_name(name: str) -> bool:
+    normalized = " ".join(str(name or "").replace("\u00a0", " ").casefold().split())
+    if not normalized:
+        return False
+    if "macbook" in normalized and ("camera" in normalized or "kamera" in normalized):
+        return True
+    if normalized in {"facetime hd camera", "built-in retina camera"}:
+        return True
+    return False
+
+
 def _list_usb_cameras() -> List[Dict[str, Any]]:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     active = _active_camera_indices()
 
     if platform.system() == "Darwin":
-        enumerated = list(refresh_macos_cameras())
+        enumerated = [
+            camera
+            for camera in refresh_macos_cameras()
+            if not _is_ignored_camera_name(str(camera.name))
+        ]
         if enumerated:
             indices_to_probe = [
                 int(c.index) for c in enumerated if int(c.index) not in active
@@ -3453,6 +3472,33 @@ def _dashboard_padded_bbox(
     return (x1, y1, x2, y2)
 
 
+def _dashboard_masked_polygons_crop(
+    frame: np.ndarray,
+    polygons: list[np.ndarray],
+) -> np.ndarray | None:
+    valid = [polygon for polygon in polygons if len(polygon) >= 3]
+    if not valid:
+        return None
+
+    frame_h, frame_w = frame.shape[:2]
+    merged = np.concatenate(valid, axis=0)
+    x1 = max(0, int(np.floor(float(np.min(merged[:, 0])))))
+    y1 = max(0, int(np.floor(float(np.min(merged[:, 1])))))
+    x2 = min(frame_w, int(np.ceil(float(np.max(merged[:, 0])))))
+    y2 = min(frame_h, int(np.ceil(float(np.max(merged[:, 1])))))
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    crop = np.ascontiguousarray(frame[y1:y2, x1:x2])
+    mask = np.zeros(crop.shape[:2], dtype=np.uint8)
+    for polygon in valid:
+        points = np.round(polygon).astype(np.int32).copy()
+        points[:, 0] -= x1
+        points[:, 1] -= y1
+        cv2.fillPoly(mask, [points], 255)
+    return np.ascontiguousarray(cv2.bitwise_and(crop, crop, mask=mask))
+
+
 def _dashboard_expand_quad(quad: np.ndarray) -> np.ndarray:
     # Expand the quad along its *own* local axes (width direction = u, height
     # direction = v) rather than radially from the centroid. Radial expansion
@@ -3566,8 +3612,9 @@ def _dashboard_crop_spec(role: str, frame_w: int, frame_h: int) -> Dict[str, Any
             ]
             if scaled is not None
         ]
-        bbox = _dashboard_padded_bbox(scaled_polygons, frame_w, frame_h)
-        return {"kind": "bbox", "bbox": bbox} if bbox is not None else None
+        if not scaled_polygons:
+            return None
+        return {"kind": "bbox_masked", "polygons": scaled_polygons}
 
     if role in {"classification_top", "classification_bottom"}:
         saved = getClassificationPolygons() or {}
@@ -3643,6 +3690,13 @@ def _apply_dashboard_crop(frame: np.ndarray, spec: Dict[str, Any] | None) -> np.
             flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_REPLICATE,
         )
+    elif spec.get("kind") == "bbox_masked":
+        polygons = spec.get("polygons")
+        if not isinstance(polygons, list):
+            return frame
+        processed = _dashboard_masked_polygons_crop(frame, polygons)
+        if processed is None:
+            return frame
     else:
         bbox = spec.get("bbox")
         if not isinstance(bbox, tuple) or len(bbox) != 4:
@@ -3691,18 +3745,35 @@ def camera_feed_by_role(
         direct = True
 
     _, raw = _read_machine_params_config(require_exists=True)
-    cameras_section = raw.get("cameras", {})
-    picture_settings = parseCameraPictureSettings(_get_picture_settings_table(raw).get(role))
-    color_profile = parseCameraColorProfile(_get_camera_color_profile_table(raw).get(role))
+    cameras_section = raw.get("cameras", {}) if isinstance(raw.get("cameras"), dict) else {}
+    config_role = role
+    if (
+        role == "carousel"
+        and cameras_section.get("carousel") is None
+        and cameras_section.get("classification_channel") is not None
+    ):
+        config_role = "classification_channel"
+    elif (
+        role == "classification_channel"
+        and cameras_section.get("classification_channel") is None
+        and cameras_section.get("carousel") is not None
+    ):
+        config_role = "carousel"
+
+    picture_settings = parseCameraPictureSettings(_get_picture_settings_table(raw).get(config_role))
+    color_profile = parseCameraColorProfile(_get_camera_color_profile_table(raw).get(config_role))
     saved_device_settings = parseCameraDeviceSettings(
-        _get_camera_device_settings_table(raw).get(role)
+        _get_camera_device_settings_table(raw).get(config_role)
     )
-    preview_device_settings = shared_state.camera_device_preview_overrides.get(role)
+    preview_device_settings = (
+        shared_state.camera_device_preview_overrides.get(role)
+        or shared_state.camera_device_preview_overrides.get(config_role)
+    )
     device_settings = cameraDeviceSettingsToDict(
         preview_device_settings if preview_device_settings is not None else saved_device_settings
     )
-    source = cameras_section.get(role)
-    if source is None or not isinstance(source, (int, str)):
+    source = _camera_source_for_role(raw, role)
+    if source is None:
         raise HTTPException(404, f"Camera role '{role}' not configured")
 
     encoder = MjpegOutput()
@@ -4265,32 +4336,6 @@ def _capture_modes_for_source(source: int | str | None) -> tuple[List[Dict[str, 
     if not isinstance(source, int):
         return [], "none"
 
-    if platform.system() == "Darwin":
-        try:
-            from hardware.macos_camera_modes import list_modes_for_unique_id
-            from hardware.macos_camera_registry import refresh_macos_cameras as _refresh
-
-            cam = next((c for c in _refresh() if c.index == source), None)
-            unique_id = cam.path if (cam is not None and isinstance(cam.path, str)) else None
-            if unique_id:
-                modes = list_modes_for_unique_id(unique_id)
-                return (
-                    [
-                        {
-                            "width": m.width,
-                            "height": m.height,
-                            "fps": int(round(m.max_fps)),
-                            "fourcc": _avf_to_opencv_fourcc(m.fourcc),
-                            "native_fourcc": m.fourcc,
-                        }
-                        for m in modes
-                    ],
-                    "avfoundation",
-                )
-        except Exception:
-            pass
-
-    # Fallback: probe common modes
     common = [
         (640, 480),
         (800, 600),
@@ -4304,22 +4349,57 @@ def _capture_modes_for_source(source: int | str | None) -> tuple[List[Dict[str, 
         (2592, 1944),
         (3840, 2160),
     ]
-    return (
-        [
-            {"width": w, "height": h, "fps": 30, "fourcc": "MJPG", "native_fourcc": "MJPG"}
-            for (w, h) in common
-        ],
-        "probe-fallback",
-    )
+    fallback_modes = [
+        {"width": w, "height": h, "fps": 30, "fourcc": "MJPG", "native_fourcc": "MJPG"}
+        for (w, h) in common
+    ]
+
+    if platform.system() == "Darwin":
+        try:
+            from hardware.macos_camera_modes import list_modes_for_unique_id
+            from hardware.macos_camera_registry import refresh_macos_cameras as _refresh
+
+            cam = next((c for c in _refresh() if c.index == source), None)
+            unique_id = cam.path if (cam is not None and isinstance(cam.path, str)) else None
+            if unique_id:
+                modes = list_modes_for_unique_id(unique_id)
+                if modes:
+                    return (
+                        [
+                            {
+                                "width": m.width,
+                                "height": m.height,
+                                "fps": int(round(m.max_fps)),
+                                "fourcc": _avf_to_opencv_fourcc(m.fourcc),
+                                "native_fourcc": m.fourcc,
+                            }
+                            for m in modes
+                        ],
+                        "avfoundation",
+                    )
+        except Exception:
+            pass
+
+    # Fallback: allow common USB modes when AVFoundation can't enumerate this
+    # camera's formats. Some UVC devices still stream fine even when the mode
+    # discovery API returns an empty format list.
+    return (fallback_modes, "probe-fallback")
 
 
-def _avf_to_opencv_fourcc(native: str) -> str:
-    """AVFoundation subtype → OpenCV fourcc hint. 420v/420f/yuvs → MJPG (USB cams compress)."""
-    native = (native or "").strip()
-    if native in {"420v", "420f", "yuvs", "YUY2", "YUYV", "MJPG"}:
-        # Prefer MJPG for maximum FPS at high res on USB UVC cams
+def _avf_to_opencv_fourcc(native: str) -> str | None:
+    """AVFoundation subtype -> optional OpenCV fourcc hint.
+
+    AVFoundation often reports uncompressed pixel formats such as ``420v``.
+    Forcing those to ``MJPG`` can make OpenCV open the device but never
+    deliver frames on cameras like the Logitech StreamCam, so only return a
+    hint for real compressed/native OpenCV-style formats.
+    """
+    normalized = (native or "").strip().upper()
+    if normalized in {"MJPG", "MJPEG"}:
         return "MJPG"
-    return "MJPG"
+    if normalized in {"YUY2", "YUYV"}:
+        return "YUYV"
+    return None
 
 
 class CaptureModePayload(BaseModel):
@@ -4424,9 +4504,12 @@ def save_camera_capture_mode(role: str, payload: CaptureModePayload) -> Dict[str
         )
 
     fps = int(payload.fps) if payload.fps else int(mode_match["fps"])
-    fourcc = (payload.fourcc or mode_match["fourcc"] or "MJPG").upper()[:4]
+    raw_fourcc = payload.fourcc if payload.fourcc is not None else mode_match.get("fourcc")
+    fourcc = raw_fourcc.strip().upper()[:4] if isinstance(raw_fourcc, str) and raw_fourcc.strip() else None
 
-    entry = {"width": int(payload.width), "height": int(payload.height), "fps": fps, "fourcc": fourcc}
+    entry: Dict[str, Any] = {"width": int(payload.width), "height": int(payload.height), "fps": fps}
+    if fourcc:
+        entry["fourcc"] = fourcc
     capture_modes = config.get("camera_capture_modes", {})
     if not isinstance(capture_modes, dict):
         capture_modes = {}

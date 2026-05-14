@@ -124,6 +124,7 @@ class RuntimeStatsCollector:
             "recognize_skipped_carousel_quota": 0,
             "recognize_skipped_carousel_dwell": 0,
             "recognize_skipped_carousel_traversal": 0,
+            "recognize_skipped_low_sharpness": 0,
             "recognize_c3_slots_used": 0,
             "brickognize_empty_result": 0,
             "brickognize_timeout_total": 0,
@@ -882,6 +883,9 @@ class RuntimeStatsCollector:
             ),
             "recognize_skipped_carousel_traversal": int(
                 self._recognizer_counts.get("recognize_skipped_carousel_traversal", 0)
+            ),
+            "recognize_skipped_low_sharpness": int(
+                self._recognizer_counts.get("recognize_skipped_low_sharpness", 0)
             ),
             "recognize_c3_slots_used": int(self._recognizer_counts.get("recognize_c3_slots_used", 0)),
             "brickognize_empty_result": int(self._recognizer_counts.get("brickognize_empty_result", 0)),

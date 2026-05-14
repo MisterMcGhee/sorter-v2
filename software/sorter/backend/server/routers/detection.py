@@ -979,18 +979,45 @@ def debug_classification_detection(camera: str) -> Dict[str, Any]:
         _normalize_bbox(zone_bbox, frame_resolution) if isinstance(zone_bbox, (list, tuple)) else None
     )
     if isinstance(sample_capture, dict):
+        from subsystems.classification.bbox_projection import (
+            translate_bbox_to_crop,
+            translate_bboxes_to_crop,
+        )
         save_model = None
         if payload.get("algorithm") == "gemini_sam" and hasattr(shared_state.vision_manager, "getClassificationOpenRouterModel"):
             try:
                 save_model = shared_state.vision_manager.getClassificationOpenRouterModel()
             except Exception:
                 save_model = None
+        # Translate full-frame bboxes into zone-crop coords so Hive's
+        # overlay aligns with the saved zone image.
+        zone_bbox_tuple = (
+            tuple(int(v) for v in zone_bbox)
+            if isinstance(zone_bbox, (list, tuple)) and len(zone_bbox) >= 4
+            else None
+        )
+        bbox_crop = (
+            list(translate_bbox_to_crop(tuple(int(v) for v in bbox), zone_bbox_tuple))
+            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4
+            and translate_bbox_to_crop(tuple(int(v) for v in bbox), zone_bbox_tuple) is not None
+            else None
+        )
+        candidate_bboxes_crop = (
+            [list(c) for c in translate_bboxes_to_crop(
+                [tuple(int(v) for v in c) for c in candidate_bboxes if isinstance(c, (list, tuple)) and len(c) >= 4],
+                zone_bbox_tuple,
+            )]
+            if isinstance(candidate_bboxes, list) else []
+        )
+        debug_result_for_save = dict(payload)
+        debug_result_for_save["bbox"] = bbox_crop
+        debug_result_for_save["candidate_bboxes"] = candidate_bboxes_crop
         try:
             saved = getClassificationTrainingManager().saveDetectionDebugCapture(
                 camera=camera,
                 algorithm=str(payload.get("algorithm") or ""),
                 openrouter_model=save_model,
-                debug_result=payload,
+                debug_result=debug_result_for_save,
                 top_zone=sample_capture.get("top_zone"),
                 bottom_zone=sample_capture.get("bottom_zone"),
                 top_frame=sample_capture.get("top_frame"),
@@ -1011,6 +1038,33 @@ def _finalize_aux_detection_debug_payload(
     sample_capture: dict[str, Any] | None,
     openrouter_model: str | None,
 ) -> Dict[str, Any]:
+    from subsystems.classification.bbox_projection import (
+        translate_bbox_to_crop,
+        translate_bboxes_to_crop,
+    )
+
+    def _sample_crop_bbox() -> tuple[int, int, int, int] | None:
+        if not isinstance(sample_capture, dict):
+            return None
+        image = sample_capture.get("input_image")
+        offset = sample_capture.get("crop_offset")
+        if not (
+            hasattr(image, "shape")
+            and isinstance(offset, (list, tuple))
+            and len(offset) >= 2
+        ):
+            return None
+        try:
+            crop_h = int(image.shape[0])
+            crop_w = int(image.shape[1])
+            crop_x = int(offset[0])
+            crop_y = int(offset[1])
+        except Exception:
+            return None
+        if crop_w <= 0 or crop_h <= 0:
+            return None
+        return (crop_x, crop_y, crop_x + crop_w, crop_y + crop_h)
+
     frame_resolution = payload.get("frame_resolution")
     bbox = payload.get("bbox")
     zone_bbox = payload.get("zone_bbox")
@@ -1030,11 +1084,41 @@ def _finalize_aux_detection_debug_payload(
     payload["normalized_zone_bbox"] = (
         _normalize_bbox(zone_bbox, frame_resolution) if isinstance(zone_bbox, (list, tuple)) else None
     )
+    # ``bbox`` / ``candidate_bboxes`` are in full-frame coordinates (the hive
+    # detector shifts crop-space results back via ``_offsetDetectionResult``).
+    # The sample image we archive is the polygon zone-crop (input_image from
+    # ``_captureAuxiliarySampleFromFrame``). Translate the bboxes into
+    # crop-space before persisting so Hive's overlay lands on the piece.
+    zone_bbox_tuple = _sample_crop_bbox() or (
+        tuple(int(v) for v in zone_bbox)
+        if isinstance(zone_bbox, (list, tuple)) and len(zone_bbox) >= 4
+        else None
+    )
+    bbox_crop = (
+        translate_bbox_to_crop(tuple(int(v) for v in bbox), zone_bbox_tuple)
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4
+        else None
+    )
+    candidate_bboxes_crop = (
+        translate_bboxes_to_crop(
+            [tuple(int(v) for v in c) for c in candidate_bboxes if isinstance(c, (list, tuple)) and len(c) >= 4],
+            zone_bbox_tuple,
+        )
+        if isinstance(candidate_bboxes, list)
+        else []
+    )
+    source_role = role
+    vm = shared_state.vision_manager
+    if vm is not None and hasattr(vm, "sampleSourceRoleForRole"):
+        try:
+            source_role = str(vm.sampleSourceRoleForRole(role))
+        except Exception:
+            source_role = role
     if isinstance(sample_capture, dict) and _auxiliary_sample_collection_supported():
         try:
             saved = getClassificationTrainingManager().saveAuxiliaryDetectionCapture(
                 source="settings_detection_test",
-                source_role=role,
+                source_role=source_role,
                 detection_scope=(
                     "feeder" if role in {"c_channel_2", "c_channel_3"} else "carousel"
                 ),
@@ -1042,8 +1126,8 @@ def _finalize_aux_detection_debug_payload(
                 detection_algorithm=str(payload.get("algorithm") or ""),
                 detection_openrouter_model=openrouter_model,
                 detection_found=bool(payload.get("found")),
-                detection_bbox=bbox if isinstance(bbox, (list, tuple)) else None,
-                detection_candidate_bboxes=candidate_bboxes if isinstance(candidate_bboxes, list) else [],
+                detection_bbox=list(bbox_crop) if bbox_crop is not None else None,
+                detection_candidate_bboxes=[list(c) for c in candidate_bboxes_crop],
                 detection_bbox_count=int(payload.get("bbox_count") or 0),
                 detection_score=float(payload.get("score")) if isinstance(payload.get("score"), (int, float)) else None,
                 detection_message=payload.get("message") if isinstance(payload.get("message"), str) else None,

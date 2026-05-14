@@ -21,7 +21,61 @@ from vision.detection_registry import DetectionResult
 from vision.tracking.history import PieceHistoryBuffer, SectorSnapshot, TrackSegment
 
 
+class _OverlayFeed:
+    def __init__(self) -> None:
+        self.overlays: list[object] = []
+
+    def clear_overlays(self) -> None:
+        self.overlays.clear()
+
+    def add_overlay(self, overlay: object) -> None:
+        self.overlays.append(overlay)
+
+
 class VisionManagerFeederDynamicTests(unittest.TestCase):
+    def test_init_overlays_registers_classification_channel_feed_alias(self) -> None:
+        vm = VisionManager.__new__(VisionManager)
+        carousel_feed = _OverlayFeed()
+        classification_feed = _OverlayFeed()
+        camera_service = SimpleNamespace(
+            feeds={
+                "carousel": carousel_feed,
+                "classification_channel": classification_feed,
+            },
+            get_feed=lambda role: {
+                "carousel": carousel_feed,
+                "classification_channel": classification_feed,
+            }.get(role),
+        )
+
+        vm._camera_service = camera_service
+        vm._camera_layout = "split_feeder"
+        vm._region_provider = object()
+        vm._usesClassificationChannelSetup = lambda: True
+        vm._feederTrackerRoles = lambda: ("carousel",)
+        vm.getFeederDetectionAlgorithm = lambda role=None: "gemini_sam"
+        vm._isDynamicDetectionAlgorithm = lambda algorithm: True
+        vm.getCaptureThreadForRole = lambda role: None
+        vm._getFeederDynamicDetection = lambda role, force=False: None
+        vm.getFeederTracks = lambda role: []
+        vm.getFeederIgnoredDetectionOverlayData = lambda role: []
+        vm.getClassificationChannelZoneOverlayData = lambda: {}
+        vm._per_channel_detectors = {}
+        vm._per_channel_analysis = {}
+
+        VisionManager._initOverlays(vm)
+
+        carousel_overlay_names = [type(overlay).__name__ for overlay in carousel_feed.overlays]
+        classification_overlay_names = [
+            type(overlay).__name__ for overlay in classification_feed.overlays
+        ]
+        self.assertIn("ChannelRegionOverlay", carousel_overlay_names)
+        self.assertIn("DynamicDetectionOverlay", carousel_overlay_names)
+        self.assertIn("ClassificationChannelZoneOverlay", carousel_overlay_names)
+        self.assertIn("ChannelRegionOverlay", classification_overlay_names)
+        self.assertIn("DynamicDetectionOverlay", classification_overlay_names)
+        self.assertIn("ClassificationChannelZoneOverlay", classification_overlay_names)
+
     def test_get_feeder_dynamic_detection_does_not_force_gemini_from_live_render(self) -> None:
         vm = VisionManager.__new__(VisionManager)
         frame = SimpleNamespace(timestamp=123.0, raw=np.zeros((8, 8, 3), dtype=np.uint8))

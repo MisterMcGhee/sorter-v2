@@ -21,7 +21,7 @@
 	import SampleConditionCard from '$lib/components/sample/SampleConditionCard.svelte';
 	import SampleDetailsSidebar from '$lib/components/sample/SampleDetailsSidebar.svelte';
 	import { Button } from '$lib/components/primitives';
-	import { extractLegacyReviewBboxes, extractPrimaryBboxes, parseBboxCollection, proposalColor } from '$lib/components/sample/bbox-helpers';
+	import { extractLegacyReviewBboxes, extractPrimaryBboxes, mergeUniqueBboxes, parseBboxCollection, proposalColor } from '$lib/components/sample/bbox-helpers';
 	import {
 		readSampleListContext,
 		sampleListContextKey,
@@ -241,7 +241,7 @@
 	});
 
 	const proposalBoxes = $derived.by(() => {
-		const proposals = [...bboxes, ...candidateBboxes];
+		const proposals = mergeUniqueBboxes(bboxes, candidateBboxes);
 		return proposals.length > 0 ? proposals : legacyReviewBboxes;
 	});
 

@@ -22,6 +22,10 @@ from subsystems.classification_channel.zone_manager import (
     TrackAngularExtent,
     _circular_diff_deg,
 )
+from subsystems.sample_collection_speed import (
+    microsteps_from_stepper_config,
+    sample_collection_effective_speed_microsteps_per_second,
+)
 from subsystems.shared_variables import SharedVariables
 from utils.event import knownObjectToEvent
 
@@ -42,6 +46,8 @@ RECOVERY_MIN_TRACK_HITS = 4
 RECOVERY_MIN_TRACK_AGE_S = 0.35
 RECOGNITION_RETRY_INTERVAL_S = 0.10
 INTAKE_FRESHNESS_GRACE_S = 0.35
+SAMPLE_MODE_TEACHER_CAPTURE_MIN_INTERVAL_S = 0.8
+SAMPLE_MODE_EMPTY_STATE_CAPTURE_INTERVAL_S = 5.0
 
 
 class Running(BaseState):
@@ -81,6 +87,8 @@ class Running(BaseState):
         # was still in flight, so we can time it out instead of waiting
         # forever if the response never arrives.
         self._deadline_defer_started_at_by_uuid: dict[str, float] = {}
+        self._sample_teacher_capture_last_queued_mono: float | None = None
+        self._sample_empty_state_last_captured_mono: float | None = None
 
     @property
     def _config(self):
@@ -100,6 +108,7 @@ class Running(BaseState):
     def step(self) -> Optional[ClassificationChannelState]:
         now_wall = time.time()
         now_mono = time.monotonic()
+        sample_mode = self._sampleCollectionMode()
 
         if self._pulse_in_flight:
             if not self.irl.carousel_stepper.stopped:
@@ -128,8 +137,11 @@ class Running(BaseState):
         self._registerNewIntakePiece(track_extents, now_wall, now_mono)
         self._recoverExistingTrackedPieces(track_extents, now_wall)
         zones, expired_pieces = self.transport.updateTrackedPieces(track_extents)
+        self._refreshLatestCapturedCrops(now_wall)
         self._emitExpiredPieceEvents(expired_pieces)
         self._publishOverlay(zones)
+        if sample_mode:
+            self._maybeCaptureSampleModeEmptyState(track_extents, zones, now_mono)
 
         self._resolveDeadlines(zones, now_wall)
         self._refreshPositioningPiece()
@@ -142,7 +154,8 @@ class Running(BaseState):
         # _sendPulse(drop_uuid) — the *other* piece in the hood never gets
         # a chance to fire recognition. Calling it here lets the hood piece
         # accumulate fires while the drop piece is still being committed.
-        self._fireRecognition(now_wall)
+        if not sample_mode:
+            self._fireRecognition(now_wall)
 
         drop_uuid = self._pickDropCandidate()
         if drop_uuid is not None:
@@ -154,15 +167,29 @@ class Running(BaseState):
                     "classification", "waiting_distribution_ready"
                 )
                 return None
-            if self._startExitReleaseShimmyIfNeeded(drop_uuid):
+            if not sample_mode and self._startExitReleaseShimmyIfNeeded(drop_uuid):
                 self._setOccupancyState("classification_channel.exit_release_shimmy")
                 return None
             if self._sendPulse(drop_uuid):
                 self._setOccupancyState("classification_channel.drop_commit")
             return None
 
+        release_uuid = None if sample_mode else self._pickExitReleaseCandidate()
+        if release_uuid is not None:
+            if not self.shared.distribution_ready:
+                self._setOccupancyState(
+                    "classification_channel.wait_distribution_ready_exit_obstruction"
+                )
+                self.gc.runtime_stats.observeBlockedReason(
+                    "classification", "waiting_distribution_ready_exit_obstruction"
+                )
+                return None
+            if self._startExitReleaseShimmyIfNeeded(release_uuid):
+                self._setOccupancyState("classification_channel.exit_release_shimmy")
+                return None
+
         hood_piece = self.transport.getPieceAtClassification()
-        if self._shouldHoldForHoodDwell(hood_piece, now_wall):
+        if not sample_mode and self._shouldHoldForHoodDwell(hood_piece, now_wall):
             self._setOccupancyState("classification_channel.hood_dwell")
             return None
 
@@ -194,11 +221,16 @@ class Running(BaseState):
         self._intake_requested_at_wall = None
         self._occupancy_state = None
         self._recognition_retry_not_before_by_uuid = {}
+        self._sample_teacher_capture_last_queued_mono = None
+        self._sample_empty_state_last_captured_mono = None
         if self.vision is not None and hasattr(
             self.vision, "setClassificationChannelZoneOverlay"
         ):
             self.vision.setClassificationChannelZoneOverlay([])
         self.shared.set_classification_gate(False, reason="cleanup")
+
+    def _sampleCollectionMode(self) -> bool:
+        return bool(getattr(self.shared, "sample_collection_mode", False))
 
     def _getTrackExtents(self) -> list[TrackAngularExtent]:
         if self.vision is None:
@@ -290,6 +322,7 @@ class Running(BaseState):
         self._intake_requested_at_mono = None
         self._intake_requested_at_wall = None
         self.shared.set_classification_gate(False, reason="piece_in_hood")
+        self._refreshLatestCapturedCrop(obj, now_wall=now_wall, emit=False)
         if self.event_queue is not None:
             self.event_queue.put(knownObjectToEvent(obj))
         self.logger.info(
@@ -351,6 +384,16 @@ class Running(BaseState):
             )
             obj.feeding_started_at = confirmed_at
             obj.carousel_detected_confirmed_at = confirmed_at
+            obj.first_carousel_seen_ts = confirmed_at
+            obj.first_carousel_seen_angle_deg = float(extent.center_deg)
+            obj.classification_channel_zone_state = "tracked"
+            obj.classification_channel_zone_center_deg = float(extent.center_deg)
+            obj.classification_channel_zone_half_width_deg = float(extent.half_width_deg)
+            obj.classification_channel_exit_offset_deg = _circular_diff_deg(
+                float(extent.center_deg),
+                float(self._config.drop_angle_deg),
+            )
+            self._refreshLatestCapturedCrop(obj, now_wall=now_wall, emit=False)
             obj.updated_at = now_wall
             if self.event_queue is not None:
                 self.event_queue.put(knownObjectToEvent(obj))
@@ -370,6 +413,53 @@ class Running(BaseState):
             % adopted
         )
 
+    def _refreshLatestCapturedCrops(self, now_wall: float) -> None:
+        for piece in self.transport.activePieces():
+            self._refreshLatestCapturedCrop(piece, now_wall=now_wall, emit=True)
+
+    def _refreshLatestCapturedCrop(
+        self,
+        piece: KnownObject,
+        *,
+        now_wall: float,
+        emit: bool,
+    ) -> bool:
+        gid = getattr(piece, "tracked_global_id", None)
+        if not isinstance(gid, int):
+            return False
+        if self.vision is None or not hasattr(self.vision, "getLatestFeederTrackPieceCrop"):
+            return False
+        try:
+            crop_payload = self.vision.getLatestFeederTrackPieceCrop(int(gid))
+        except Exception:
+            return False
+        if not isinstance(crop_payload, dict):
+            return False
+        crop_b64 = crop_payload.get("jpeg_b64")
+        if not isinstance(crop_b64, str) or not crop_b64:
+            return False
+        captured_ts_raw = crop_payload.get("captured_ts")
+        captured_ts = (
+            float(captured_ts_raw)
+            if isinstance(captured_ts_raw, (int, float))
+            else now_wall
+        )
+        previous_ts = getattr(piece, "latest_captured_crop_ts", None)
+        if isinstance(previous_ts, (int, float)) and captured_ts < float(previous_ts):
+            return False
+        if (
+            isinstance(previous_ts, (int, float))
+            and captured_ts == float(previous_ts)
+            and piece.latest_captured_crop == crop_b64
+        ):
+            return False
+        piece.latest_captured_crop = crop_b64
+        piece.latest_captured_crop_ts = captured_ts
+        piece.updated_at = now_wall
+        if emit and self.event_queue is not None:
+            self.event_queue.put(knownObjectToEvent(piece))
+        return True
+
     def _emitExpiredPieceEvents(self, expired_pieces: list[KnownObject]) -> None:
         """Broadcast a terminal KnownObject event for each stale-zone drop.
 
@@ -384,19 +474,23 @@ class Running(BaseState):
             return
         runtime_stats = getattr(self.gc, "runtime_stats", None)
         for piece in expired_pieces:
+            self._refreshLatestCapturedCrop(piece, now_wall=time.time(), emit=False)
             if runtime_stats is not None and hasattr(
                 runtime_stats, "observeClassificationZoneLost"
             ):
                 runtime_stats.observeClassificationZoneLost()
             # Only emit terminal event for pieces the frontend has actually
             # seen as meaningful: classified (has part_id or classified_at) or
-            # at least thumbnail'd. Never-classified zone-expiry ghosts have
-            # nothing interesting to show — they'd render as orphan "DISTRIBUTED"
-            # rows with no crop, no name, no bin. Skip quietly.
+            # at least one captured image. Never-classified zone-expiry ghosts
+            # with no visual evidence have nothing useful to show.
             was_meaningful = bool(
                 getattr(piece, "part_id", None)
                 or getattr(piece, "classified_at", None)
                 or getattr(piece, "thumbnail", None)
+                or getattr(piece, "latest_captured_crop", None)
+                or getattr(piece, "top_image", None)
+                or getattr(piece, "bottom_image", None)
+                or getattr(piece, "drop_snapshot", None)
             )
             if self.event_queue is not None and was_meaningful:
                 self.event_queue.put(knownObjectToEvent(piece))
@@ -657,8 +751,25 @@ class Running(BaseState):
                 + zone.body_half_width_deg
             )
             if near_drop_deadline:
+                # T9 fix for persistent-ghost-at-drop: only pin the track
+                # against the stagnant-false-track filter while the piece
+                # is still a viable classification candidate. An
+                # ``unknown`` piece (POR-expired without recognition) is
+                # about to be dumped anyway; if the underlying track was
+                # a ghost (camera sees a static feature at drop angle, no
+                # physical piece), pinning it here lets the ghost survive
+                # the drop pulse and re-spawn forever — the static feature
+                # gets re-detected every frame, the polar tracker creates
+                # a fresh global_id, the state machine marks it pending,
+                # repeat. Leaving unknown pieces unprotected lets the
+                # stagnant filter purge the ghost track and the ghost
+                # cycle breaks.
                 gid = getattr(piece, "tracked_global_id", None)
-                if isinstance(gid, int) and self.vision is not None:
+                if (
+                    isinstance(gid, int)
+                    and self.vision is not None
+                    and piece.classification_status != ClassificationStatus.unknown
+                ):
                     marker = getattr(self.vision, "markCarouselPendingDrop", None)
                     if marker is not None:
                         marker(gid)
@@ -701,7 +812,7 @@ class Running(BaseState):
                 )
 
     def _refreshPositioningPiece(self) -> None:
-        candidates: list[tuple[float, str]] = []
+        candidates: list[tuple[float, float, str]] = []
         for piece in self.transport.activePieces():
             if piece.classification_status not in {
                 ClassificationStatus.classified,
@@ -825,6 +936,21 @@ class Running(BaseState):
         if not self.transport.resolveFallbackClassification(piece.uuid, status=status):
             return
         self._recognition_retry_not_before_by_uuid.pop(piece.uuid, None)
+        # Release the pending-drop protection on the underlying carousel
+        # track when the piece becomes a non-pending terminal (unknown /
+        # multi_drop_fail). If the track was actually a ghost from a static
+        # platter feature, this lets the stagnant-false-track filter purge
+        # it instead of letting the ghost survive each drop pulse and
+        # re-spawn with a fresh global_id forever.
+        if status in {ClassificationStatus.unknown, ClassificationStatus.multi_drop_fail}:
+            gid = getattr(piece, "tracked_global_id", None)
+            if isinstance(gid, int) and self.vision is not None:
+                unmarker = getattr(self.vision, "unmarkCarouselPendingDrop", None)
+                if unmarker is not None:
+                    try:
+                        unmarker(gid)
+                    except Exception:
+                        pass
         piece.updated_at = now_wall
         self.gc.runtime_stats.observeBlockedReason("classification", reason)
         if self.event_queue is not None:
@@ -895,12 +1021,79 @@ class Running(BaseState):
             return False
         return True
 
+    def _pickExitReleaseCandidate(self) -> str | None:
+        """Pick a stuck-at-exit piece that needs active release.
+
+        ``_pickDropCandidate`` only considers pieces whose center is inside
+        the configured drop tolerance. Sticky tires can roll just past that
+        line without falling; this scan keeps the exit obstruction in the C4
+        state machine and lets the shimmy path shake it loose.
+        """
+        droppable_statuses = {
+            ClassificationStatus.classified,
+            ClassificationStatus.unknown,
+            ClassificationStatus.not_found,
+            ClassificationStatus.multi_drop_fail,
+        }
+        candidates: list[tuple[float, str]] = []
+        for piece in self.transport.activePieces():
+            if piece.classification_status not in droppable_statuses:
+                continue
+            meta = self._exitReleaseTriggerMeta(piece)
+            if meta is None:
+                continue
+            offset = abs(float(meta["center_offset_deg"]))
+            overlap = float(meta["overlap_ratio"])
+            center_crossed_bonus = 1.0 if bool(meta["center_crossed"]) else 0.0
+            candidates.append((-(center_crossed_bonus + overlap), offset, piece.uuid))
+        if not candidates:
+            return None
+        candidates.sort()
+        return candidates[0][2]
+
+    def _exitReleaseTriggerMeta(self, piece: KnownObject) -> dict[str, float | bool] | None:
+        center_deg = getattr(piece, "classification_channel_zone_center_deg", None)
+        half_width_deg = self._exitReleaseHalfWidthDeg(piece)
+        if not isinstance(center_deg, (int, float)) or half_width_deg is None:
+            return None
+        center_offset = _circular_diff_deg(float(center_deg), self._config.drop_angle_deg)
+        body_half = max(0.0, float(half_width_deg))
+        obstruction_horizon = max(
+            float(self._config.drop_tolerance_deg),
+            float(self._config.point_of_no_return_deg) + body_half,
+        )
+        if abs(center_offset) > obstruction_horizon:
+            return None
+        overlap_ratio = self._dropBodyOverlapRatio(piece)
+        overlap_trigger = overlap_ratio >= float(self._config.exit_release_overlap_ratio)
+        center_crossed = center_offset >= 0.0
+        if not overlap_trigger and not center_crossed:
+            return None
+        return {
+            "center_offset_deg": center_offset,
+            "overlap_ratio": overlap_ratio,
+            "center_crossed": center_crossed,
+        }
+
+    def _exitReleaseHalfWidthDeg(self, piece: KnownObject) -> float | None:
+        zone_manager = self.transport.zone_manager
+        if zone_manager is not None and hasattr(zone_manager, "zone_for_piece"):
+            try:
+                zone = zone_manager.zone_for_piece(piece.uuid)
+            except Exception:
+                zone = None
+            measured = getattr(zone, "measured_half_width_deg", None)
+            if isinstance(measured, (int, float)) and float(measured) > 0.0:
+                return float(measured)
+        half_width_deg = getattr(piece, "classification_channel_zone_half_width_deg", None)
+        if isinstance(half_width_deg, (int, float)):
+            return float(half_width_deg)
+        return None
+
     def _dropBodyOverlapRatio(self, piece: KnownObject) -> float:
         center_deg = getattr(piece, "classification_channel_zone_center_deg", None)
-        half_width_deg = getattr(piece, "classification_channel_zone_half_width_deg", None)
-        if not isinstance(center_deg, (int, float)) or not isinstance(
-            half_width_deg, (int, float)
-        ):
+        half_width_deg = self._exitReleaseHalfWidthDeg(piece)
+        if not isinstance(center_deg, (int, float)) or half_width_deg is None:
             return 0.0
         body_half = max(0.0, float(half_width_deg))
         if body_half <= 0.0:
@@ -915,11 +1108,13 @@ class Running(BaseState):
         return overlap / max(body_half * 2.0, 1e-6)
 
     def _startExitReleaseShimmyIfNeeded(self, piece_uuid: str) -> bool:
+        if self._sampleCollectionMode():
+            return False
         piece = self._pieceForUUID(piece_uuid)
         if piece is None:
             return False
-        overlap_ratio = self._dropBodyOverlapRatio(piece)
-        if overlap_ratio < float(self._config.exit_release_overlap_ratio):
+        trigger = self._exitReleaseTriggerMeta(piece)
+        if trigger is None:
             return False
         amplitude_deg = float(self._config.exit_release_shimmy_amplitude_deg)
         cycles = int(self._config.exit_release_shimmy_cycles)
@@ -931,15 +1126,24 @@ class Running(BaseState):
         self._exit_release_plan_deg = []
         for _ in range(cycles):
             self._exit_release_plan_deg.extend(
-                [-amplitude_deg, amplitude_deg * 2.0, -amplitude_deg]
+                [amplitude_deg, -amplitude_deg * 2.0, amplitude_deg]
             )
         self.logger.info(
-            "ClassificationChannel: exit-release shimmy for %s (overlap %.2f)"
-            % (piece_uuid[:8], overlap_ratio)
+            "ClassificationChannel: exit-release shimmy for %s "
+            "(offset %.1f deg, overlap %.2f, center_crossed=%s)"
+            % (
+                piece_uuid[:8],
+                float(trigger["center_offset_deg"]),
+                float(trigger["overlap_ratio"]),
+                bool(trigger["center_crossed"]),
+            )
         )
         return self._advanceExitReleaseShimmy()
 
     def _advanceExitReleaseShimmy(self) -> bool:
+        if self._sampleCollectionMode():
+            self._exit_release_plan_deg = []
+            return False
         if not self._exit_release_plan_deg:
             return False
         move_deg = float(self._exit_release_plan_deg.pop(0))
@@ -1026,6 +1230,70 @@ class Running(BaseState):
                 % (drop_uuid[:8], exc)
             )
 
+    def _maybeCaptureSampleModeEmptyState(
+        self,
+        track_extents: list[TrackAngularExtent],
+        zones: list[object],
+        now_mono: float,
+    ) -> None:
+        if track_extents or zones or self.transport.activePieces():
+            return
+        if (
+            self._sample_empty_state_last_captured_mono is not None
+            and now_mono - self._sample_empty_state_last_captured_mono
+            < SAMPLE_MODE_EMPTY_STATE_CAPTURE_INTERVAL_S
+        ):
+            return
+        if self.vision is None or not hasattr(
+            self.vision, "saveClassificationChannelEmptyStateCapture"
+        ):
+            return
+        try:
+            if self.vision.saveClassificationChannelEmptyStateCapture():
+                self._sample_empty_state_last_captured_mono = now_mono
+        except Exception as exc:
+            self.logger.warning(
+                "ClassificationChannel: could not archive empty-state sample: %s"
+                % exc
+            )
+
+    def _scheduleSampleModeTeacherCapture(self, pulse_degrees: float) -> None:
+        if not self._sampleCollectionMode():
+            return
+        if self.vision is None or not hasattr(
+            self.vision, "scheduleClassificationChannelTeacherCaptureAfterMove"
+        ):
+            return
+
+        now_mono = time.monotonic()
+        if (
+            self._sample_teacher_capture_last_queued_mono is not None
+            and now_mono - self._sample_teacher_capture_last_queued_mono
+            < SAMPLE_MODE_TEACHER_CAPTURE_MIN_INTERVAL_S
+        ):
+            return
+
+        delay_s = 0.0
+        estimate_fn = getattr(self.irl.carousel_stepper, "estimateMoveDegreesMs", None)
+        if callable(estimate_fn):
+            try:
+                delay_s = max(0.0, float(estimate_fn(pulse_degrees)) / 1000.0)
+            except Exception:
+                delay_s = 0.0
+
+        try:
+            self.vision.scheduleClassificationChannelTeacherCaptureAfterMove(
+                delay_s=delay_s,
+                move_label="sample_c4_pulse",
+                pulse_degrees=float(pulse_degrees),
+            )
+            self._sample_teacher_capture_last_queued_mono = now_mono
+        except Exception as exc:
+            self.logger.warning(
+                "ClassificationChannel: could not queue sample teacher capture: %s"
+                % exc
+            )
+
     def _sendPulse(self, drop_uuid: str | None) -> bool:
         if self._pulse_in_flight:
             return False
@@ -1034,8 +1302,18 @@ class Running(BaseState):
             cfg.steps_per_pulse
         )
         try:
+            speed = sample_collection_effective_speed_microsteps_per_second(
+                "classification_channel",
+                default_microsteps_per_second=int(cfg.microsteps_per_second),
+                microsteps=microsteps_from_stepper_config(
+                    getattr(self.irl_config, "c_channel_4_rotor_stepper", None)
+                    or getattr(self.irl_config, "carousel_stepper", None),
+                    fallback=getattr(self.irl.carousel_stepper, "_microsteps", 8),
+                ),
+                enabled=bool(getattr(self.shared, "sample_collection_mode", False)),
+            )
             self.irl.carousel_stepper.set_speed_limits(
-                16, int(cfg.microsteps_per_second)
+                16, int(speed or cfg.microsteps_per_second)
             )
         except Exception as exc:
             self.logger.warning(
@@ -1061,6 +1339,7 @@ class Running(BaseState):
                 "classification", "classification_channel_eject_rejected"
             )
             return False
+        self._scheduleSampleModeTeacherCapture(pulse_degrees)
         self._pulse_in_flight = True
         self._pending_drop_uuid = drop_uuid
         if drop_uuid is not None:

@@ -507,7 +507,11 @@
 	): 'top' | 'bottom' | 'c_channel_2' | 'c_channel_3' | 'carousel' | 'classification_channel' {
 		if (channel === 'second') return 'c_channel_2';
 		if (channel === 'third') return 'c_channel_3';
-		if (channel === 'classification_channel') return 'classification_channel';
+		// C4 in the classification_channel topology uses the "carousel" feeder
+		// detection role on the backend — the camera is labelled
+		// classification_channel in cameras/config but detection-config lives
+		// under role=carousel.
+		if (channel === 'classification_channel') return 'carousel';
 		if (channel === 'carousel') return 'carousel';
 		return channel === 'class_top' ? 'top' : 'bottom';
 	}
@@ -887,6 +891,14 @@
 	function feedImageStyle(channel: Channel): string {
 		const transformStyle = picturePreviewTransform(channel);
 		return transformStyle;
+	}
+
+	function previewViewportStyle(channel: Channel): string {
+		const imageSize = previewImageSizeByRole[currentRole(channel)];
+		if (!wizardMode && !editingZone && previewCropped && imageSize) {
+			return `aspect-ratio:${imageSize.width}/${imageSize.height};`;
+		}
+		return '';
 	}
 
 	function previewOverlayStyle(channel: Channel): string {
@@ -1359,20 +1371,21 @@
 
 	function streamUrl(channel: Channel): string {
 		if (editingZone) {
-			return `${backendHttpBaseUrl}/api/cameras/feed/${CAMERA_FOR_CHANNEL[channel]}?direct=true&annotated=false&v=${feedRevision}`;
+			return `${backendHttpBaseUrl}/api/cameras/feed/${CAMERA_FOR_CHANNEL[channel]}?annotated=false&color_correct=true&dashboard=false&show_regions=false&v=${feedRevision}`;
 		}
+		const backendRegionsParam = previewCropped && previewZones ? 'true' : 'false';
 		const annotatedParam = previewAnnotated ? 'true' : 'false';
 		const colorParam = previewColorCorrect ? 'true' : 'false';
 		const dashboardParam = previewCropped ? 'true' : 'false';
-		const zonesParam = previewZones ? 'true' : 'false';
-		return `${backendHttpBaseUrl}/api/cameras/feed/${CAMERA_FOR_CHANNEL[channel]}?annotated=${annotatedParam}&color_correct=${colorParam}&dashboard=${dashboardParam}&show_regions=${zonesParam}&v=${feedRevision}`;
+		return `${backendHttpBaseUrl}/api/cameras/feed/${CAMERA_FOR_CHANNEL[channel]}?annotated=${annotatedParam}&color_correct=${colorParam}&dashboard=${dashboardParam}&show_regions=${backendRegionsParam}&v=${feedRevision}`;
 	}
 
 	function feedInstanceKey(channel: Channel): string {
 		const assignment = currentAssignment(channel);
+		const zonesMode = previewCropped ? (previewZones ? 'z' : 'nz') : 'local-zones';
 		const mode = editingZone
-			? 'direct-raw'
-			: `${previewAnnotated ? 'annot' : 'raw'}-${previewColorCorrect ? 'cc' : 'nocc'}-${previewCropped ? 'crop' : 'full'}-${previewZones ? 'z' : 'nz'}`;
+			? 'edit-live-raw'
+			: `${previewAnnotated ? 'annot' : 'raw'}-${previewColorCorrect ? 'cc' : 'nocc'}-${previewCropped ? 'crop' : 'full'}-${zonesMode}`;
 		return `${currentRole(channel)}::${assignment === null ? 'none' : String(assignment)}::${mode}::${feedRevision}`;
 	}
 
@@ -2373,6 +2386,7 @@
 		if (!ctx) return;
 
 		ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+		if (!editingZone && previewCropped) return;
 		if (!editingZone && !previewZones) return;
 		const currentCamera = CAMERA_FOR_CHANNEL[currentChannel];
 
@@ -2962,6 +2976,7 @@
 				<div class="relative overflow-hidden bg-black">
 					<div
 						class={`relative ${wizardMode ? 'min-h-[26rem] sm:min-h-[32rem] lg:min-h-[38rem] xl:min-h-[44rem]' : 'aspect-video'}`}
+						style={previewViewportStyle(currentChannel)}
 						bind:this={previewViewportEl}
 					>
 						{#key feedInstanceKey(currentChannel)}

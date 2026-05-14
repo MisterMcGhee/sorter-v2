@@ -144,6 +144,34 @@ def _resolve_stepper(stepper_name: str) -> Any:
     return stepper
 
 
+def _hardware_worker_alive() -> bool:
+    worker = shared_state.hardware_worker_thread
+    return bool(worker is not None and worker.is_alive())
+
+
+def _ensure_runtime_ready(action: str) -> None:
+    state = shared_state.hardware_state
+    if _hardware_worker_alive() or state in {"homing", "initializing"}:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot {action} while hardware is {state}.",
+        )
+    if state != "ready":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot {action} while hardware is {state}; run Safe Home first.",
+        )
+
+
+def _ensure_manual_motion_allowed(action: str) -> None:
+    state = shared_state.hardware_state
+    if _hardware_worker_alive() or state in {"homing", "initializing"}:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot {action} while hardware is {state}.",
+        )
+
+
 def _active_irl_config() -> Any | None:
     controller = shared_state.controller_ref
     if controller is not None and hasattr(controller, "coordinator"):
@@ -155,8 +183,21 @@ def _active_irl_config() -> Any | None:
 
 
 def _halt_stepper(stepper: Any) -> None:
+    halt = getattr(stepper, "halt", None)
+    if callable(halt):
+        if not bool(halt(disable_driver=True)):
+            raise RuntimeError("halt() timed out or was not acknowledged")
+        return
+
     errors: list[str] = []
     stopped = False
+
+    if hasattr(stepper, "enabled"):
+        try:
+            stepper.enabled = False
+            stopped = True
+        except Exception as e:
+            errors.append(f"disable failed: {e}")
 
     if hasattr(stepper, "move_at_speed"):
         try:
@@ -173,13 +214,6 @@ def _halt_stepper(stepper: Any) -> None:
             stopped = True
         except Exception as e:
             errors.append(f"stop() failed: {e}")
-
-    if hasattr(stepper, "enabled"):
-        try:
-            stepper.enabled = False
-            stopped = True
-        except Exception as e:
-            errors.append(f"disable failed: {e}")
 
     if not stopped:
         detail = "; ".join(errors) if errors else "No supported stop method found"
@@ -390,6 +424,7 @@ def pause() -> CommandResponse:
 
 @router.post("/resume", response_model=CommandResponse)
 def resume() -> CommandResponse:
+    _ensure_runtime_ready("resume the sorter")
     if shared_state.command_queue is None:
         raise HTTPException(status_code=500, detail="Command queue not initialized")
     event = ResumeCommandEvent(tag="resume", data=ResumeCommandData())
@@ -404,6 +439,7 @@ def pulse_stepper(
     duration_s: float = 0.25,
     speed: int = 800,
 ) -> StepperPulseResponse:
+    _ensure_manual_motion_allowed("pulse a stepper")
     if duration_s <= 0 or duration_s > 5.0:
         raise HTTPException(status_code=400, detail="duration_s must be in (0, 5]")
     if speed <= 0:
@@ -421,7 +457,8 @@ def pulse_stepper(
 
     try:
         target.enabled = True
-        target.move_at_speed(signed_speed)
+        if not bool(target.move_at_speed(signed_speed)):
+            raise RuntimeError("move_at_speed was not acknowledged")
     except Exception as e:
         lock.release()
         raise HTTPException(status_code=500, detail=f"Pulse start failed: {e}")
@@ -449,6 +486,7 @@ def move_stepper_degrees(
     min_speed: int | None = None,
     acceleration: int | None = None,
 ) -> StepperMoveDegreesResponse:
+    _ensure_manual_motion_allowed("move a stepper")
     """Blocking-style move to a relative position.
 
     When ``min_speed`` and ``acceleration`` are both supplied, the firmware
@@ -486,7 +524,8 @@ def move_stepper_degrees(
             target.set_speed_limits(min_speed=int(min_speed), max_speed=int(speed))
         else:
             target.set_speed_limits(min_speed=int(speed), max_speed=int(speed))
-        target.move_degrees(degrees)
+        if not bool(target.move_degrees(degrees)):
+            raise RuntimeError("move_degrees was not acknowledged")
     except Exception as e:
         lock.release()
         raise HTTPException(status_code=500, detail=f"Move failed: {e}")
@@ -494,8 +533,20 @@ def move_stepper_degrees(
     def _release_after_move():
         try:
             start = time.monotonic()
-            while not target.stopped and (time.monotonic() - start) < 30:
+            timed_out = False
+            while True:
+                try:
+                    if target.stopped:
+                        break
+                except Exception:
+                    _halt_stepper(target)
+                    break
+                if (time.monotonic() - start) >= 30:
+                    timed_out = True
+                    break
                 time.sleep(0.02)
+            if timed_out:
+                _halt_stepper(target)
         finally:
             lock.release()
 
@@ -520,6 +571,8 @@ def classification_channel_sector_move(
     execute: bool = False,
 ) -> C4SectorMoveResponse:
     """Plan or execute one discrete C4 sector move on the C-channel axis."""
+    if execute:
+        _ensure_manual_motion_allowed("move the classification channel")
     if direction not in ("shortest", "cw", "ccw"):
         raise HTTPException(status_code=400, detail="direction must be one of: shortest, cw, ccw")
 

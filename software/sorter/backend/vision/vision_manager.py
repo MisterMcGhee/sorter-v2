@@ -83,6 +83,16 @@ HIVE_INFERENCE_MIN_INTERVAL_S_CAROUSEL: float = float(
     _os.environ.get("SORTER_HIVE_INFERENCE_INTERVAL_S_CAROUSEL", "0.05")
 )
 
+# Confidence floor for the real-time C4 carousel detector. The shared
+# processor default is 0.25 (good for C2/C3, which sit clean), but C4 has
+# a persistent ~43° platter feature that YOLO scores in the 0.25-0.35
+# band — bumping the floor on the carousel-only call sites cuts the ghost
+# without affecting upstream channels. Tune via
+# ``SORTER_HIVE_CAROUSEL_CONF_THRESHOLD``.
+HIVE_CAROUSEL_CONF_THRESHOLD: float = float(
+    _os.environ.get("SORTER_HIVE_CAROUSEL_CONF_THRESHOLD", "0.10")
+)
+
 
 def _hive_inference_min_interval_s_for_role(role: str | None) -> float:
     if role == "carousel":
@@ -359,16 +369,34 @@ class VisionManager:
             "carousel": "classification_channel" if self._usesClassificationChannelSetup() else "carousel",
         }
 
+        def _feed_aliases_for_tracker_role(role: str) -> tuple[str, ...]:
+            if role == "carousel" and self._usesClassificationChannelSetup():
+                return ("carousel", "classification_channel")
+            return (role,)
+
+        def _feeds_for_tracker_role(role: str):
+            seen: set[int] = set()
+            for feed_role in _feed_aliases_for_tracker_role(role):
+                feed = self._camera_service.get_feed(feed_role)
+                if feed is None:
+                    continue
+                feed_id = id(feed)
+                if feed_id in seen:
+                    continue
+                seen.add(feed_id)
+                yield feed
+
         if self._camera_layout == "split_feeder":
             # Per-channel feeds
             for role in self._feederTrackerRoles():
-                feed = self._camera_service.get_feed(role)
-                if feed is None:
+                feeds = list(_feeds_for_tracker_role(role))
+                if not feeds:
                     continue
-                feed.clear_overlays()
                 poly_key = _ROLE_TO_POLY_KEY.get(role)
-                if poly_key:
-                    feed.add_overlay(ChannelRegionOverlay(self._region_provider, poly_key))
+                for feed in feeds:
+                    feed.clear_overlays()
+                    if poly_key:
+                        feed.add_overlay(ChannelRegionOverlay(self._region_provider, poly_key))
                 feeder_algo = self.getFeederDetectionAlgorithm(role)
                 if self._isDynamicDetectionAlgorithm(feeder_algo):
                     detection_cache: dict[str, object] = {"frame_ts": None, "result": None}
@@ -392,25 +420,27 @@ class VisionManager:
                         _ensure_detection(r)
                         return self.getFeederTracks(r)
 
-                    if role == "carousel" and self._usesClassificationChannelSetup():
-                        feed.add_overlay(DynamicDetectionOverlay(_ensure_detection))
-                    feed.add_overlay(
-                        IgnoredRegionOverlay(
-                            lambda r=role: self.getFeederIgnoredDetectionOverlayData(r)
-                        )
-                    )
-                    feed.add_overlay(TrackOverlay(_tracks_for))
-                    if role == "carousel" and self._usesClassificationChannelSetup():
+                    for feed in feeds:
+                        if role == "carousel" and self._usesClassificationChannelSetup():
+                            feed.add_overlay(DynamicDetectionOverlay(_ensure_detection))
                         feed.add_overlay(
-                            ClassificationChannelZoneOverlay(
-                                self.getClassificationChannelZoneOverlayData
+                            IgnoredRegionOverlay(
+                                lambda r=role: self.getFeederIgnoredDetectionOverlayData(r)
                             )
                         )
+                        feed.add_overlay(TrackOverlay(_tracks_for))
+                        if role == "carousel" and self._usesClassificationChannelSetup():
+                            feed.add_overlay(
+                                ClassificationChannelZoneOverlay(
+                                    self.getClassificationChannelZoneOverlayData
+                                )
+                            )
                 else:
                     detector = self._per_channel_detectors.get(role)
                     analysis = self._per_channel_analysis.get(role)
                     if detector is not None and analysis is not None:
-                        feed.add_overlay(DetectorOverlay(detector, analysis.getDetections))
+                        for feed in feeds:
+                            feed.add_overlay(DetectorOverlay(detector, analysis.getDetections))
             if not self._usesClassificationChannelSetup():
                 carousel_feed = self._camera_service.get_feed("carousel")
                 if carousel_feed is not None:
@@ -1942,17 +1972,29 @@ class VisionManager:
 
         if request.scope == "feeder":
             detector = self._feeder_gemini_detectors.get(request.role)
+            feeder_zone = (
+                "classification_channel"
+                if request.role == "carousel" and self._usesClassificationChannelSetup()
+                else "c_channel"
+            )
             if detector is None:
-                detector = GeminiSamDetector(model, zone="c_channel")
+                detector = GeminiSamDetector(model, zone=feeder_zone)
                 self._feeder_gemini_detectors[request.role] = detector
             else:
                 detector.setOpenRouterModel(model)
+                detector.setZone(feeder_zone)
             return detector
 
+        carousel_zone = (
+            "classification_channel"
+            if self._usesClassificationChannelSetup()
+            else "carousel"
+        )
         if self._carousel_gemini_detector is None:
-            self._carousel_gemini_detector = GeminiSamDetector(model, zone="carousel")
+            self._carousel_gemini_detector = GeminiSamDetector(model, zone=carousel_zone)
         else:
             self._carousel_gemini_detector.setOpenRouterModel(model)
+            self._carousel_gemini_detector.setZone(carousel_zone)
         return self._carousel_gemini_detector
 
     def _openrouterRetryDelay(self) -> float:
@@ -2261,6 +2303,23 @@ class VisionManager:
             return set(accessor())
         except Exception:
             return set()
+
+    def unmarkCarouselPendingDrop(self, global_id: int) -> None:
+        """Release a previously-set pending-drop protection on a carousel
+        track. Called when the piece flips to a non-pending terminal state
+        (e.g. ``unknown``) so the stagnant-false-track filter can purge it
+        if the underlying detection was a ghost.
+        """
+        tracker = self._feeder_trackers.get("carousel")
+        if tracker is None:
+            return
+        accessor = getattr(tracker, "unmark_pending_drop", None)
+        if accessor is None:
+            return
+        try:
+            accessor(int(global_id))
+        except Exception:
+            pass
 
     def markCarouselPendingDrop(
         self,
@@ -2615,6 +2674,75 @@ class VisionManager:
             }
         return None
 
+    def getLatestFeederTrackPieceCrop(self, global_id: int) -> dict | None:
+        """Return the newest tight object crop for a feeder/C4 track.
+
+        This intentionally ignores sector-composite and full-frame snapshots:
+        callers use it for compact live UI previews where showing the whole
+        carousel plate is misleading.
+        """
+        if not isinstance(global_id, int) or global_id <= 0:
+            return None
+
+        candidates: list[dict] = []
+
+        def _append_crop(payload: str, ts: object, role: object) -> None:
+            if not isinstance(payload, str) or not payload:
+                return
+            captured_ts = float(ts) if isinstance(ts, (int, float)) else 0.0
+            candidates.append(
+                {
+                    "jpeg_b64": payload,
+                    "captured_ts": captured_ts,
+                    "source_role": str(role or ""),
+                }
+            )
+
+        for role, tracker in self._feeder_trackers.items():
+            live_track = next(
+                (
+                    internal
+                    for internal in getattr(tracker, "_tracks", {}).values()
+                    if internal.global_id == global_id
+                ),
+                None,
+            )
+            if live_track is None:
+                continue
+            for snap in getattr(live_track, "sector_snapshots", []):
+                _append_crop(
+                    getattr(snap, "piece_jpeg_b64", ""),
+                    getattr(snap, "captured_ts", None),
+                    role,
+                )
+
+        detail = self._piece_history.get_detail(global_id)
+        if isinstance(detail, dict):
+            for segment in detail.get("segments", []):
+                if not isinstance(segment, dict):
+                    continue
+                role = segment.get("source_role")
+                for snap in segment.get("sector_snapshots", []):
+                    if not isinstance(snap, dict):
+                        continue
+                    _append_crop(
+                        str(snap.get("piece_jpeg_b64") or ""),
+                        snap.get("captured_ts"),
+                        role,
+                    )
+            for frame in detail.get("drop_zone_burst", []):
+                if not isinstance(frame, dict) or not frame.get("detected"):
+                    continue
+                _append_crop(
+                    str(frame.get("crop_jpeg_b64") or ""),
+                    frame.get("timestamp"),
+                    "carousel_freefall",
+                )
+
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: float(item.get("captured_ts") or 0.0))
+
     # -- Drop-zone burst capture -------------------------------------------------
 
     _BURST_MAX_EDGE_PX = 640
@@ -2913,11 +3041,17 @@ class VisionManager:
         role: str,
         *,
         force: bool = False,
+        frame: CameraFrame | None = None,
     ) -> ClassificationDetectionResult | None:
-        capture = self.getCaptureThreadForRole(role)
-        if capture is None:
-            return None
-        frame = capture.latest_frame
+        # When ``frame`` is supplied, run detection on exactly that frame so
+        # the returned bbox coords match a sample image the caller is also
+        # archiving from the same frame. When ``frame`` is None (the legacy
+        # live path), fall back to whatever the capture thread has latest.
+        if frame is None:
+            capture = self.getCaptureThreadForRole(role)
+            if capture is None:
+                return None
+            frame = capture.latest_frame
         if frame is None:
             return None
         algorithm = self.getFeederDetectionAlgorithm(role)
@@ -3035,11 +3169,19 @@ class VisionManager:
             )
         )
 
-    def _getCarouselDynamicDetection(self, *, force: bool = False) -> ClassificationDetectionResult | None:
-        capture = self._carousel_capture
-        if capture is None:
-            return None
-        frame = capture.latest_frame
+    def _getCarouselDynamicDetection(
+        self,
+        *,
+        force: bool = False,
+        frame: CameraFrame | None = None,
+    ) -> ClassificationDetectionResult | None:
+        # See _getFeederDynamicDetection: caller-supplied frame keeps bbox
+        # coords and the archived sample image in sync.
+        if frame is None:
+            capture = self._carousel_capture
+            if capture is None:
+                return None
+            frame = capture.latest_frame
         if frame is None:
             return None
         algorithm = self.getCarouselDetectionAlgorithm()
@@ -3050,7 +3192,13 @@ class VisionManager:
                 last_ts, last_det = cached
                 if now - float(last_ts) < _hive_inference_min_interval_s_for_role("carousel"):
                     return last_det
-            detection = self._runHiveDetection(algorithm, frame.raw, scope="carousel", role="carousel")
+            detection = self._runHiveDetection(
+                algorithm,
+                frame.raw,
+                scope="carousel",
+                role="carousel",
+                conf_threshold=HIVE_CAROUSEL_CONF_THRESHOLD,
+            )
             self._carousel_dynamic_detection_cache = (now, detection)
             return detection
         cached = self._carousel_dynamic_detection_cache
@@ -3067,14 +3215,16 @@ class VisionManager:
 
     def _captureAuxiliarySampleFromFrame(self, role: str, frame_raw: np.ndarray) -> dict[str, np.ndarray | None]:
         if role in self._feederTrackerRoles():
-            crop, _ = self._feederRegionCrop(role, frame_raw)
+            crop, offset = self._feederRegionCrop(role, frame_raw)
         elif role == "carousel":
-            crop, _ = self._carouselRegionCrop(frame_raw)
+            crop, offset = self._carouselRegionCrop(frame_raw)
         else:
             crop = frame_raw.copy()
+            offset = (0, 0)
         return {
             "input_image": crop,
             "frame": frame_raw.copy(),
+            "crop_offset": offset,
         }
 
     def _captureAuxiliarySample(self, role: str) -> dict[str, np.ndarray | None]:
@@ -3090,6 +3240,11 @@ class VisionManager:
         if role == "carousel":
             return "carousel"
         return "classification"
+
+    def sampleSourceRoleForRole(self, role: str) -> str:
+        if role == "carousel" and self._usesClassificationChannelSetup():
+            return "classification_channel"
+        return role
 
     def _sampleCollectionEnabledForRole(self, role: str) -> bool:
         if role in self._feederTrackerRoles():
@@ -3107,9 +3262,13 @@ class VisionManager:
         trigger_algorithm: str | None,
         trigger_metadata: dict[str, Any] | None = None,
         frame_snapshot: np.ndarray | None = None,
-    ) -> None:
+    ) -> bool:
         if not self._sampleCollectionEnabledForRole(role):
-            return
+            self.gc.logger.info(
+                "Auxiliary teacher capture skipped for %s: sample collection disabled",
+                role,
+            )
+            return False
         request = AuxiliaryTeacherCaptureRequest(
             role=role,
             scope=cast(DetectionScope, self._sampleRoleScope(role)),
@@ -3123,6 +3282,7 @@ class VisionManager:
         )
         with self._auxiliary_capture_lock:
             self._auxiliary_capture_requests.append(request)
+        return True
 
     def scheduleFeederTeacherCaptureAfterMove(
         self,
@@ -3167,6 +3327,117 @@ class VisionManager:
                 "trigger_hot_pixels": int(hot_pixels) if isinstance(hot_pixels, int) else None,
                 "trigger_used_frozen_frame": bool(frame_snapshot is not None),
             },
+            frame_snapshot=frame_snapshot,
+        )
+
+    def scheduleClassificationChannelTeacherCaptureAfterMove(
+        self,
+        *,
+        delay_s: float,
+        move_label: str,
+        pulse_degrees: float,
+    ) -> None:
+        """Queue a C4 teacher capture after the classification-channel rotor moves.
+
+        In classification-channel setups C4 is tracked as the feeder-side
+        ``carousel`` role, but samples should be archived as
+        ``classification_channel`` via ``sampleSourceRoleForRole``.
+        """
+        algorithm = (
+            self.getFeederDetectionAlgorithm("carousel")
+            if "carousel" in self._feederTrackerRoles()
+            else self.getCarouselDetectionAlgorithm()
+        )
+        self._queueAuxiliaryTeacherCapture(
+            role="carousel",
+            capture_reason="classification_channel_move_complete",
+            due_at=time.time() + max(0.0, delay_s),
+            trigger_algorithm=algorithm,
+            trigger_metadata={
+                "trigger_move_label": move_label,
+                "trigger_move_delay_ms": int(round(max(0.0, delay_s) * 1000.0)),
+                "trigger_pulse_degrees": float(pulse_degrees),
+            },
+        )
+
+    def saveClassificationChannelEmptyStateCapture(self) -> bool:
+        """Archive/upload a negative C4 sample when the channel is visibly empty."""
+        if not self._sampleCollectionEnabledForRole("carousel"):
+            return False
+        capture = self._carousel_capture
+        frame = capture.latest_frame if capture is not None else None
+        if frame is None:
+            return False
+
+        sample_capture = self._captureAuxiliarySampleFromFrame("carousel", frame.raw)
+        input_image = sample_capture.get("input_image")
+        source_frame = sample_capture.get("frame")
+        if not isinstance(input_image, np.ndarray) or input_image.size == 0:
+            return False
+
+        try:
+            from server.classification_training import getClassificationTrainingManager
+
+            getClassificationTrainingManager().saveAuxiliaryDetectionCapture(
+                source="live_empty_state_capture",
+                source_role=self.sampleSourceRoleForRole("carousel"),
+                detection_scope=self._sampleRoleScope("carousel"),
+                capture_reason="classification_channel_empty_state",
+                detection_algorithm="empty_state",
+                detection_openrouter_model=None,
+                detection_found=False,
+                detection_bbox=None,
+                detection_candidate_bboxes=[],
+                detection_bbox_count=0,
+                detection_score=None,
+                detection_message="Empty-state sample captured with no C4 tracks.",
+                input_image=input_image,
+                source_frame=source_frame if isinstance(source_frame, np.ndarray) else None,
+                extra_metadata={
+                    "empty_state": True,
+                    "teacher_capture": True,
+                    "teacher_capture_requested_at": time.time(),
+                    "teacher_capture_due_at": time.time(),
+                    "teacher_capture_used_frozen_frame": False,
+                    "trigger_algorithm": self.getFeederDetectionAlgorithm("carousel"),
+                    "trigger_reason": "no_classification_channel_tracks",
+                },
+            )
+            return True
+        except Exception as exc:
+            self.gc.logger.warning(
+                f"Failed to archive classification-channel empty-state sample: {exc}"
+            )
+            return False
+
+    def forceQueueAuxiliaryTeacherCapture(self, role: str) -> bool:
+        """Queue a teacher capture for ``role`` regardless of trigger state.
+
+        Used by the /api/system/force-teacher-capture endpoint during
+        sample-collection drives where the YOLO model that normally drives
+        the classic trigger is missing real pieces (e.g. C4 carousel with
+        a c_channel-trained model) and we still need Gemini-labeled
+        samples flowing.
+        """
+        frame_snapshot: np.ndarray | None = None
+        if role == "carousel":
+            capture = self._carousel_capture
+        else:
+            capture = self.getCaptureThreadForRole(role)
+        if capture is not None and capture.latest_frame is not None:
+            frame_snapshot = capture.latest_frame.raw.copy()
+        if frame_snapshot is None:
+            return False
+        return self._queueAuxiliaryTeacherCapture(
+            role=role,
+            capture_reason="forced_sample_collection",
+            due_at=time.time(),
+            trigger_algorithm=(
+                self.getCarouselDetectionAlgorithm()
+                if role == "carousel"
+                else self.getFeederDetectionAlgorithm(role)
+            ),
+            trigger_metadata={"forced": True},
             frame_snapshot=frame_snapshot,
         )
 
@@ -3252,7 +3523,16 @@ class VisionManager:
         self._carousel_heatmap.clearBaseline()
 
     def isCarouselTriggered(self) -> Tuple[bool, float, int]:
-        if self.getCarouselDetectionAlgorithm() == "gemini_sam":
+        algorithm = self.getCarouselDetectionAlgorithm()
+        if algorithm == "gemini_sam":
+            detection = self._getCarouselDynamicDetection(force=False)
+            bbox_count = len(detection.bboxes) if detection is not None else 0
+            score = self._detectionScoreValue(detection, default=0.0) or 0.0
+            return bool(detection is not None and detection.bbox is not None), score, bbox_count
+        if algorithm.startswith("hive:"):
+            # Hive carousel models can drive the classic trigger directly —
+            # otherwise the heatmap diff path (which needs a baseline that
+            # may not be configured) gates teacher-sample collection.
             detection = self._getCarouselDynamicDetection(force=False)
             bbox_count = len(detection.bboxes) if detection is not None else 0
             score = self._detectionScoreValue(detection, default=0.0) or 0.0
@@ -3332,7 +3612,7 @@ class VisionManager:
         }
 
         if algorithm == "gemini_sam":
-            detection = self._getFeederDynamicDetection(role, force=force)
+            detection = self._getFeederDynamicDetection(role, force=force, frame=frame)
             if detection is None:
                 message = "Cloud vision did not find a piece in the current frame."
                 detector = self._feeder_gemini_detectors.get(role)
@@ -3373,7 +3653,7 @@ class VisionManager:
             # Route through _getFeederDynamicDetection so the tracker is
             # always updated — running _runHiveDetection directly here would
             # bypass _updateFeederTracker.
-            detection = self._getFeederDynamicDetection(role, force=force)
+            detection = self._getFeederDynamicDetection(role, force=force, frame=frame)
             if detection is None:
                 result.update(
                     {
@@ -3455,7 +3735,11 @@ class VisionManager:
                 if isinstance(candidate, list) and len(candidate) >= 4
             ]
         if include_capture:
-            result["_sample_capture"] = self._captureAuxiliarySample(role)
+            # Capture the sample image from the SAME frame the detection ran on,
+            # not a fresh latest_frame. Otherwise the bbox coords belong to a
+            # frame that may be seconds out of date relative to the saved image,
+            # producing the "boxes float in empty regions" artifact in Hive.
+            result["_sample_capture"] = self._captureAuxiliarySampleFromFrame(role, frame.raw)
         return result
 
     def _buildCarouselDetectionPayload(
@@ -3483,7 +3767,7 @@ class VisionManager:
         }
 
         if algorithm == "gemini_sam":
-            detection = self._getCarouselDynamicDetection(force=force)
+            detection = self._getCarouselDynamicDetection(force=force, frame=frame)
             if detection is None:
                 error_detail = self._carousel_gemini_detector._last_error if self._carousel_gemini_detector else None
                 message = "Cloud vision did not find a piece on the carousel."
@@ -3518,7 +3802,13 @@ class VisionManager:
             return result
 
         if algorithm.startswith("hive:"):
-            detection = self._runHiveDetection(algorithm, frame.raw, scope="carousel", role="carousel")
+            detection = self._runHiveDetection(
+                algorithm,
+                frame.raw,
+                scope="carousel",
+                role="carousel",
+                conf_threshold=HIVE_CAROUSEL_CONF_THRESHOLD,
+            )
             if detection is None:
                 result.update(
                     {
@@ -3594,7 +3884,9 @@ class VisionManager:
                 if isinstance(candidate, list) and len(candidate) >= 4
             ]
         if include_capture:
-            result["_sample_capture"] = self._captureAuxiliarySample("carousel")
+            # Same frame for both detection and sample image (see
+            # debugFeederDetection comment).
+            result["_sample_capture"] = self._captureAuxiliarySampleFromFrame("carousel", frame.raw)
         return result
 
     def _processPendingAuxiliaryTeacherCaptures(self) -> None:
@@ -3678,7 +3970,7 @@ class VisionManager:
 
             getClassificationTrainingManager().saveAuxiliaryDetectionCapture(
                 source=request.source,
-                source_role=request.role,
+                source_role=self.sampleSourceRoleForRole(request.role),
                 detection_scope=request.scope,
                 capture_reason=request.capture_reason,
                 detection_algorithm="gemini_sam",

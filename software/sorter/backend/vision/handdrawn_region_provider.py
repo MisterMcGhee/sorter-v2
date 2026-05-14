@@ -3,7 +3,6 @@ import cv2
 
 from blob_manager import getChannelPolygons
 from defs.consts import CHANNEL_SECTION_COUNT, CHANNEL_SECTION_DEG
-from subsystems.feeder.analysis import parseSavedChannelArcZones, zoneSectionsForChannel
 from .regions import RegionName, Region
 
 CHANNEL_COLORS: dict[RegionName, tuple[int, int, int]] = {
@@ -18,6 +17,18 @@ CHANNEL_COLORS: dict[RegionName, tuple[int, int, int]] = {
 
 DROPZONE_COLOR = (0, 200, 0)
 PRECISE_COLOR = (0, 100, 255)
+
+
+def parseSavedChannelArcZones(*args, **kwargs):
+    from subsystems.feeder.analysis import parseSavedChannelArcZones as _impl
+
+    return _impl(*args, **kwargs)
+
+
+def zoneSectionsForChannel(*args, **kwargs):
+    from subsystems.feeder.analysis import zoneSectionsForChannel as _impl
+
+    return _impl(*args, **kwargs)
 
 
 def _sectionsToAngularMask(
@@ -290,10 +301,32 @@ class HanddrawnRegionProvider:
 
         return annotated
 
-    def _scaleForFrame(self, frame: np.ndarray):
-        """Compute scale factors from saved polygon resolution to actual frame size."""
+    def _savedResolutionForPolygonKey(self, poly_key: str) -> tuple[int, int]:
+        """Return the editor resolution for a specific channel polygon."""
+        channel_key = (
+            "second"
+            if poly_key == "second_channel"
+            else "third"
+            if poly_key == "third_channel"
+            else "classification_channel"
+            if poly_key == "classification_channel"
+            else None
+        )
+        if channel_key is not None:
+            raw_arc = self._arc_params.get(channel_key) if isinstance(self._arc_params, dict) else None
+            if isinstance(raw_arc, dict):
+                resolution = raw_arc.get("resolution")
+                if isinstance(resolution, (list, tuple)) and len(resolution) >= 2:
+                    width, height = resolution[0], resolution[1]
+                    if isinstance(width, (int, float)) and isinstance(height, (int, float)):
+                        if width > 0 and height > 0:
+                            return int(width), int(height)
+        return self._saved_resolution
+
+    def _scaleForFrame(self, frame: np.ndarray, poly_key: str):
+        """Compute scale factors from this polygon's editor resolution to frame size."""
         h, w = frame.shape[:2]
-        src_w, src_h = self._saved_resolution
+        src_w, src_h = self._savedResolutionForPolygonKey(poly_key)
         return w / src_w, h / src_h
 
     def _scaledChannelMask(self, h, w, poly_key, pts_list, sx, sy):
@@ -343,7 +376,7 @@ class HanddrawnRegionProvider:
 
         poly_key: 'second_channel', 'third_channel', 'classification_channel', or 'carousel'
         """
-        sx, sy = self._scaleForFrame(frame)
+        sx, sy = self._scaleForFrame(frame, poly_key)
 
         if poly_key == "carousel":
             annotated = frame.copy()

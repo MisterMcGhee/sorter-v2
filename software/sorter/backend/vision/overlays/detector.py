@@ -12,6 +12,55 @@ if TYPE_CHECKING:
     from vision.mog2_channel_detector import Mog2ChannelDetector
 
 
+CENTER_MARKER_COLOR = (255, 255, 255)
+CENTER_MARKER_OUTLINE = (0, 0, 0)
+CENTER_MARKER_RADIUS = 4
+CENTER_MARKER_ARM_PX = 9
+
+
+def _bbox_center(bbox) -> tuple[int, int]:
+    x1, y1, x2, y2 = [int(round(value)) for value in bbox]
+    return int(round((x1 + x2) / 2.0)), int(round((y1 + y2) / 2.0))
+
+
+def _draw_center_marker(frame: np.ndarray, center: tuple[int, int]) -> None:
+    cx, cy = center
+    cv2.circle(frame, (cx, cy), CENTER_MARKER_RADIUS + 2, CENTER_MARKER_OUTLINE, 2, cv2.LINE_AA)
+    cv2.circle(frame, (cx, cy), CENTER_MARKER_RADIUS, CENTER_MARKER_COLOR, -1, cv2.LINE_AA)
+    cv2.line(
+        frame,
+        (cx - CENTER_MARKER_ARM_PX, cy),
+        (cx + CENTER_MARKER_ARM_PX, cy),
+        CENTER_MARKER_OUTLINE,
+        3,
+        cv2.LINE_AA,
+    )
+    cv2.line(
+        frame,
+        (cx, cy - CENTER_MARKER_ARM_PX),
+        (cx, cy + CENTER_MARKER_ARM_PX),
+        CENTER_MARKER_OUTLINE,
+        3,
+        cv2.LINE_AA,
+    )
+    cv2.line(
+        frame,
+        (cx - CENTER_MARKER_ARM_PX, cy),
+        (cx + CENTER_MARKER_ARM_PX, cy),
+        CENTER_MARKER_COLOR,
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.line(
+        frame,
+        (cx, cy - CENTER_MARKER_ARM_PX),
+        (cx, cy + CENTER_MARKER_ARM_PX),
+        CENTER_MARKER_COLOR,
+        1,
+        cv2.LINE_AA,
+    )
+
+
 class DetectorOverlay:
     """Draws MOG2 channel detector bounding boxes and section labels.
 
@@ -34,6 +83,7 @@ class DetectorOverlay:
 
         for det in self._get_detections():
             x1, y1, x2, y2 = det.bbox
+            _draw_center_marker(frame, _bbox_center(det.bbox))
             secs = getBboxSections(det.bbox, det.channel)
             exit_zone = bool(secs & det.channel.exit_sections)
             drop = bool(secs & det.channel.dropzone_sections)
@@ -63,6 +113,7 @@ class DynamicDetectionOverlay:
         for index, bbox in enumerate(detection.bboxes, start=1):
             x1, y1, x2, y2 = [int(value) for value in bbox]
             cv2.rectangle(frame, (x1, y1), (x2, y2), (168, 85, 247), 2, cv2.LINE_AA)
+            _draw_center_marker(frame, _bbox_center(bbox))
             cv2.putText(
                 frame,
                 str(index),

@@ -42,6 +42,7 @@ class FeederTickContext:
     pulse_intent: bool = False
     pulse_sent: bool = False
     ch1_jam_recovery_triggered: bool = False
+    sample_collection_mode: bool = False
     abort_tick: bool = False
 
 

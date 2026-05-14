@@ -7,6 +7,7 @@
 	import CollapsibleSection from '$lib/components/CollapsibleSection.svelte';
 	import RecentObjects from '$lib/components/RecentObjects.svelte';
 	import ResizeHandle from '$lib/components/ResizeHandle.svelte';
+	import SampleCollectionSpeedPanel from '$lib/components/SampleCollectionSpeedPanel.svelte';
 	import SidebarBottomTabs from '$lib/components/SidebarBottomTabs.svelte';
 	import SortingStatusCard from '$lib/components/SortingStatusCard.svelte';
 	import { buildDashboardFeedCrops, type DashboardFeedCrop } from '$lib/dashboard/crops';
@@ -40,6 +41,11 @@
 	const cameraConfig = $derived<Record<string, number | string | null>>(
 		machine.machine?.camerasConfig?.cameras ?? {}
 	);
+	const c4CameraRole = $derived(
+		machineSetup === 'classification_channel' || isConfigured('classification_channel')
+			? 'classification_channel'
+			: 'carousel'
+	);
 	const hardwareState = $derived(machine.machine?.systemStatus?.hardware_state ?? 'standby');
 	const hardwareError = $derived(
 		startSystemError ?? machine.machine?.systemStatus?.hardware_error ?? null
@@ -50,9 +56,9 @@
 	async function startSystem() {
 		startSystemError = null;
 		try {
-			await fetch(`${currentBackendBaseUrl()}/api/system/home`, { method: 'POST' });
+			await fetch(`${currentBackendBaseUrl()}/api/system/recover`, { method: 'POST' });
 		} catch (e: any) {
-			startSystemError = e?.message ?? 'Failed to home system';
+			startSystemError = e?.message ?? 'Failed to recover system';
 		}
 	}
 
@@ -67,6 +73,9 @@
 	}
 
 	function cropFor(role: string): DashboardFeedCrop | null {
+		if (role === 'carousel' && machineSetup === 'classification_channel') {
+			return dashboardCrops.classification_channel ?? dashboardCrops.carousel ?? null;
+		}
 		return dashboardCrops[role] ?? null;
 	}
 
@@ -132,6 +141,7 @@
 		c_channel_2: 'C-Channel 2',
 		c_channel_3: 'C-Channel 3',
 		carousel: 'Carousel',
+		classification_channel: 'Classification Channel',
 		classification_top: 'Classification Top',
 		classification_bottom: 'Classification Bottom'
 	};
@@ -165,34 +175,31 @@
 					<div class="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
 					<div class="flex min-h-0 flex-1 gap-3">
 							<div class="flex-1 min-w-0">
-								<CameraFeed
-									camera="c_channel_2"
-									label={cameraLabel('c_channel_2')}
-									crop={cropFor('c_channel_2')}
-									source="ws"
-									controls={["annotations", "crop", "fullscreen"]}
-								/>
+									<CameraFeed
+										camera="c_channel_2"
+										label={cameraLabel('c_channel_2')}
+										crop={cropFor('c_channel_2')}
+										controls={["annotations", "zones", "crop", "fullscreen"]}
+									/>
+								</div>
+								<div class="flex-1 min-w-0">
+									<CameraFeed
+										camera="c_channel_3"
+										label={cameraLabel('c_channel_3')}
+										crop={cropFor('c_channel_3')}
+										controls={["annotations", "zones", "crop", "fullscreen"]}
+									/>
+								</div>
 							</div>
-							<div class="flex-1 min-w-0">
-								<CameraFeed
-									camera="c_channel_3"
-									label={cameraLabel('c_channel_3')}
-									crop={cropFor('c_channel_3')}
-									source="ws"
-									controls={["annotations", "crop", "fullscreen"]}
-								/>
-							</div>
-						</div>
 						<div class="flex min-h-0 flex-1 gap-3">
 							<div class="flex-1 min-w-0">
-								<CameraFeed
-									camera="carousel"
-									label={cameraLabel('carousel')}
-									crop={cropFor('carousel')}
-									source="ws"
-									controls={["annotations", "crop", "fullscreen"]}
-								/>
-							</div>
+									<CameraFeed
+										camera={c4CameraRole}
+										label={cameraLabel(c4CameraRole)}
+										crop={cropFor(c4CameraRole)}
+										controls={["annotations", "zones", "crop", "fullscreen"]}
+									/>
+								</div>
 							{#if classification_camera}
 								<div class="flex-1 min-w-0">
 									<div class="setup-card-shell flex h-full min-h-0 flex-col border">
@@ -237,7 +244,6 @@
 												label={cameraLabel(classification_camera)}
 												crop={cropFor(classification_camera)}
 												showHeader={false}
-												source="ws"
 												controls={[]}
 												bind:layer={classification_layer}
 											/>
@@ -254,20 +260,18 @@
 					{#if classification_camera && ((has_top ? 1 : 0) + (has_bottom ? 1 : 0) === 1)}
 						<div class="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
 							<div class="flex-1 min-w-0">
-								<CameraFeed
-									camera="feeder"
-									label={cameraLabel('feeder')}
-									crop={cropFor('feeder')}
-									source="ws"
-									controls={["annotations", "crop", "fullscreen"]}
-								/>
-							</div>
+									<CameraFeed
+										camera="feeder"
+										label={cameraLabel('feeder')}
+										crop={cropFor('feeder')}
+										controls={["annotations", "zones", "crop", "fullscreen"]}
+									/>
+								</div>
 							<div class="flex-1 min-w-0">
 								<CameraFeed
 									camera={classification_camera}
 									label={cameraLabel(classification_camera)}
 									crop={cropFor(classification_camera)}
-									source="ws"
 									controls={["annotations", "crop", "fullscreen"]}
 								/>
 							</div>
@@ -275,14 +279,13 @@
 					{:else}
 						<div class="flex min-h-0 min-w-0 flex-1 gap-3">
 							<div class="flex-1 min-w-0">
-								<CameraFeed
-									camera="feeder"
-									label={cameraLabel('feeder')}
-									crop={cropFor('feeder')}
-									source="ws"
-									controls={["annotations", "crop", "fullscreen"]}
-								/>
-							</div>
+									<CameraFeed
+										camera="feeder"
+										label={cameraLabel('feeder')}
+										crop={cropFor('feeder')}
+										controls={["annotations", "zones", "crop", "fullscreen"]}
+									/>
+								</div>
 							{#if classification_camera}
 								<div class="setup-card-shell flex min-h-0 flex-1 flex-col border">
                                     <div class="setup-card-header flex items-center justify-between px-3 py-2 text-sm">
@@ -327,7 +330,6 @@
 											crop={cropFor(classification_camera)}
 											showHeader={false}
 											controls={[]}
-											source="ws"
 											bind:layer={classification_layer}
 										/>
 									</div>
@@ -381,6 +383,9 @@
 						{/if}
 					</div>
 				{/if}
+				<CollapsibleSection title="Sample Capture" storageKey="sampleCapture">
+					<SampleCollectionSpeedPanel baseUrl={currentBackendBaseUrl()} {hardwareState} />
+				</CollapsibleSection>
 				<CollapsibleSection title="Recent Pieces" storageKey="recent" grow>
 					<RecentObjects />
 				</CollapsibleSection>

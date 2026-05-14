@@ -60,7 +60,7 @@
 
 	async function homeSystem() {
 		try {
-			await fetch(`${currentBackendBaseUrl()}/api/system/home`, { method: 'POST' });
+			await fetch(`${currentBackendBaseUrl()}/api/system/recover`, { method: 'POST' });
 		} catch {
 			// ignore
 		}

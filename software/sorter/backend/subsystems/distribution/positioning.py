@@ -88,6 +88,23 @@ class Positioning(BaseState):
                 self._setOccupancyState("positioning.wait_piece_for_distribution")
                 return DistributionState.IDLE
 
+            if getattr(self.shared, "sample_collection_mode", False):
+                self.logger.info(
+                    "Positioning: sample collection mode — opening all layer doors for discard passthrough"
+                )
+                self._clearBinsFullAlertIfOwned()
+                self._clearChuteJamAlertIfOwned()
+                self._openAllDoorsForPassthrough()
+                piece.stage = PieceStage.distributing
+                piece.distributing_at = time.time()
+                piece.distribution_target_selected_at = piece.distributing_at
+                piece.destination_bin = None
+                piece.updated_at = time.time()
+                self._piece = piece
+                self.event_queue.put(knownObjectToEvent(piece))
+                self._setOccupancyState("positioning.sample_collection_passthrough")
+                return DistributionState.READY
+
             if piece.part_id is not None:
                 category_id = self.sorting_profile.getCategoryIdForPart(piece.part_id, piece.color_id)
             else:

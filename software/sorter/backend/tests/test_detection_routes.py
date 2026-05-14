@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -80,6 +81,67 @@ class DetectionRouteTests(unittest.TestCase):
 
         self.assertEqual(400, excinfo.exception.status_code)
         self.assertEqual("Unsupported feeder role.", excinfo.exception.detail)
+
+    def test_aux_detection_save_uses_actual_crop_offset_and_c4_source_role(self) -> None:
+        saved_calls: list[dict] = []
+
+        class FakeTrainingManager:
+            def saveAuxiliaryDetectionCapture(self, **kwargs):
+                saved_calls.append(kwargs)
+                return {"ok": True}
+
+        class FakeVision:
+            def supportsCarouselSampleCollection(self) -> bool:
+                return True
+
+            def sampleSourceRoleForRole(self, role: str) -> str:
+                return "classification_channel" if role == "carousel" else role
+
+        shared_state.vision_manager = FakeVision()
+        sample_capture = {
+            "input_image": np.zeros((1080, 1308, 3), dtype=np.uint8),
+            "frame": np.zeros((1080, 1920, 3), dtype=np.uint8),
+            "crop_offset": (308, 0),
+        }
+        payload = {
+            "camera": "carousel",
+            "algorithm": "gemini_sam",
+            "frame_resolution": [1920, 1080],
+            "zone_bbox": [308, -60, 1616, 1248],
+            "found": True,
+            "bbox": [914, 0, 1087, 158],
+            "candidate_bboxes": [
+                [914, 0, 1087, 158],
+                [996, 3, 1112, 130],
+                [738, 85, 815, 129],
+            ],
+            "bbox_count": 3,
+            "score": 0.99,
+            "message": "Cloud vision found candidate pieces.",
+        }
+
+        with patch.object(detection, "getClassificationTrainingManager", return_value=FakeTrainingManager()):
+            result = detection._finalize_aux_detection_debug_payload(
+                role="carousel",
+                payload=payload,
+                sample_capture=sample_capture,
+                openrouter_model="google/gemini-3-flash-preview",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(1, len(saved_calls))
+        saved = saved_calls[0]
+        self.assertEqual("classification_channel", saved["source_role"])
+        self.assertEqual("carousel", saved["detection_scope"])
+        self.assertEqual([606, 0, 779, 158], saved["detection_bbox"])
+        self.assertEqual(
+            [
+                [606, 0, 779, 158],
+                [688, 3, 804, 130],
+                [430, 85, 507, 129],
+            ],
+            saved["detection_candidate_bboxes"],
+        )
 
     def test_classification_channel_wall_phase_uses_live_frame(self) -> None:
         class FakeVision:

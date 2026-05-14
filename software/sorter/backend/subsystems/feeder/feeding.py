@@ -17,6 +17,10 @@ from irl.config import IRLInterface, IRLConfig
 from global_config import GlobalConfig
 from vision import VisionManager
 from defs.events import PauseCommandData, PauseCommandEvent
+from subsystems.sample_collection_speed import (
+    microsteps_from_stepper_config,
+    sample_collection_effective_speed_microsteps_per_second,
+)
 
 CHANNEL_OUTPUT_GEAR_RATIO = 130.0 / 12.0
 CH1_STALL_ALERT_PREFIX = "Feeder transport blocked"
@@ -82,6 +86,7 @@ class Feeding(BaseState):
         self._ch1_pause_enqueued: bool = False
         self._feeder_detection_unavailable_since: float | None = None
         self._feeder_detection_pause_enqueued: bool = False
+        self._sample_speed_limit_cache: dict[str, int] = {}
         self._c1_jam_recovery = C1JamRecoveryStrategy(
             stepper=self.irl.c_channel_1_rotor_stepper,
             logger=self.gc.logger,
@@ -211,6 +216,74 @@ class Feeding(BaseState):
     def _isStepperBusy(self, stepper: "StepperMotor") -> bool:
         return time.monotonic() < self._busy_until.get(stepper._name, 0.0)
 
+    def _sampleCollectionRoleForPulseLabel(self, label: str) -> str | None:
+        if label.startswith("ch1"):
+            return "c_channel_1"
+        if label.startswith("ch2"):
+            return "c_channel_2"
+        if label.startswith("ch3"):
+            return "c_channel_3"
+        return None
+
+    def _stepperConfigForSampleRole(self, role: str):
+        if role == "c_channel_1":
+            return getattr(self.irl_config, "c_channel_1_rotor_stepper", None)
+        if role == "c_channel_2":
+            return getattr(self.irl_config, "c_channel_2_rotor_stepper", None)
+        if role == "c_channel_3":
+            return getattr(self.irl_config, "c_channel_3_rotor_stepper", None)
+        return None
+
+    def _setCachedSpeedLimit(self, cache_key: str, stepper: "StepperMotor", speed: int) -> None:
+        if self._sample_speed_limit_cache.get(cache_key) == int(speed):
+            return
+        stepper.set_speed_limits(16, int(speed))
+        self._sample_speed_limit_cache[cache_key] = int(speed)
+
+    def _applySampleCollectionSpeedLimit(
+        self,
+        label: str,
+        stepper: "StepperMotor",
+        cfg: "RotorPulseConfig",
+    ) -> int | None:
+        role = self._sampleCollectionRoleForPulseLabel(label)
+        if role is None:
+            return None
+        default_speed = int(getattr(cfg, "microsteps_per_second", 0) or 0)
+        if default_speed <= 0:
+            return None
+
+        cache_key = f"{role}:{getattr(stepper, '_name', label)}"
+        if not self.shared.sample_collection_mode:
+            if cache_key in self._sample_speed_limit_cache:
+                try:
+                    self._setCachedSpeedLimit(cache_key, stepper, default_speed)
+                finally:
+                    self._sample_speed_limit_cache.pop(cache_key, None)
+                return default_speed
+            return None
+
+        microsteps = microsteps_from_stepper_config(
+            self._stepperConfigForSampleRole(role),
+            fallback=getattr(stepper, "_microsteps", 8),
+        )
+        speed = sample_collection_effective_speed_microsteps_per_second(
+            role,
+            default_microsteps_per_second=default_speed,
+            microsteps=microsteps,
+            enabled=True,
+        )
+        if speed is None:
+            return None
+        try:
+            self._setCachedSpeedLimit(cache_key, stepper, int(speed))
+        except Exception as exc:
+            self.gc.logger.warning(
+                f"Feeder: could not apply sample speed for {role}: {exc}"
+            )
+            return None
+        return int(speed)
+
     def _sendPulse(
         self,
         label: str,
@@ -224,9 +297,13 @@ class Feeding(BaseState):
             return False
         prof = self.gc.profiler
         pulse_degrees = stepper.degrees_for_microsteps(cfg.steps_per_pulse)
+        effective_speed_limit = self._applySampleCollectionSpeedLimit(label, stepper, cfg)
         with prof.timer(f"feeder.move_cmd.{label}_ms"):
             success = stepper.move_degrees(pulse_degrees)
-        exec_ms = stepper.estimateMoveDegreesMs(pulse_degrees)
+        exec_ms = stepper.estimateMoveDegreesMs(
+            pulse_degrees,
+            max_speed=effective_speed_limit or 5000,
+        )
         if success:
             cooldown_ms = max(exec_ms, cfg.delay_between_pulse_ms)
             if label.startswith("ch2"):
@@ -375,7 +452,15 @@ class Feeding(BaseState):
                     zone_manager=zone_manager,
                     config=classification_channel_config,
                 )
-            ch3_held = classification_ready_block or classification_channel_block
+            ch3_held = (
+                classification_ready_block or classification_channel_block
+            )
+            # Sample-collection mode: bypass the downstream gate so C3 keeps
+            # advancing pieces past the cameras even when the classification
+            # channel is stalled (e.g. clogged by ghost detections we are
+            # trying to record samples to fix).
+            if self.shared.sample_collection_mode:
+                ch3_held = False
             ch1_pulse_intent = not analysis.ch2_dropzone_occupied
             ch2_pulse_intent = (
                 not analysis.ch3_dropzone_occupied
@@ -452,6 +537,7 @@ class Feeding(BaseState):
                 ch2_stepper_busy=ch2_stepper_busy,
                 ch3_stepper_busy=ch3_stepper_busy,
                 wait_stepper_busy=wait_stepper_busy,
+                sample_collection_mode=bool(self.shared.sample_collection_mode),
             )
 
             self._c3_station.step(ctx)
