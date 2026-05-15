@@ -28,6 +28,7 @@
 	let machineSetup = $state<'standard_carousel' | 'classification_channel' | 'manual_carousel'>(
 		'standard_carousel'
 	);
+	let showSampleCapture = $state(false);
 
 	function currentBackendBaseUrl(): string {
 		return machineHttpBaseUrlFromWsUrl(machine.machine?.url) ?? backendHttpBaseUrl;
@@ -122,6 +123,17 @@
 		}
 	}
 
+	async function loadDashboardConfig(baseUrl: string) {
+		try {
+			const res = await fetch(`${baseUrl}/api/system/dashboard-config`);
+			if (!res.ok) return;
+			const payload = await res.json();
+			showSampleCapture = Boolean(payload?.show_sample_capture);
+		} catch {
+			// ignore transient shell fetch issues
+		}
+	}
+
 	$effect(() => {
 		if (!machine.machine) {
 			dashboardCrops = {};
@@ -134,6 +146,7 @@
 		cropBaseUrl = baseUrl;
 		void fetchDashboardCrops(baseUrl);
 		void loadMachineSetup(baseUrl);
+		void loadDashboardConfig(baseUrl);
 	});
 
 	const CAMERA_LABELS: Record<string, string> = {
@@ -158,6 +171,7 @@
 			const baseUrl = currentBackendBaseUrl();
 			void fetchDashboardCrops(baseUrl);
 			void loadMachineSetup(baseUrl);
+			void loadDashboardConfig(baseUrl);
 		}
 	});
 </script>
@@ -383,9 +397,11 @@
 						{/if}
 					</div>
 				{/if}
-				<CollapsibleSection title="Sample Capture" storageKey="sampleCapture">
-					<SampleCollectionSpeedPanel baseUrl={currentBackendBaseUrl()} {hardwareState} />
-				</CollapsibleSection>
+				{#if showSampleCapture}
+					<CollapsibleSection title="Sample Capture" storageKey="sampleCapture">
+						<SampleCollectionSpeedPanel baseUrl={currentBackendBaseUrl()} {hardwareState} />
+					</CollapsibleSection>
+				{/if}
 				<CollapsibleSection title="Recent Pieces" storageKey="recent" grow>
 					<RecentObjects />
 				</CollapsibleSection>

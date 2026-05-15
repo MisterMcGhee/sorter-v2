@@ -185,6 +185,44 @@ def setMachineNickname(nickname: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Dashboard preferences
+# ---------------------------------------------------------------------------
+
+
+_DASHBOARD_DEFAULTS: dict[str, Any] = {
+    "show_sample_capture": False,
+}
+
+
+def getDashboardConfig() -> dict[str, Any]:
+    """Return dashboard preferences merged on top of defaults."""
+    config = _read_toml()
+    section = config.get("dashboard")
+    merged = dict(_DASHBOARD_DEFAULTS)
+    if isinstance(section, dict):
+        for key, default in _DASHBOARD_DEFAULTS.items():
+            value = section.get(key)
+            if isinstance(value, type(default)):
+                merged[key] = value
+    return merged
+
+
+def setDashboardConfig(updates: dict[str, Any]) -> dict[str, Any]:
+    """Persist dashboard preferences; unknown keys are ignored. Returns merged state."""
+    sanitized: dict[str, Any] = {}
+    for key, default in _DASHBOARD_DEFAULTS.items():
+        if key in updates and isinstance(updates[key], type(default)):
+            sanitized[key] = updates[key]
+
+    def updater(config: dict[str, Any]) -> None:
+        existing = config.get("dashboard") if isinstance(config.get("dashboard"), dict) else {}
+        config["dashboard"] = {**existing, **sanitized}
+
+    _update_toml(updater)
+    return getDashboardConfig()
+
+
+# ---------------------------------------------------------------------------
 # Classification training config
 # ---------------------------------------------------------------------------
 

@@ -355,6 +355,21 @@ def _sample_collection_speeds_payload() -> Dict[str, Any]:
     }
 
 
+@router.get("/api/system/dashboard-config")
+def get_dashboard_config() -> Dict[str, Any]:
+    from toml_config import getDashboardConfig
+
+    return {"ok": True, **getDashboardConfig()}
+
+
+@router.post("/api/system/dashboard-config")
+def set_dashboard_config(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from toml_config import setDashboardConfig
+
+    merged = setDashboardConfig(payload or {})
+    return {"ok": True, **merged}
+
+
 @router.get("/api/system/sample-collection-mode")
 def get_sample_collection_mode() -> Dict[str, Any]:
     shared = _shared_variables()
