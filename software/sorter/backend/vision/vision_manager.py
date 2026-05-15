@@ -47,7 +47,13 @@ from .diff_configs import (
     DEFAULT_CAROUSEL_DIFF_CONFIG,
     DEFAULT_CLASSIFICATION_DIFF_CONFIG,
 )
-AUXILIARY_DETECTION_LOOP_INTERVAL_S = 0.25
+# Decision-clock cadence for the auxiliary detection loop. Aligned at 20 Hz
+# with the C4 Hive inference throttle (50 ms) so the detection cache stays
+# fresh independently of overlay rendering. The per-role throttles inside
+# _getFeederDynamicDetection / _computeFeederGeminiDetection dedupe inference
+# calls, so a 20 Hz wake-up rate does NOT translate to 20 Hz inference; it
+# just keeps the cache snappy when frames are actually new.
+AUXILIARY_DETECTION_LOOP_INTERVAL_S = 0.05
 OPENROUTER_MAX_CONCURRENCY = 10
 OPENROUTER_FAILURE_BACKOFF_S = 2.0
 OPENROUTER_BACKGROUND_RETRY_PADDING_S = 0.35
@@ -192,9 +198,7 @@ class VisionManager:
             roles=self._feederTrackerRoles(),
             exit_observer=getattr(gc.runtime_stats, "observeChannelExit", None),
             ghost_reject_observer=getattr(gc.runtime_stats, "observeHandoffGhostReject", None),
-            embedding_rebind_observer=getattr(gc.runtime_stats, "observeHandoffEmbeddingRebind", None),
             stale_pending_observer=getattr(gc.runtime_stats, "observeHandoffStalePendingDropped", None),
-            id_switch_suspect_observer=getattr(gc.runtime_stats, "observeTrackerIdSwitchSuspect", None),
         )
         self._drop_zone_burst_collector = DropZoneBurstCollector(self._piece_history)
         # Fresh burst store for the C3→C4 drop-zone "fashion-shoot" feature.
@@ -205,8 +209,6 @@ class VisionManager:
         self._burst_timers: Dict[int, threading.Timer] = {}
         self._burst_lock = threading.Lock()
         self._feeder_track_cache: Dict[str, Tuple[float, list]] = {}
-        self._classification_channel_zone_overlay: list[dict[str, Any]] = []
-        self._classification_channel_zone_overlay_meta: dict[str, Any] = {}
         # Gate: tracker updates only happen while the sorter is actually
         # running. Toggled from SorterController.resume/pause/stop so we
         # don't accumulate tracks while the operator is calibrating or idle.
@@ -215,7 +217,6 @@ class VisionManager:
         self._aux_detection_thread: threading.Thread | None = None
         self._auxiliary_capture_requests: list[AuxiliaryTeacherCaptureRequest] = []
         self._auxiliary_capture_lock = threading.Lock()
-        self._aux_feeder_refresh_cursor: int = 0
         self._openrouter_request_lock = threading.Lock()
         self._openrouter_next_allowed_at: float = 0.0
         self._openrouter_semaphore = threading.BoundedSemaphore(OPENROUTER_MAX_CONCURRENCY)
@@ -357,7 +358,6 @@ class VisionManager:
             DynamicDetectionOverlay,
             HeatmapOverlay,
             ClassificationOverlay,
-            ClassificationChannelZoneOverlay,
             IgnoredRegionOverlay,
             TrackOverlay,
         )
@@ -420,21 +420,28 @@ class VisionManager:
                         _ensure_detection(r)
                         return self.getFeederTracks(r)
 
+                    # Pin the encode path to the frame the detector last saw,
+                    # so overlay bboxes sit on the piece position the detector
+                    # actually scored — not on a newer frame where the piece
+                    # has already moved.
+                    def _pinned_ts(r=role):
+                        cached = self._feeder_dynamic_detection_cache.get(r)
+                        return float(cached[0]) if cached is not None else None
+
                     for feed in feeds:
-                        if role == "carousel" and self._usesClassificationChannelSetup():
-                            feed.add_overlay(DynamicDetectionOverlay(_ensure_detection))
+                        # The raw-YOLO purple boxes (DynamicDetectionOverlay)
+                        # double-up with the tracker-derived TrackOverlay on the
+                        # carousel feed — same piece, two overlapping boxes,
+                        # confusing for the operator. The TrackOverlay carries
+                        # all the identity state we need (active/coasting,
+                        # velocity arrow), so the raw YOLO layer is dropped.
+                        feed.set_pinned_ts_provider(_pinned_ts)
                         feed.add_overlay(
                             IgnoredRegionOverlay(
                                 lambda r=role: self.getFeederIgnoredDetectionOverlayData(r)
                             )
                         )
                         feed.add_overlay(TrackOverlay(_tracks_for))
-                        if role == "carousel" and self._usesClassificationChannelSetup():
-                            feed.add_overlay(
-                                ClassificationChannelZoneOverlay(
-                                    self.getClassificationChannelZoneOverlayData
-                                )
-                            )
                 else:
                     detector = self._per_channel_detectors.get(role)
                     analysis = self._per_channel_analysis.get(role)
@@ -448,6 +455,11 @@ class VisionManager:
                     carousel_feed.add_overlay(ChannelRegionOverlay(self._region_provider, "carousel"))
                     carousel_algo = self.getCarouselDetectionAlgorithm()
                     if carousel_algo == "gemini_sam" or carousel_algo.startswith("hive:"):
+                        def _carousel_pinned_ts():
+                            cached = self._carousel_dynamic_detection_cache
+                            return float(cached[0]) if cached is not None else None
+
+                        carousel_feed.set_pinned_ts_provider(_carousel_pinned_ts)
                         carousel_feed.add_overlay(DynamicDetectionOverlay(
                             lambda: self._getCarouselDynamicDetection(force=False)
                         ))
@@ -914,7 +926,15 @@ class VisionManager:
             rs = (sx + sy) / 2.0
             r_in = arc.inner_radius * rs
             r_out = arc.outer_radius * rs
-            tracker.set_channel_geometry((cx, cy), r_in, r_out, sector_count=18)
+            # C4 platter has 5 physical wall sectors; the C-channels are
+            # smooth annuli where the sector slicing is purely a snapshot
+            # subdivision (no walls). Match the geometry to reality so
+            # sector-anchored identity on C4 lines up with the physical
+            # walls, while C2/C3 keep their finer-grained snapshot slicing.
+            sector_count = 5 if role == "carousel" else 18
+            tracker.set_channel_geometry(
+                (cx, cy), r_in, r_out, sector_count=sector_count
+            )
 
     def _configureHandoffZonesFromSaved(self, polygon_data: dict, saved: dict) -> None:
         """Set up c_channel_2 exit / c_channel_3 entry zones from saved polygons.
@@ -2321,6 +2341,26 @@ class VisionManager:
         except Exception:
             pass
 
+    def forceKillCarouselTrack(self, global_id: int) -> bool:
+        """Drop the carousel track for ``global_id`` immediately.
+
+        Called by the classification-channel state machine after the drop
+        pulse fires: the piece has physically left the platter via the chute,
+        so the tracker must release its identity. Otherwise the next piece
+        that lands in the freed sector inherits the dropped piece's
+        global_id and accumulates crops on top of the old one.
+        """
+        tracker = self._feeder_trackers.get("carousel")
+        if tracker is None:
+            return False
+        accessor = getattr(tracker, "force_kill_track", None)
+        if accessor is None:
+            return False
+        try:
+            return bool(accessor(int(global_id)))
+        except Exception:
+            return False
+
     def markCarouselPendingDrop(
         self,
         global_id: int,
@@ -2409,30 +2449,6 @@ class VisionManager:
 
         if algorithm.startswith("hive:"):
             self._drop_zone_burst_collector.trigger(global_id, detect_fn, get_latest_frame)
-
-    def setClassificationChannelZoneOverlay(
-        self,
-        zones: list[dict[str, object]],
-        *,
-        intake_angle_deg: float | None = None,
-        drop_angle_deg: float | None = None,
-        drop_tolerance_deg: float | None = None,
-        point_of_no_return_deg: float | None = None,
-    ) -> None:
-        self._classification_channel_zone_overlay = list(zones)
-        self._classification_channel_zone_overlay_meta = {
-            "intake_angle_deg": intake_angle_deg,
-            "drop_angle_deg": drop_angle_deg,
-            "drop_tolerance_deg": drop_tolerance_deg,
-            "point_of_no_return_deg": point_of_no_return_deg,
-        }
-
-    def getClassificationChannelZoneOverlayData(self) -> dict[str, object]:
-        return {
-            "zones": list(self._classification_channel_zone_overlay),
-            "geometry": self.getFeederTrackGeometry("carousel"),
-            **self._classification_channel_zone_overlay_meta,
-        }
 
     def _liveTrackPayload(self, role: str, global_id: int) -> dict | None:
         tracker = self._feeder_trackers.get(role)
@@ -4008,50 +4024,33 @@ class VisionManager:
             )
 
     def _refreshAuxiliaryDetections(self) -> None:
-        gemini_roles = [
-            role
-            for role in self._feederTrackerRoles()
-            if self.getFeederDetectionAlgorithm(role) == "gemini_sam"
-        ]
-        pending_refresh: list[tuple[str, Any]] = []
-        for role in gemini_roles:
-            capture = self.getCaptureThreadForRole(role)
-            frame = capture.latest_frame if capture is not None else None
-            if frame is None:
+        # Run a detection refresh per dynamic-detection role on every aux
+        # tick. The per-role throttles inside ``_getFeederDynamicDetection``
+        # / ``_getCarouselDynamicDetection`` (Hive: 50 ms on carousel,
+        # 200 ms on C2/C3; Gemini: 1 s API floor) dedupe the actual
+        # inference calls, so this loop just keeps the caches warm
+        # independently of overlay rendering or browser pulls. Decoupling
+        # detection cadence from the render path eliminates the previous
+        # "no browser open → no detection" coupling.
+        for role in self._feederTrackerRoles():
+            if not self._feederRoleUsesDynamicDetection(role):
                 continue
-            cached = self._feeder_dynamic_detection_cache.get(role)
-            if cached is not None and cached[0] == frame.timestamp:
-                track_cache = self._feeder_track_cache.get(role)
-                if track_cache is None or float(track_cache[0]) != float(frame.timestamp):
-                    self._updateFeederTracker(
-                        role,
-                        cached[1],
-                        frame.timestamp,
-                        frame_bgr=frame.raw,
-                    )
-                continue
-            pending_refresh.append((role, frame))
+            try:
+                self._getFeederDynamicDetection(role, force=False)
+            except Exception as exc:
+                self.gc.logger.warning(
+                    f"auxiliary feeder detection refresh failed for {role}: {exc}"
+                )
 
-        if pending_refresh:
-            cursor = self._aux_feeder_refresh_cursor % len(pending_refresh)
-            role, frame = pending_refresh[cursor]
-            self._aux_feeder_refresh_cursor = (cursor + 1) % len(pending_refresh)
-            detection = self._filterFeederDetectionResultToChannel(
-                role,
-                self._computeFeederGeminiDetection(role, frame, force_call=False),
-            )
-            self._feeder_dynamic_detection_cache[role] = (frame.timestamp, detection)
-            self._updateFeederTracker(role, detection, frame.timestamp, frame_bgr=frame.raw)
-        else:
-            self._aux_feeder_refresh_cursor = 0
-
-        if self.getCarouselDetectionAlgorithm() == "gemini_sam" and self._carousel_capture is not None:
-            frame = self._carousel_capture.latest_frame
-            if frame is not None:
-                cached = self._carousel_dynamic_detection_cache
-                if cached is None or cached[0] != frame.timestamp:
-                    detection = self._computeCarouselGeminiDetection(frame, force_call=False)
-                    self._carousel_dynamic_detection_cache = (frame.timestamp, detection)
+        if self._carousel_capture is not None and self._isDynamicDetectionAlgorithm(
+            self.getCarouselDetectionAlgorithm()
+        ):
+            try:
+                self._getCarouselDynamicDetection(force=False)
+            except Exception as exc:
+                self.gc.logger.warning(
+                    f"auxiliary carousel detection refresh failed: {exc}"
+                )
 
     def _auxiliaryDetectionLoop(self) -> None:
         while not self._aux_detection_stop.is_set():

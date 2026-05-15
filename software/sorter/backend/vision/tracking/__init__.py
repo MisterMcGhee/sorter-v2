@@ -8,7 +8,6 @@ channel geometry isn't available.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Callable, Any
 
@@ -37,12 +36,9 @@ def build_feeder_tracker_system(
     detection_score_threshold: float = 0.1,
     history: PieceHistoryBuffer | None = None,
     frame_rate: int = 5,  # kept for signature compat with older callers
-    enable_appearance: bool | None = None,
     exit_observer: Callable[..., Any] | None = None,
     ghost_reject_observer: Callable[..., Any] | None = None,
-    embedding_rebind_observer: Callable[..., Any] | None = None,
     stale_pending_observer: Callable[..., Any] | None = None,
-    id_switch_suspect_observer: Callable[..., Any] | None = None,
 ) -> tuple[PieceHandoffManager, dict[str, PolarFeederTracker], PieceHistoryBuffer]:
     """Create a handoff manager + per-role polar trackers wired together.
 
@@ -60,9 +56,6 @@ def build_feeder_tracker_system(
     appended to the same history entry.
     """
     _ = frame_rate  # unused by the polar tracker, accepted for compat
-    if enable_appearance is None:
-        raw = os.getenv("SORTER_ENABLE_REID", "").strip().lower()
-        enable_appearance = raw in {"1", "true", "yes", "on"}
 
     # Drop the c_channel_2 → c_channel_3 edge: see docstring above. Every
     # other adjacent pair in ``roles`` is wired as usual.
@@ -99,7 +92,6 @@ def build_feeder_tracker_system(
         handoff_window_s=handoff_window_s,
         exit_observer=exit_observer,
         ghost_reject_observer=ghost_reject_observer,
-        embedding_rebind_observer=embedding_rebind_observer,
         upstream_live_ids_probe=_live_ids_probe,
         stale_pending_observer=stale_pending_observer,
     )
@@ -118,8 +110,6 @@ def build_feeder_tracker_system(
             "handoff_manager": manager,
             "detection_score_threshold": detection_score_threshold,
             "history": history,
-            "enable_appearance": bool(enable_appearance),
-            "id_switch_suspect_observer": id_switch_suspect_observer,
         }
         if role == "carousel":
             # The dedicated classification channel is especially sensitive to
@@ -144,6 +134,12 @@ def build_feeder_tracker_system(
                 # The classification channel state machine pins them via
                 # mark_pending_drop() until the chute actually fires.
                 stagnant_false_track_pending_drop_protect_s=4.0,
+                # Phase 2 — physical walls between sectors on the 5-wall
+                # C4 platter mean identity is naturally sector-anchored.
+                # Enable the constraint set: reject ±>1-sector matches,
+                # multi-sector bbox detections, and new-track births into
+                # already-occupied sectors.
+                enable_sector_anchoring=True,
             )
         elif role == "c_channel_2":
             # The upstream singulation channel can briefly park real pieces,

@@ -1422,12 +1422,6 @@ def classification_channel_debug() -> Dict[str, Any]:
         "hard_collisions": list(zone_manager.hard_collisions()) if zone_manager is not None else [],
         "active_pieces": [_piece_payload(piece) for piece in active_pieces],
         "zones": [zone.to_overlay_payload() for zone in zones],
-        "overlay": (
-            shared_state.vision_manager.getClassificationChannelZoneOverlayData()
-            if shared_state.vision_manager is not None
-            and hasattr(shared_state.vision_manager, "getClassificationChannelZoneOverlayData")
-            else None
-        ),
     }
 
 

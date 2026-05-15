@@ -139,7 +139,6 @@ class Running(BaseState):
         zones, expired_pieces = self.transport.updateTrackedPieces(track_extents)
         self._refreshLatestCapturedCrops(now_wall)
         self._emitExpiredPieceEvents(expired_pieces)
-        self._publishOverlay(zones)
         if sample_mode:
             self._maybeCaptureSampleModeEmptyState(track_extents, zones, now_mono)
 
@@ -223,10 +222,6 @@ class Running(BaseState):
         self._recognition_retry_not_before_by_uuid = {}
         self._sample_teacher_capture_last_queued_mono = None
         self._sample_empty_state_last_captured_mono = None
-        if self.vision is not None and hasattr(
-            self.vision, "setClassificationChannelZoneOverlay"
-        ):
-            self.vision.setClassificationChannelZoneOverlay([])
         self.shared.set_classification_gate(False, reason="cleanup")
 
     def _sampleCollectionMode(self) -> bool:
@@ -498,19 +493,6 @@ class Running(BaseState):
                 "ClassificationChannel: expired stale-zone piece %s (track=%s, emitted=%s)"
                 % (piece.uuid[:8], getattr(piece, "tracked_global_id", None), was_meaningful)
             )
-
-    def _publishOverlay(self, zones: list[ExclusionZone]) -> None:
-        if self.vision is None or not hasattr(
-            self.vision, "setClassificationChannelZoneOverlay"
-        ):
-            return
-        self.vision.setClassificationChannelZoneOverlay(
-            [zone.to_overlay_payload() for zone in zones],
-            intake_angle_deg=self._config.intake_angle_deg,
-            drop_angle_deg=self._config.drop_angle_deg,
-            drop_tolerance_deg=self._config.drop_tolerance_deg,
-            point_of_no_return_deg=self._config.point_of_no_return_deg,
-        )
 
     def _updateIntakeGate(self, now_mono: float) -> None:
         zone_manager = self.transport.zone_manager
@@ -1355,14 +1337,29 @@ class Running(BaseState):
         if dropped_piece is not None:
             self._recognition_retry_not_before_by_uuid.pop(dropped_piece.uuid, None)
             runtime_stats = getattr(self.gc, "runtime_stats", None)
+            global_id = getattr(dropped_piece, "tracked_global_id", None)
             if runtime_stats is not None and hasattr(runtime_stats, "observeChannelExit"):
                 runtime_stats.observeChannelExit(
                     "classification_channel",
                     exited_at=time.time(),
                     piece_uuid=dropped_piece.uuid,
-                    global_id=getattr(dropped_piece, "tracked_global_id", None),
+                    global_id=global_id,
                     classification_status=str(dropped_piece.classification_status.value),
                 )
+            # The piece is physically gone via the drop chute now. Force the
+            # carousel tracker to release the global_id immediately so the
+            # next detection in the freed sector doesn't accumulate crops
+            # under the dropped piece's identity.
+            if global_id is not None and self.vision is not None and hasattr(
+                self.vision, "forceKillCarouselTrack"
+            ):
+                try:
+                    self.vision.forceKillCarouselTrack(int(global_id))
+                except Exception as exc:
+                    self.logger.warning(
+                        "ClassificationChannel: force_kill_track(%s) failed: %s"
+                        % (global_id, exc)
+                    )
             if dropped_piece.carousel_rotated_at is None:
                 dropped_piece.carousel_rotated_at = time.time()
             self.logger.info(
