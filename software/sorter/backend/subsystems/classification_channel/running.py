@@ -520,12 +520,28 @@ class Running(BaseState):
             self.shared.set_classification_gate(False, reason="drop_approach_busy")
             return
 
+        # The intake guard is wider (90°) than the drop-to-intake distance
+        # (85°), so a piece at or near drop would otherwise overlap the
+        # intake clearance window and freeze the gate. Drop-committed
+        # pieces are physically about to leave the platter via the chute,
+        # so exclude their zones from the clearance check AND from the
+        # max_zones cap — otherwise max_zones=2 caps at one resident piece
+        # whenever there's also a piece in the drop window, defeating the
+        # whole point of the cap (one in classification + one at intake).
+        active_pieces = self.transport.activePieces()
+        drop_committed_uuids = {
+            piece.uuid for piece in active_pieces if self._isDropCommitted(piece)
+        }
+        resident_count = sum(
+            1 for piece in active_pieces if piece.uuid not in drop_committed_uuids
+        )
         can_request = (
-            len(self.transport.activePieces()) < int(self._config.max_zones)
+            resident_count < int(self._config.max_zones)
             and zone_manager.is_arc_clear(
                 center_deg=self._config.intake_angle_deg,
                 body_half_width_deg=self._config.intake_body_half_width_deg,
                 hard_guard_deg=self._config.intake_guard_deg,
+                ignore_piece_uuids=drop_committed_uuids,
             )
         )
         if not can_request:
@@ -942,19 +958,55 @@ class Running(BaseState):
             % (piece.uuid[:8], status.value, reason)
         )
 
-    def _dropApproachBusy(self) -> bool:
-        active_pieces = self.transport.activePieces()
-        if not active_pieces:
-            return False
-        approach_window_deg = max(
+    def _dropApproachWindowDeg(self) -> float:
+        """Half-width of the drop-approach window — the angular distance
+        from drop within which a piece is considered close enough to drop
+        that the intake gate should react to it.
+        """
+        return max(
             float(self._config.point_of_no_return_deg) + 8.0,
             float(self._config.positioning_window_deg) * 0.7,
         )
-        for piece in active_pieces:
+
+    def _isDropCommitted(self, piece) -> bool:
+        """A piece is drop-committed once its center has entered the
+        point-of-no-return window of the drop angle. From that moment on
+        braking can no longer cancel the drop — the only outcomes are
+        pulse-drop, exit-release shimmy, or multi_drop_fail. Drop-
+        committed pieces must NOT block intake: drop-to-intake distance
+        is only 85°, less than the 90° intake_guard alone, so a piece
+        committed to dropping would otherwise serialise the platter to
+        one piece at a time (matches the config comment in
+        ``ClassificationChannelConfig`` that promised this exclusion).
+
+        Uses ``point_of_no_return_deg`` as the symmetric threshold so the
+        window stays narrower than ``_dropApproachWindowDeg`` — pieces in
+        the wider approach band ``(PoNR, approach]`` are still
+        "approaching but not yet committed" and continue to hold intake.
+        """
+        center_deg = getattr(piece, "classification_channel_zone_center_deg", None)
+        if not isinstance(center_deg, (int, float)):
+            return False
+        distance = abs(
+            _circular_diff_deg(float(center_deg), self._config.drop_angle_deg)
+        )
+        return distance <= float(self._config.point_of_no_return_deg)
+
+    def _dropApproachBusy(self) -> bool:
+        approach_window_deg = self._dropApproachWindowDeg()
+        for piece in self.transport.activePieces():
             center_deg = getattr(piece, "classification_channel_zone_center_deg", None)
             if not isinstance(center_deg, (int, float)):
                 continue
-            if abs(_circular_diff_deg(float(center_deg), self._config.drop_angle_deg)) <= approach_window_deg:
+            # Already-committed pieces are handled by the intake-arc
+            # clearance exclusion below; only freshly-approaching pieces
+            # (not yet past point-of-no-return) should hold intake.
+            if self._isDropCommitted(piece):
+                continue
+            if (
+                abs(_circular_diff_deg(float(center_deg), self._config.drop_angle_deg))
+                <= approach_window_deg
+            ):
                 return True
         return False
 

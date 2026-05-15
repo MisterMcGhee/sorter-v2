@@ -113,6 +113,9 @@ class _Shared:
     def publish_piece_delivered(self, *args, **kwargs) -> None:
         pass
 
+    def publish_piece_request(self, *args, **kwargs) -> None:
+        pass
+
 
 class _EventQueue:
     def __init__(self) -> None:
@@ -718,3 +721,170 @@ def test_sample_collection_mode_does_not_archive_empty_state_with_tracks() -> No
     running._maybeCaptureSampleModeEmptyState([track], [], now_mono=10.0)
 
     assert vision.empty_state_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# _updateIntakeGate / _isDropCommitted — production-geometry intake-flow tests
+# ---------------------------------------------------------------------------
+
+
+class _RecordingZoneManager:
+    """Minimal stub: records the ignore_piece_uuids the call site passes
+    in. Reports clear/blocked per a caller-set flag. Mirrors
+    ``ExclusionZoneManager.is_arc_clear`` shape without doing real
+    polygon math.
+    """
+
+    def __init__(self, *, clear: bool = True) -> None:
+        self._clear = clear
+        self.calls: list[dict] = []
+
+    def is_arc_clear(
+        self,
+        *,
+        center_deg: float,
+        body_half_width_deg: float,
+        hard_guard_deg: float,
+        ignore_piece_uuid: str | None = None,
+        ignore_piece_uuids: set | None = None,
+    ) -> bool:
+        self.calls.append(
+            {
+                "center_deg": center_deg,
+                "body_half_width_deg": body_half_width_deg,
+                "hard_guard_deg": hard_guard_deg,
+                "ignore_piece_uuids": set(ignore_piece_uuids or set()),
+            }
+        )
+        return self._clear
+
+
+def _make_production_geometry_running() -> tuple[Running, _Transport, _Shared]:
+    """Mirror the real C4 geometry so the intake-gate tests exercise the
+    actual conflict: drop-to-intake (85°) < intake_guard (90°)."""
+    transport = _Transport()
+    shared = _Shared()
+    running = Running(
+        irl=SimpleNamespace(carousel_stepper=_Stepper()),
+        irl_config=SimpleNamespace(
+            classification_channel_config=SimpleNamespace(
+                intake_angle_deg=305.0,
+                intake_body_half_width_deg=10.0,
+                intake_guard_deg=80.0,
+                drop_angle_deg=30.0,
+                drop_tolerance_deg=14.0,
+                point_of_no_return_deg=18.0,
+                recognition_window_deg=60.0,
+                positioning_window_deg=48.0,
+                max_zones=2,
+                hood_dwell_ms=1200,
+                min_carousel_crops_for_recognize=0,
+                min_carousel_dwell_ms=0,
+                min_carousel_traversal_deg=0.0,
+                exit_release_overlap_ratio=0.5,
+                exit_release_shimmy_amplitude_deg=1.5,
+                exit_release_shimmy_cycles=2,
+                exit_release_shimmy_microsteps_per_second=4200,
+                exit_release_shimmy_acceleration_microsteps_per_second_sq=9000,
+            ),
+            feeder_config=SimpleNamespace(
+                classification_channel_eject=SimpleNamespace(
+                    steps_per_pulse=90,
+                    microsteps_per_second=3400,
+                    acceleration_microsteps_per_second_sq=2500,
+                )
+            ),
+        ),
+        gc=SimpleNamespace(logger=_Logger(), runtime_stats=_RuntimeStats()),
+        shared=shared,
+        transport=transport,
+        vision=None,
+        event_queue=_EventQueue(),
+    )
+    return running, transport, shared
+
+
+def test_is_drop_committed_true_when_piece_past_point_of_no_return() -> None:
+    running, _t, _s = _make_production_geometry_running()
+    piece = KnownObject(uuid="committed", tracked_global_id=1)
+    # drop_angle = 30°, PoNR = 18°. center=20° → diff=-10°, within PoNR.
+    piece.classification_channel_zone_center_deg = 20.0
+
+    assert running._isDropCommitted(piece) is True
+
+
+def test_is_drop_committed_false_when_piece_still_approaching() -> None:
+    running, _t, _s = _make_production_geometry_running()
+    piece = KnownObject(uuid="approaching", tracked_global_id=2)
+    # 30° drop − 30° = 0° (in absolute). Diff = -30°, well outside PoNR=18°.
+    piece.classification_channel_zone_center_deg = 0.0
+
+    assert running._isDropCommitted(piece) is False
+
+
+def test_intake_gate_opens_when_only_piece_is_drop_committed() -> None:
+    """The original bug: a piece sitting at drop (about to fall) blocked
+    intake because its 90°-guard exclusion overlapped the intake angle.
+    Drop-committed pieces are now skipped in the clearance check.
+    """
+    running, transport, shared = _make_production_geometry_running()
+    zone_manager = _RecordingZoneManager(clear=True)
+    transport.zone_manager = zone_manager
+
+    piece = KnownObject(uuid="committed", tracked_global_id=1)
+    piece.classification_channel_zone_center_deg = 30.0  # exactly at drop
+    transport._pieces_by_track[1] = piece
+
+    running._updateIntakeGate(now_mono=100.0)
+
+    # Gate opened (True) — the committed piece did NOT block intake.
+    last_call = shared.classification_gate_calls[-1]
+    assert last_call == (True, None), f"expected gate open, got {last_call}"
+    # Zone-manager call carries the committed uuid in ignore_piece_uuids.
+    assert zone_manager.calls
+    assert "committed" in zone_manager.calls[-1]["ignore_piece_uuids"]
+
+
+def test_intake_gate_stays_closed_when_approaching_piece_is_not_yet_committed() -> None:
+    """A piece in the approach window but BEFORE PoNR still holds intake
+    — the platter is mid-maneuver toward drop and we don't want a new
+    piece arriving in that window."""
+    running, transport, shared = _make_production_geometry_running()
+    transport.zone_manager = _RecordingZoneManager(clear=True)
+
+    piece = KnownObject(uuid="approaching", tracked_global_id=1)
+    # 30° drop − 25° approaching → center=5°. Inside approach window
+    # (33.6°) but outside PoNR (18°).
+    piece.classification_channel_zone_center_deg = 5.0
+    transport._pieces_by_track[1] = piece
+
+    running._updateIntakeGate(now_mono=100.0)
+
+    last_call = shared.classification_gate_calls[-1]
+    assert last_call == (False, "drop_approach_busy")
+
+
+def test_intake_gate_max_zones_excludes_drop_committed_pieces() -> None:
+    """max_zones=2 must count resident pieces only — counting a drop-
+    committed piece against the cap defeats the "one in classification +
+    one at intake" design (the cap fires while the leaving piece is
+    still on the platter).
+    """
+    running, transport, shared = _make_production_geometry_running()
+    transport.zone_manager = _RecordingZoneManager(clear=True)
+
+    committed = KnownObject(uuid="committed", tracked_global_id=1)
+    committed.classification_channel_zone_center_deg = 30.0  # drop-committed
+    transport._pieces_by_track[1] = committed
+
+    resident = KnownObject(uuid="resident", tracked_global_id=2)
+    # Far from drop and from intake — solidly mid-platter.
+    resident.classification_channel_zone_center_deg = 150.0
+    transport._pieces_by_track[2] = resident
+
+    # 2 active pieces, max_zones=2. Without the resident-count fix this
+    # would block intake forever.
+    running._updateIntakeGate(now_mono=100.0)
+
+    last_call = shared.classification_gate_calls[-1]
+    assert last_call == (True, None)
