@@ -121,7 +121,7 @@
 			scope: 'Distribution',
 			description: 'No matching bin is available for the piece.',
 			off_label: 'Allow bottom-tray passthrough',
-			manual_label: 'Operator assigns capacity',
+			manual_label: 'Operator assigns capacity or approves passthrough',
 			automatic_label: 'Automatic no-bin passthrough',
 			automatic_supported: false
 		},

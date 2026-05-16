@@ -108,6 +108,7 @@ class ServoBusFatalTests(unittest.TestCase):
         self._saved_queue = shared_state.command_queue
         shared_state.hardware_error = None
         shared_state.hardware_state = "standby"
+        shared_state.distribution_no_bin_passthrough_approvals.clear()
         self.cmd_queue: queue.Queue = queue.Queue()
         shared_state.command_queue = self.cmd_queue
 
@@ -133,10 +134,11 @@ class ServoBusFatalTests(unittest.TestCase):
         *,
         layout: DistributionLayout | None = None,
         sorting_profile: SortingProfile | None = None,
+        piece: KnownObject | None = None,
     ) -> Positioning:
         layout = layout or _mk_layout(num_layers=len(servos))
         irl = SimpleNamespace(servos=servos)
-        piece = _mk_piece()
+        piece = piece or _mk_piece()
         transport = SimpleNamespace(
             getPieceForDistributionPositioning=lambda: piece,
         )
@@ -214,6 +216,22 @@ class ServoBusFatalTests(unittest.TestCase):
         )
         self.assertEqual("cat_missing", snap["active_incident"]["category_id"])
         self.assertEqual("positioning.no_bin_incident", positioning._occupancy_state)
+
+    def test_no_bin_clear_approval_allows_one_shot_passthrough(self) -> None:
+        piece = _mk_piece()
+        positioning = self._mk_positioning(
+            servos=[_mk_healthy_servo()],
+            sorting_profile=_AllCategoriesProfile("cat_missing"),
+            piece=piece,
+        )
+        shared_state.approveDistributionNoBinPassthrough(piece.uuid)
+
+        next_state = positioning.step()
+
+        self.assertEqual(DistributionState.READY, next_state)
+        self.assertIsNone(self.runtime_stats.snapshot().get("active_incident"))
+        self.assertEqual("positioning.passthrough_no_bin", positioning._occupancy_state)
+        self.assertEqual(set(), shared_state.distribution_no_bin_passthrough_approvals)
 
     def test_repeat_detection_does_not_spam_error_or_queue(self) -> None:
         # Re-entering Positioning while the bus is still offline must not

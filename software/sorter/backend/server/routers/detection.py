@@ -2087,6 +2087,13 @@ def distribution_incident_clear() -> Dict[str, Any]:
         return {"ok": True, "cleared": False, "reason": "no_active_incident"}
 
     kind = str(active.get("kind"))
+    if kind == DISTRIBUTION_NO_BIN_AVAILABLE_INCIDENT_KIND:
+        approver = getattr(shared_state, "approveDistributionNoBinPassthrough", None)
+        if callable(approver):
+            try:
+                approver(active.get("piece_uuid") if isinstance(active.get("piece_uuid"), str) else None)
+            except Exception:
+                pass
     runtime_stats.clearActiveIncident(kind=kind)
     return {"ok": True, "cleared": True, "kind": kind, "channel": "distribution"}
 

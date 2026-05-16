@@ -131,7 +131,7 @@ class Positioning(BaseState):
                 # send this piece to the discard bucket.
                 return DistributionState.IDLE
             if address is None:
-                if self._raiseNoBinAvailableIncident(piece, category_id):
+                if not self._consumeNoBinPassthroughApproval(piece) and self._raiseNoBinAvailableIncident(piece, category_id):
                     self._setOccupancyState("positioning.no_bin_incident")
                     return DistributionState.IDLE
                 # Pass-through: no bin available for this category. Open
@@ -333,6 +333,15 @@ class Positioning(BaseState):
     def _raiseBinsFullAlert(self, category_id: str) -> None:
         return
 
+    def _consumeNoBinPassthroughApproval(self, piece) -> bool:
+        consumer = getattr(shared_state, "consumeDistributionNoBinPassthrough", None)
+        if not callable(consumer):
+            return False
+        try:
+            return bool(consumer(getattr(piece, "uuid", None)))
+        except Exception:
+            return False
+
     def _raiseNoBinAvailableIncident(self, piece, category_id: str) -> bool:
         """Publish no-bin as an explicit operator incident.
 
@@ -351,9 +360,9 @@ class Positioning(BaseState):
             piece_short=piece_uuid[:8],
             part_id=getattr(piece, "part_id", None),
             color_id=getattr(piece, "color_id", None),
-            resolution="operator_assign_bin_or_disable_no_bin_incident",
+            resolution="operator_assign_bin_or_clear_to_approve_one_shot_passthrough",
             operator_message=(
-                "No matching bin is available. Assign a bin, free capacity, or switch this incident off to allow passthrough."
+                "No matching bin is available. Assign a bin, free capacity, or clear the incident to pass this piece through once."
             ),
         )
 
