@@ -48,7 +48,7 @@ from .diff_configs import (
     DEFAULT_CLASSIFICATION_DIFF_CONFIG,
 )
 # Decision-clock cadence for the auxiliary detection loop. Aligned at 20 Hz
-# with the C4 Hive inference throttle (50 ms) so the detection cache stays
+# with the C4 local-model inference throttle (50 ms) so the detection cache stays
 # fresh independently of overlay rendering. The per-role throttles inside
 # _getFeederDynamicDetection / _computeFeederGeminiDetection dedupe inference
 # calls, so a 20 Hz wake-up rate does NOT translate to 20 Hz inference; it
@@ -72,7 +72,7 @@ class AuxiliaryTeacherCaptureRequest:
     frame_snapshot: np.ndarray | None = None
 
 
-# Minimum seconds between consecutive ``hive:*`` inferences per (scope, role).
+# Minimum seconds between consecutive local model inferences per (scope, role).
 # Live frame-encode runs at ~10 Hz and each ONNX inference is ~30-50 ms on CPU;
 # without this guard the encode thread serializes and the dashboard stream
 # stutters. Override via ``SORTER_HIVE_INFERENCE_INTERVAL_S`` env var for tuning.
@@ -414,7 +414,7 @@ class VisionManager:
 
                     # TrackOverlay replaces DynamicDetectionOverlay. Triggering
                     # _getFeederDynamicDetection on each render tick is what
-                    # keeps the Hive inference (throttled) + tracker cache warm;
+                    # keeps local model inference (throttled) + tracker cache warm;
                     # the overlay itself reads the freshly-updated track list.
                     def _tracks_for(r=role):
                         _ensure_detection(r)
@@ -454,7 +454,7 @@ class VisionManager:
                     carousel_feed.clear_overlays()
                     carousel_feed.add_overlay(ChannelRegionOverlay(self._region_provider, "carousel"))
                     carousel_algo = self.getCarouselDetectionAlgorithm()
-                    if carousel_algo == "gemini_sam" or carousel_algo.startswith("hive:"):
+                    if self._isDynamicDetectionAlgorithm(carousel_algo):
                         def _carousel_pinned_ts():
                             cached = self._carousel_dynamic_detection_cache
                             return float(cached[0]) if cached is not None else None
@@ -667,10 +667,22 @@ class VisionManager:
         )
 
     @staticmethod
+    def _isLocalModelDetectionAlgorithm(algorithm: str | None) -> bool:
+        if not isinstance(algorithm, str):
+            return False
+        if algorithm.startswith(("hive:", "bundled:")):
+            return True
+        definition = detection_algorithm_definition(algorithm)
+        return bool(definition is not None and definition.kind in {"hive", "bundled"})
+
+    @staticmethod
     def _isDynamicDetectionAlgorithm(algorithm: str | None) -> bool:
         return bool(
             isinstance(algorithm, str)
-            and (algorithm == "gemini_sam" or algorithm.startswith("hive:"))
+            and (
+                algorithm == "gemini_sam"
+                or VisionManager._isLocalModelDetectionAlgorithm(algorithm)
+            )
         )
 
     def _feederRoleUsesDynamicDetection(self, role: str) -> bool:
@@ -1489,9 +1501,9 @@ class VisionManager:
                 return None
             return cached[1] if abs(float(frame.timestamp) - float(cached[0])) <= 4.0 else None
 
-        # Hive inference is local but CPU-bound; throttle on the live path so
+        # Local model inference is CPU-bound; throttle on the live path so
         # the frame-encode thread doesn't serialize a ~40ms ONNX call per frame.
-        if algorithm.startswith("hive:") and not force:
+        if self._isLocalModelDetectionAlgorithm(algorithm) and not force:
             if cached is not None:
                 last_ts, last_det = cached
                 if frame.timestamp - float(last_ts) < HIVE_INFERENCE_MIN_INTERVAL_S:
@@ -1513,7 +1525,7 @@ class VisionManager:
                     force=True,
                 )
             )
-        elif algorithm.startswith("hive:"):
+        elif self._isLocalModelDetectionAlgorithm(algorithm):
             detection = self._runHiveDetection(algorithm, frame.raw, scope="classification", role=cam)
 
         self._classification_dynamic_detection_cache[cam] = (frame.timestamp, detection)
@@ -2083,7 +2095,7 @@ class VisionManager:
         from .ml import create_processor
 
         definition = detection_algorithm_definition(algorithm_id)
-        if definition is None or definition.kind != "hive" or definition.model_path is None:
+        if definition is None or definition.kind not in {"hive", "bundled"} or definition.model_path is None:
             return None
         try:
             processor = create_processor(
@@ -2093,7 +2105,7 @@ class VisionManager:
                 imgsz=int(definition.imgsz or 320),
             )
         except Exception as exc:
-            self.gc.logger.warning("Failed to build Hive processor %s: %s", algorithm_id, exc)
+            self.gc.logger.warning("Failed to build local model processor %s: %s", algorithm_id, exc)
             return None
         self._hive_ml_processors[algorithm_id] = processor
         return processor
@@ -2447,7 +2459,7 @@ class VisionManager:
                 return None
             return frame.raw.copy(), float(frame.timestamp)
 
-        if algorithm.startswith("hive:"):
+        if self._isLocalModelDetectionAlgorithm(algorithm):
             self._drop_zone_burst_collector.trigger(global_id, detect_fn, get_latest_frame)
 
     def _liveTrackPayload(self, role: str, global_id: int) -> dict | None:
@@ -2996,7 +3008,7 @@ class VisionManager:
             else:
                 detections = processor.infer(crop)
         except Exception as exc:
-            self.gc.logger.warning("Hive inference %s failed: %s", algorithm_id, exc)
+            self.gc.logger.warning("Local model inference %s failed: %s", algorithm_id, exc)
             return None
         if not detections:
             return ClassificationDetectionResult(
@@ -3071,8 +3083,8 @@ class VisionManager:
         if frame is None:
             return None
         algorithm = self.getFeederDetectionAlgorithm(role)
-        if algorithm.startswith("hive:"):
-            # Hive inference is local but ~30-50ms per 320 crop on CPU. If we
+        if self._isLocalModelDetectionAlgorithm(algorithm):
+            # Local model inference is ~30-50ms per 320 crop on CPU. If we
             # ran it inline per frame-encode (10fps target), the encode thread
             # would stall for multiple cameras in parallel. Throttle to ~5fps
             # — overlay rendering reads whichever detection is most recent.
@@ -3201,7 +3213,7 @@ class VisionManager:
         if frame is None:
             return None
         algorithm = self.getCarouselDetectionAlgorithm()
-        if algorithm.startswith("hive:"):
+        if self._isLocalModelDetectionAlgorithm(algorithm):
             now = frame.timestamp
             cached = self._carousel_dynamic_detection_cache
             if cached is not None and not force:
@@ -3545,8 +3557,8 @@ class VisionManager:
             bbox_count = len(detection.bboxes) if detection is not None else 0
             score = self._detectionScoreValue(detection, default=0.0) or 0.0
             return bool(detection is not None and detection.bbox is not None), score, bbox_count
-        if algorithm.startswith("hive:"):
-            # Hive carousel models can drive the classic trigger directly —
+        if self._isLocalModelDetectionAlgorithm(algorithm):
+            # Local carousel models can drive the classic trigger directly —
             # otherwise the heatmap diff path (which needs a baseline that
             # may not be configured) gates teacher-sample collection.
             detection = self._getCarouselDynamicDetection(force=False)
@@ -3665,7 +3677,7 @@ class VisionManager:
             self._attachFeederTrackInfo(result, role)
             return result
 
-        if algorithm.startswith("hive:"):
+        if self._isLocalModelDetectionAlgorithm(algorithm):
             # Route through _getFeederDynamicDetection so the tracker is
             # always updated — running _runHiveDetection directly here would
             # bypass _updateFeederTracker.
@@ -3678,7 +3690,7 @@ class VisionManager:
                         "candidate_bboxes": [],
                         "bbox_count": 0,
                         "score": None,
-                        "message": "Hive model failed to load or returned no result.",
+                        "message": "Local model failed to load or returned no result.",
                     }
                 )
                 self._attachFeederTrackInfo(result, role)
@@ -3691,9 +3703,9 @@ class VisionManager:
                     "bbox_count": len(detection.bboxes),
                     "score": self._detectionScoreValue(detection),
                     "message": (
-                        f"Hive model found {len(detection.bboxes)} candidate(s)."
+                        f"Local model found {len(detection.bboxes)} candidate(s)."
                         if detection.bboxes
-                        else "Hive model did not find a piece in the current frame."
+                        else "Local model did not find a piece in the current frame."
                     ),
                 }
             )
@@ -3817,7 +3829,7 @@ class VisionManager:
             )
             return result
 
-        if algorithm.startswith("hive:"):
+        if self._isLocalModelDetectionAlgorithm(algorithm):
             detection = self._runHiveDetection(
                 algorithm,
                 frame.raw,
@@ -3833,7 +3845,7 @@ class VisionManager:
                         "candidate_bboxes": [],
                         "bbox_count": 0,
                         "score": None,
-                        "message": "Hive model failed to load or returned no result.",
+                        "message": "Local model failed to load or returned no result.",
                     }
                 )
                 return result
@@ -3845,9 +3857,9 @@ class VisionManager:
                     "bbox_count": len(detection.bboxes),
                     "score": self._detectionScoreValue(detection),
                     "message": (
-                        f"Hive model found {len(detection.bboxes)} candidate(s) on the carousel."
+                        f"Local model found {len(detection.bboxes)} candidate(s) on the carousel."
                         if detection.bboxes
-                        else "Hive model did not find a piece on the carousel."
+                        else "Local model did not find a piece on the carousel."
                     ),
                 }
             )

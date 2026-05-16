@@ -33,20 +33,58 @@ router = APIRouter(prefix="/api/hive", tags=["hive-models"])
 # ``group`` — coarse logical grouping (``c_channels`` | ``chamber`` |
 # ``carousel``) the UI can collapse into a single line when every slot in the
 # group runs the same model.
+# NOTE: ``toml_section`` here is what the *live VisionManager* reads, not
+# whatever the operator-facing label suggests. The C4 station in the
+# ``classification_channel`` setup is wired pipeline-side as the carousel
+# detection — so its persisted algorithm lives in ``[detection.carousel]``,
+# never in a ``[detection.classification_channel]`` section (which would be
+# dead config nobody picks up).
 _ACTIVE_ASSIGNMENT_SLOTS: tuple[tuple[str, str | None, str, str, str], ...] = (
     ("classification", None, "Chamber", "classification", "chamber"),
     ("feeder", "c_channel_2", "C-Channel 2", "feeder", "c_channels"),
     ("feeder", "c_channel_3", "C-Channel 3", "feeder", "c_channels"),
     ("feeder", "carousel", "Carousel feed", "feeder", "carousel"),
-    (
-        "classification_channel",
-        None,
-        "Classification C-Channel (C4)",
-        "carousel",
-        "c_channels",
-    ),
+    ("carousel", None, "Classification C-Channel (C4)", "carousel", "c_channels"),
     ("carousel", None, "Carousel detect", "carousel", "carousel"),
 )
+
+
+def _push_to_live_vision_manager(
+    scope: str, role: str | None, algorithm_id: str
+) -> None:
+    """Update the running VisionManager so the next frame uses the new model.
+
+    Without this, ``/activate`` only writes to ``machine_params.toml`` and the
+    live pipeline keeps running with whatever was loaded at process start —
+    which silently falls back to MOG2/heatmap_diff if the persisted algorithm
+    couldn't be resolved at startup time.
+    """
+    from server import shared_state
+
+    vision_manager = getattr(shared_state, "vision_manager", None)
+    if vision_manager is None:
+        return
+    try:
+        if scope == "feeder":
+            setter = getattr(vision_manager, "setFeederDetectionAlgorithm", None)
+            if setter is not None:
+                if role is not None:
+                    setter(algorithm_id, role)
+                else:
+                    setter(algorithm_id)
+        elif scope == "carousel":
+            setter = getattr(vision_manager, "setCarouselDetectionAlgorithm", None)
+            if setter is not None:
+                setter(algorithm_id)
+        elif scope == "classification":
+            setter = getattr(vision_manager, "setClassificationDetectionAlgorithm", None)
+            if setter is not None:
+                setter(algorithm_id)
+    except Exception:  # pragma: no cover - defensive: TOML still got written
+        import logging
+        logging.getLogger(__name__).exception(
+            "Failed to push %s/%s → %s to live VisionManager", scope, role, algorithm_id
+        )
 
 
 def _slots_for_setup(setup_key: str | None) -> tuple[tuple[str, str | None, str, str, str], ...]:
@@ -144,6 +182,7 @@ def _apply_active_assignments(algorithm_id: str, registry_scopes: set[str]) -> d
     applied: list[str] = []
     skipped: list[str] = []
     by_scope_changes: dict[str, dict[str, dict]] = {}
+    live_pushes: list[tuple[str, str | None, str]] = []
 
     for scope, role, label, registry_scope, _group in _slots_for_setup(_current_setup_key()):
         if registry_scope not in registry_scopes:
@@ -155,6 +194,7 @@ def _apply_active_assignments(algorithm_id: str, registry_scopes: set[str]) -> d
         else:
             roles_map = scope_changes["set"].setdefault("algorithm_by_role", {})
             roles_map[role] = algorithm_id
+        live_pushes.append((scope, role, algorithm_id))
         applied.append(label)
 
     for scope, changes in by_scope_changes.items():
@@ -171,6 +211,11 @@ def _apply_active_assignments(algorithm_id: str, registry_scopes: set[str]) -> d
             else:
                 merged[key] = value
         setDetectionConfig(scope, merged)
+
+    # Push to the live VisionManager *after* persistence so a crash here
+    # still leaves the next process restart with the right config.
+    for scope, role, algo in live_pushes:
+        _push_to_live_vision_manager(scope, role, algo)
 
     return {"applied": applied, "skipped": skipped}
 

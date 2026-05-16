@@ -1,7 +1,9 @@
 import unittest
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -138,10 +140,66 @@ class VisionManagerFeederDynamicTests(unittest.TestCase):
         self.assertEqual((1, 1, 4, 4), result.bbox)
         self.assertEqual([("c_channel_2", result, 123.0)], updates)
 
+    def test_bundled_feeder_model_runs_local_model_detection_path(self) -> None:
+        vm = VisionManager.__new__(VisionManager)
+        frame = SimpleNamespace(timestamp=123.0, raw=np.zeros((8, 8, 3), dtype=np.uint8))
+        detection = DetectionResult(
+            bbox=(1, 1, 4, 4),
+            bboxes=((1, 1, 4, 4),),
+            score=0.9,
+            algorithm="bundled:c-channel",
+            found=True,
+        )
+        infer_calls: list[tuple[str, str, str]] = []
+        updates: list[tuple[str, object, float]] = []
+
+        vm.getCaptureThreadForRole = lambda role: SimpleNamespace(latest_frame=frame)
+        vm.getFeederDetectionAlgorithm = lambda role=None: "bundled:c-channel"
+        vm._feeder_dynamic_detection_cache = {}
+        vm._filterFeederDetectionResultToChannel = lambda role, current_detection: current_detection
+        vm._runHiveDetection = (
+            lambda algorithm, raw, scope, role: infer_calls.append((algorithm, scope, role))
+            or detection
+        )
+        vm._updateFeederTracker = (
+            lambda role, current_detection, timestamp, frame_bgr=None: updates.append(
+                (role, current_detection, float(timestamp))
+            )
+        )
+
+        result = VisionManager._getFeederDynamicDetection(vm, "c_channel_2", force=False)
+
+        self.assertIs(result, detection)
+        self.assertEqual([("bundled:c-channel", "feeder", "c_channel_2")], infer_calls)
+        self.assertEqual([("c_channel_2", detection, 123.0)], updates)
+
+    def test_get_or_build_hive_processor_accepts_bundled_registry_entries(self) -> None:
+        vm = VisionManager.__new__(VisionManager)
+        vm._hive_ml_processors = {}
+        vm.gc = SimpleNamespace(logger=SimpleNamespace(warning=lambda *_a, **_k: None))
+        definition = SimpleNamespace(
+            kind="bundled",
+            model_path=Path("/tmp/bundled.onnx"),
+            model_family="yolo",
+            runtime="onnx",
+            imgsz=320,
+        )
+        processor = object()
+
+        with (
+            patch("vision.detection_registry.detection_algorithm_definition", return_value=definition),
+            patch("vision.ml.create_processor", return_value=processor) as create_processor,
+        ):
+            result = VisionManager._getOrBuildHiveProcessor(vm, "bundled:c-channel")
+
+        self.assertIs(result, processor)
+        self.assertIs(vm._hive_ml_processors["bundled:c-channel"], processor)
+        create_processor.assert_called_once()
+
     def test_refresh_auxiliary_detections_runs_all_dynamic_roles_per_tick(self) -> None:
         """The aux loop is the dedicated detection-cache warmer. Each tick
         it must call the per-role detection entry for every dynamic-detection
-        role (gemini_sam / hive:*) and skip non-dynamic roles. The actual
+        role (gemini_sam / local-model ids) and skip non-dynamic roles. The actual
         inference dedup happens inside the detection functions via their
         per-role throttle, so we just verify the cache-warmer fan-out here.
         """

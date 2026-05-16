@@ -22,6 +22,8 @@ import {
 
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 30000;
+const CONNECTION_WATCHDOG_INTERVAL_MS = 3000;
+const HEARTBEAT_STALE_MS = 15000;
 const RECENT_OBJECT_BUFFER_LIMIT = 32;
 const RECENT_OBJECT_REMOVAL_GRACE_MS = 1500;
 
@@ -47,7 +49,10 @@ function newerCapturedCrop(
 	};
 }
 
-function mergeKnownObject(existing: KnownObjectData | undefined, incoming: KnownObjectData): KnownObjectData {
+function mergeKnownObject(
+	existing: KnownObjectData | undefined,
+	incoming: KnownObjectData
+): KnownObjectData {
 	if (!existing) return incoming;
 	const captured_crop = newerCapturedCrop(existing, incoming);
 	return {
@@ -74,8 +79,9 @@ function mergeKnownObject(existing: KnownObjectData | undefined, incoming: Known
 		drop_snapshot: incoming.drop_snapshot ?? existing.drop_snapshot,
 		brickognize_preview_url: incoming.brickognize_preview_url ?? existing.brickognize_preview_url,
 		brickognize_source_view: incoming.brickognize_source_view ?? existing.brickognize_source_view,
-		recognition_used_crop_ts:
-			incoming.recognition_used_crop_ts?.length ? incoming.recognition_used_crop_ts : existing.recognition_used_crop_ts
+		recognition_used_crop_ts: incoming.recognition_used_crop_ts?.length
+			? incoming.recognition_used_crop_ts
+			: existing.recognition_used_crop_ts
 	};
 }
 
@@ -95,21 +101,29 @@ export class MachineManager {
 	private pending_connections = new Map<WebSocket, string>();
 	private reconnect_attempts = new Map<string, number>();
 	private reconnect_timers = new Map<string, ReturnType<typeof setTimeout>>();
+	private ignored_closures = new WeakSet<WebSocket>();
 	private recent_removal_timers = new Map<string, ReturnType<typeof setTimeout>>();
 	private manually_disconnected = new Set<string>();
+	private connection_watchdog_timer: ReturnType<typeof setInterval> | null = null;
 
 	selectedMachine = $derived.by(() => {
 		if (!this.selectedMachineId) return null;
 		return this.machines.get(this.selectedMachineId) ?? null;
 	});
 
-	connect(url: string): void {
+	connect(url: string, options: { force?: boolean } = {}): void {
 		this.manually_disconnected.delete(url);
 
 		const existing_timer = this.reconnect_timers.get(url);
 		if (existing_timer) {
 			clearTimeout(existing_timer);
 			this.reconnect_timers.delete(url);
+		}
+
+		if (options.force) {
+			this.closeSocketsForUrl(url);
+		} else if (this.hasUsableSocketForUrl(url)) {
+			return;
 		}
 
 		const ws = new WebSocket(url);
@@ -147,13 +161,25 @@ export class MachineManager {
 			}
 
 			const reconnect_url = closed_url ?? url;
+			if (this.ignored_closures.has(ws)) {
+				return;
+			}
 			if (!this.manually_disconnected.has(reconnect_url)) {
 				this.scheduleReconnect(reconnect_url);
 			}
 		};
 	}
 
+	ensureConnected(url: string, options: { respectManualDisconnect?: boolean } = {}): void {
+		if (options.respectManualDisconnect !== false && this.manually_disconnected.has(url)) return;
+		if (this.hasUsableSocketForUrl(url)) return;
+		this.connect(url);
+	}
+
 	private scheduleReconnect(url: string): void {
+		if (this.hasUsableSocketForUrl(url) || this.reconnect_timers.has(url)) {
+			return;
+		}
 		const attempts = this.reconnect_attempts.get(url) ?? 0;
 		const delay = Math.min(RECONNECT_BASE_DELAY_MS * Math.pow(2, attempts), RECONNECT_MAX_DELAY_MS);
 
@@ -168,6 +194,61 @@ export class MachineManager {
 		}, delay);
 
 		this.reconnect_timers.set(url, timer);
+	}
+
+	startConnectionWatchdog(
+		options: {
+			defaultUrl?: string;
+			intervalMs?: number;
+			heartbeatStaleMs?: number;
+		} = {}
+	): () => void {
+		this.stopConnectionWatchdog();
+		const intervalMs = options.intervalMs ?? CONNECTION_WATCHDOG_INTERVAL_MS;
+		const heartbeatStaleMs = options.heartbeatStaleMs ?? HEARTBEAT_STALE_MS;
+		const defaultUrl = options.defaultUrl;
+
+		const tick = () => {
+			if (defaultUrl) {
+				this.ensureConnected(defaultUrl);
+			}
+			this.reconnectStaleConnections({ fallbackUrl: defaultUrl, heartbeatStaleMs });
+		};
+
+		tick();
+		this.connection_watchdog_timer = setInterval(tick, intervalMs);
+		return () => this.stopConnectionWatchdog();
+	}
+
+	stopConnectionWatchdog(): void {
+		if (this.connection_watchdog_timer === null) return;
+		clearInterval(this.connection_watchdog_timer);
+		this.connection_watchdog_timer = null;
+	}
+
+	reconnectStaleConnections(
+		options: {
+			fallbackUrl?: string;
+			heartbeatStaleMs?: number;
+		} = {}
+	): void {
+		const heartbeatStaleMs = options.heartbeatStaleMs ?? HEARTBEAT_STALE_MS;
+		const now = Date.now();
+		for (const machine of this.machines.values()) {
+			const url = machine.url ?? options.fallbackUrl;
+			if (!url) continue;
+			if (this.manually_disconnected.has(url)) continue;
+			if (
+				machine.connection.readyState === WebSocket.CLOSING ||
+				machine.connection.readyState === WebSocket.CLOSED
+			) {
+				this.connect(url);
+				continue;
+			}
+			if (!this.isMachineHeartbeatStale(machine, now, heartbeatStaleMs)) continue;
+			console.warn(`[MachineManager] Heartbeat stale for ${url}; reconnecting WebSocket`);
+			this.connect(url, { force: true });
+		}
 	}
 
 	disconnect(machineId: string): void {
@@ -203,6 +284,37 @@ export class MachineManager {
 			if (socket === ws) return url;
 		}
 		return null;
+	}
+
+	private hasUsableSocketForUrl(url: string): boolean {
+		for (const [socket, socketUrl] of this.pending_connections) {
+			if (socketUrl !== url) continue;
+			if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private closeSocketsForUrl(url: string): void {
+		for (const [socket, socketUrl] of this.pending_connections) {
+			if (socketUrl !== url) continue;
+			if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED)
+				continue;
+			this.ignored_closures.add(socket);
+			socket.close();
+		}
+	}
+
+	private isMachineHeartbeatStale(
+		machine: MachineState,
+		nowMs: number,
+		heartbeatStaleMs: number
+	): boolean {
+		if (machine.status !== 'connected') return false;
+		if (machine.connection.readyState !== WebSocket.OPEN) return false;
+		if (machine.lastHeartbeat === null) return false;
+		return nowMs - machine.lastHeartbeat * 1000 > heartbeatStaleMs;
 	}
 
 	private handleEvent(ws: WebSocket, event: SocketEvent): void {
@@ -373,8 +485,7 @@ export class MachineManager {
 		if (!machine) return;
 		const shouldClearRecentObjects =
 			data.hardware_state === 'homing' ||
-			(data.hardware_state === 'standby' &&
-				machine.systemStatus?.hardware_state !== 'standby');
+			(data.hardware_state === 'standby' && machine.systemStatus?.hardware_state !== 'standby');
 		if (shouldClearRecentObjects) {
 			this.clearRecentRemovalTimersForMachine(machineId);
 		}
