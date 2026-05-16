@@ -169,16 +169,16 @@ class C3StationTests(unittest.TestCase):
         )
         self.assertEqual([], stepper.moves)
 
-    def test_exit_incident_waits_until_bbox_is_three_quarters_inside_exit(self) -> None:
+    def test_exit_incident_waits_until_bbox_is_four_fifths_inside_exit(self) -> None:
         stats = _RuntimeStats()
         stepper = _Stepper()
         station = _make_c3_station(stats, stepper)
 
         station.run_exit_wiggle(
-            _make_c3_wiggle_ctx(now_mono=0.0, ch3_exit_overlap=0.70, ch3_held=True)
+            _make_c3_wiggle_ctx(now_mono=0.0, ch3_exit_overlap=0.75, ch3_held=True)
         )
         station.run_exit_wiggle(
-            _make_c3_wiggle_ctx(now_mono=1.2, ch3_exit_overlap=0.70, ch3_held=True)
+            _make_c3_wiggle_ctx(now_mono=1.2, ch3_exit_overlap=0.75, ch3_held=True)
         )
 
         self.assertIsNone(stats.active_incident)

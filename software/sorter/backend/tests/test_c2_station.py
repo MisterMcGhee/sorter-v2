@@ -268,7 +268,7 @@ class C2StationTests(unittest.TestCase):
         )
         self.assertEqual([], stepper.moves)
 
-    def test_exit_incident_waits_until_bbox_is_three_quarters_inside_exit(self) -> None:
+    def test_exit_incident_waits_until_bbox_is_four_fifths_inside_exit(self) -> None:
         stats = _RuntimeStats()
         stepper = _Stepper()
         station = _make_station(stats, stepper)
@@ -276,14 +276,14 @@ class C2StationTests(unittest.TestCase):
         station.run_exit_wiggle(
             _make_wiggle_ctx(
                 now_mono=0.0,
-                ch2_exit_overlap=0.70,
+                ch2_exit_overlap=0.75,
                 ch3_dropzone_occupied=True,
             )
         )
         station.run_exit_wiggle(
             _make_wiggle_ctx(
                 now_mono=1.2,
-                ch2_exit_overlap=0.70,
+                ch2_exit_overlap=0.75,
                 ch3_dropzone_occupied=True,
             )
         )
