@@ -26,6 +26,7 @@
 		label: string;
 		needs_baseline: boolean;
 		description?: string;
+		kind?: string;
 	};
 	type OpenRouterModelOption = {
 		id: string;
@@ -196,12 +197,14 @@
 						? payload.sample_collection_supported
 						: false;
 			availableAlgorithms = Array.isArray(payload?.available_algorithms)
-				? payload.available_algorithms.filter(
-						(value: any): value is DetectionAlgorithmOption =>
-							typeof value?.id === 'string' &&
-							typeof value?.label === 'string' &&
-							typeof value?.needs_baseline === 'boolean'
-				 )
+				? payload.available_algorithms
+						.filter(
+							(value: any): value is DetectionAlgorithmOption =>
+								typeof value?.id === 'string' &&
+								typeof value?.label === 'string' &&
+								typeof value?.needs_baseline === 'boolean'
+						)
+						.filter((value: DetectionAlgorithmOption) => value.kind !== 'builtin')
 				: [];
 			availableOpenrouterModels = Array.isArray(payload?.available_openrouter_models)
 				? payload.available_openrouter_models.filter(
@@ -503,23 +506,11 @@
 					</select>
 				</label>
 
-				{#if algorithm === 'gemini_sam'}
-					<label class="text-xs text-text">
-						OpenRouter Model
-						<select
-							value={openrouterModel}
-							onchange={(event) => void saveOpenRouterModel(event.currentTarget.value)}
-							disabled={loadingConfig || savingConfig || capturing || testing}
-							class="mt-1 w-full border border-border bg-surface px-2 py-2 text-sm text-text"
-						>
-							{#each availableOpenrouterModels as option}
-								<option value={option.id}>{option.label}</option>
-							{/each}
-						</select>
-						<div class="mt-1 text-sm text-text-muted">
-							{openRouterModelShortLabel(openrouterModel)}
-						</div>
-					</label>
+				{#if !loadingConfig && algorithm && !selectedAlgorithmOption()}
+					<div class="border border-warning bg-warning/10 px-3 py-2 text-sm text-warning-dark dark:text-amber-200">
+						Currently using <span class="font-mono">{algorithm}</span> (legacy). Pick a Hive
+						or bundled model above to switch this station to the new pipeline.
+					</div>
 				{/if}
 
 				{#if showSampleCollectionToggle()}
