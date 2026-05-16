@@ -288,7 +288,6 @@ void initialize_hardware() {
     tmc_bus.setupComm(TMC_UART_BAUDRATE, TMC_UART_TX_PIN, TMC_UART_RX_PIN);
     // Initialize TMC2209 drivers and steppers
     for (int i = 0; i < STEPPER_COUNT; i++) {
-        // tmc_drivers[i].enableDriver(true);
         steppers[i].initialize();
         steppers[i].setAcceleration(20000);
         steppers[i].setSpeedLimits(16, 4000);
