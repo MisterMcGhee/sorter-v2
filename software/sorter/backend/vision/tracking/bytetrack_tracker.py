@@ -320,6 +320,7 @@ class ByteTrackFeederTracker(Tracker):
                     coasting=track.coast_count > 0,
                     score=track.score,
                     handoff_from=track.handoff_from,
+                    motion_confirmed=True,
                 )
             )
         self._last_active = active

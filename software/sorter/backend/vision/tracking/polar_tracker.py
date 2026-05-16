@@ -805,6 +805,7 @@ class PolarFeederTracker(Tracker):
                     coasting=track.coast_count > 0,
                     score=track.score,
                     handoff_from=track.handoff_from,
+                    motion_confirmed=track.motion_confirmed,
                 )
             )
         self._last_active = active

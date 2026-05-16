@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from defs.channel import ChannelDetection, PolygonChannel
-from subsystems.feeder.analysis import analyzeFeederChannels
+from subsystems.feeder.analysis import ChannelAction, analyzeFeederChannels
 from subsystems.feeder.dropzone_incidents import DropzoneStuckIncidentManager
 from toml_config import setDashboardConfig
 
@@ -58,6 +58,26 @@ def _detection(
     )
 
 
+def _exit_detection(*, motion_confirmed: bool) -> ChannelDetection:
+    channel = PolygonChannel(
+        channel_id=2,
+        polygon=np.array([[0, 0], [100, 0], [100, 100], [0, 100]], dtype=np.int32),
+        center=(50.0, 50.0),
+        radius1_angle_image=0.0,
+        mask=np.ones((100, 100), dtype=np.uint8),
+        dropzone_sections=set(),
+        exit_sections={0},
+    )
+    return ChannelDetection(
+        bbox=(80, 48, 90, 52),
+        channel_id=channel.channel_id,
+        channel=channel,
+        global_id=456,
+        source_role="c_channel_2",
+        motion_confirmed=motion_confirmed,
+    )
+
+
 class DropzoneIncidentTests(unittest.TestCase):
     def setUp(self) -> None:
         self._old_machine_params = os.environ.get("MACHINE_SPECIFIC_PARAMS_PATH")
@@ -86,6 +106,25 @@ class DropzoneIncidentTests(unittest.TestCase):
         )
         self.assertFalse(ignored.ch2_dropzone_occupied)
         self.assertGreater(ignored.ch2_dropzone_overlap_max, 0.0)
+
+    def test_analyzer_ignores_unconfirmed_tracker_hits_for_exit_signal(self) -> None:
+        gc = SimpleNamespace()
+
+        unconfirmed = analyzeFeederChannels(
+            gc,
+            [_exit_detection(motion_confirmed=False)],
+        )
+        self.assertEqual(0.0, unconfirmed.ch2_exit_overlap_max)
+        self.assertFalse(unconfirmed.ch2_exit_center_crossed)
+        self.assertEqual(ChannelAction.PULSE_NORMAL, unconfirmed.ch2_action)
+
+        confirmed = analyzeFeederChannels(
+            gc,
+            [_exit_detection(motion_confirmed=True)],
+        )
+        self.assertGreater(confirmed.ch2_exit_overlap_max, 0.0)
+        self.assertTrue(confirmed.ch2_exit_center_crossed)
+        self.assertEqual(ChannelAction.PULSE_PRECISE, confirmed.ch2_action)
 
     def test_stuck_dropzone_track_counts_accumulated_motion_then_acknowledges(self) -> None:
         stats = _RuntimeStats()

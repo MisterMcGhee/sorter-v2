@@ -2598,6 +2598,7 @@ class VisionManager:
                         else None
                     ),
                     source_role=role,
+                    motion_confirmed=bool(getattr(track, "motion_confirmed", True)),
                 )
             )
         return detections

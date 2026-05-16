@@ -28,3 +28,4 @@ class ChannelDetection:
     channel: PolygonChannel
     global_id: int | None = None
     source_role: str | None = None
+    motion_confirmed: bool = True
