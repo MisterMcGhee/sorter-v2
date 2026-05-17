@@ -59,11 +59,21 @@ jobs:
 
             Flash the `.uf2` for your board revision and role. Hold BOOTSEL while plugging in the Pico, then drag the file onto the RPI-RP2 drive.
 
+            **v1-1 boards** — labeled either "Feeder" or "Distribution" on the board. Download both:
+            - `feeder-v1-1` → the board controlling the feeder stages
+            - `distribution-v1-1` → the board controlling the chute and bin tower
+
+            **v1-2 boards** — has 5 total steppers. Only one firmware needed:
+            - `distribution-v1-2` → handles everything on the v1-2 board
+
+            **SKR Pico** — alternative distribution controller:
+            - `distribution-skr` → for the SKR Pico board (distribution role only)
+
             | File | Board | Role |
             |------|-------|------|
             | `feeder-v1-1_*.uf2` | Basically v1-1 | Feeder MB |
             | `distribution-v1-1_*.uf2` | Basically v1-1 | Distribution MB |
-            | `distribution-v1-2_*.uf2` | Basically v1-2 | Distribution MB |
+            | `distribution-v1-2_*.uf2` | Basically v1-2 | Distribution MB (all-in-one) |
             | `distribution-skr_*.uf2` | SKR Pico | Distribution MB |
 
           files: |
