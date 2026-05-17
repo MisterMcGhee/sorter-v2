@@ -1,0 +1,69 @@
+# Paths the scrub stage removes/empties from a captured image.
+# Format: one path per line. Lines beginning with `#` are comments.
+# A trailing `/` means "directory contents, keep the dir".
+# A line beginning with `:empty:` means "truncate this file to zero bytes".
+
+# --- secrets (user-supplied) ---
+home/orangepi/sorter-v2/software/.env
+home/orangepi/sorter-config/machine.toml
+home/orangepi/sorter-config/mine/
+
+# --- credentials / shell history ---
+home/orangepi/.bash_history
+root/.bash_history
+home/orangepi/.python_history
+root/.python_history
+home/orangepi/.lesshst
+root/.lesshst
+
+# --- ssh: host keys regen on first boot, authorized_keys is owner-specific ---
+etc/ssh/ssh_host_dsa_key
+etc/ssh/ssh_host_dsa_key.pub
+etc/ssh/ssh_host_ecdsa_key
+etc/ssh/ssh_host_ecdsa_key.pub
+etc/ssh/ssh_host_ed25519_key
+etc/ssh/ssh_host_ed25519_key.pub
+etc/ssh/ssh_host_rsa_key
+etc/ssh/ssh_host_rsa_key.pub
+home/orangepi/.ssh/authorized_keys
+home/orangepi/.ssh/known_hosts
+root/.ssh/authorized_keys
+root/.ssh/known_hosts
+
+# --- tailscale state (node key, auth, hostname) ---
+# Binary stays installed; user runs `tailscale up` themselves.
+var/lib/tailscale/tailscaled.state
+var/lib/tailscale/tailscaled.log1.txt
+var/lib/tailscale/tailscaled.log2.txt
+var/lib/tailscale/files/
+
+# --- host identity (systemd regens on boot from empty files) ---
+:empty:etc/machine-id
+:empty:var/lib/dbus/machine-id
+
+# --- logs / journal ---
+var/log/journal/
+var/log/syslog
+var/log/auth.log
+var/log/kern.log
+var/log/dpkg.log
+var/log/apt/
+var/log/wtmp
+var/log/btmp
+var/log/lastlog
+
+# --- caches that might have crept back in after prep-image.sh ---
+home/orangepi/.cache/uv/
+root/.cache/uv/
+var/cache/apt/archives/
+var/lib/apt/lists/
+
+# --- temp ---
+tmp/
+var/tmp/
+var/crash/
+
+# --- repo working state (force back to a clean state) ---
+# We do NOT auto-checkout a branch here — the scrub just removes
+# untracked junk. The user re-syncs from main after first boot if needed.
+home/orangepi/sorter-v2/software/logs/
