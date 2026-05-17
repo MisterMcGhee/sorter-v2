@@ -601,6 +601,7 @@ class IRLConfig:
 class IRLInterface:
     carousel_stepper: "StepperMotor"
     c_channel_4_rotor_stepper: "StepperMotor"
+    classification_channel_rotor_stepper: "StepperMotor"
     carousel_home_pin: "DigitalInputPin"
     carousel_hw: "CarouselHardware"
     chute_stepper: "StepperMotor"
@@ -1454,6 +1455,8 @@ def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
 
     if hasattr(irl_interface, "carousel_stepper"):
         irl_interface.c_channel_4_rotor_stepper = irl_interface.carousel_stepper
+        if config.machine_setup.uses_classification_channel:
+            irl_interface.classification_channel_rotor_stepper = irl_interface.carousel_stepper
 
     bin_layout = config.bin_layout_config
     irl_interface.distribution_layout = mkLayoutFromConfig(bin_layout)
