@@ -12,12 +12,15 @@ const uint8_t STEPPER_DIR_PINS[]  = {27, 22, 20, 18, 7};
 // rotors + a 4th channel (carousel / classification-channel). Override
 // in machine.toml [stepper_bindings] if physical wiring differs.
 #ifdef FIRMWARE_ROLE_DISTRIBUTION
+// "carousel" stays called "carousel" here even when the machine is wired
+// as a 4th c-channel (classification channel) instead of an actual carousel.
+// Backend aliases it per machine_setup; not worth a firmware variant.
 const char* const STEPPER_NAMES[] = {
-    "chute_stepper",
-    "c_channel_1_rotor",
-    "c_channel_2_rotor",
-    "c_channel_3_rotor",
-    "carousel"
+    "c_channel_1_rotor",   // ch0 — STEP=GP28, DIR=GP27
+    "c_channel_2_rotor",   // ch1 — STEP=GP26, DIR=GP22
+    "c_channel_3_rotor",   // ch2 — STEP=GP21, DIR=GP20
+    "carousel",            // ch3 — STEP=GP19, DIR=GP18
+    "chute_stepper"        // ch4 — STEP=GP8,  DIR=GP7
 };
 #else
 const char* const STEPPER_NAMES[] = {

@@ -12,6 +12,8 @@ from __future__ import annotations
 import argparse
 import sys
 import threading
+import time
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -19,12 +21,16 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from flask import Flask, jsonify, request
+import glob
+import subprocess
+import cv2
+from flask import Flask, Response, jsonify, request
 from global_config import GlobalConfig, Timeouts
 from logger import Logger
-from hardware.sorter_interface import StepperMotor, ServoMotor, DigitalOutputPin
+from hardware.sorter_interface import StepperMotor, ServoMotor, DigitalOutputPin, DigitalInputPin
 import irl.config as _irl_bootstrap  # must precede machine_platform import to resolve circular dep
 from machine_platform.control_board import discover_control_boards
+from subsystems.distribution.chute import HOME_SPEED_MICROSTEPS_PER_SEC, HOME_TIMEOUT_MS
 
 # ── global state ──────────────────────────────────────────────────────────────
 
@@ -32,7 +38,13 @@ app = Flask(__name__)
 _steppers: dict[str, StepperMotor] = {}
 _servos: list[ServoMotor] = []
 _digital_outputs: list[dict[str, Any]] = []
+_chute_home_pin: DigitalInputPin | None = None
+_chute_endstop_active_high: bool = True
 _lock = threading.Lock()
+
+_cameras: dict[str, int] = {}        # name -> device index
+_camera_frames: dict[str, bytes] = {}  # name -> latest JPEG bytes
+_camera_lock = threading.Lock()
 
 
 def _get_steppers() -> dict[str, StepperMotor]:
@@ -47,7 +59,10 @@ def _get_servos() -> list[ServoMotor]:
 
 @app.get("/api/status")
 def api_status():
-    steppers = {name: {"enabled": m.enabled} for name, m in _get_steppers().items()}
+    steppers = {
+        name: {"enabled": m.enabled, "can_home": name == "chute_stepper" and _chute_home_pin is not None}
+        for name, m in _get_steppers().items()
+    }
     servos = [{"index": i, "enabled": s.enabled} for i, s in enumerate(_get_servos())]
     digital_outputs = [{"index": d["index"], "label": d["label"], "value": d["value"]} for d in _digital_outputs]
     return jsonify({"steppers": steppers, "servos": servos, "digital_outputs": digital_outputs})
@@ -123,6 +138,28 @@ def api_stepper_stop():
     return jsonify({"ok": True})
 
 
+@app.post("/api/stepper/home")
+def api_stepper_home():
+    name = request.json.get("name")
+    if name != "chute_stepper":
+        return jsonify({"error": "homing only supported for chute_stepper"}), 400
+    steppers = _get_steppers()
+    if name not in steppers:
+        return jsonify({"error": f"unknown stepper {name!r}"}), 404
+    if _chute_home_pin is None:
+        return jsonify({"error": "no home pin configured for chute_stepper"}), 500
+    stepper = steppers[name]
+    with _lock:
+        stepper.home(HOME_SPEED_MICROSTEPS_PER_SEC, _chute_home_pin, home_pin_active_high=_chute_endstop_active_high)
+    start = time.monotonic()
+    while not stepper.stopped:
+        if (time.monotonic() - start) * 1000 > HOME_TIMEOUT_MS:
+            return jsonify({"ok": False, "error": "homing timed out"})
+        time.sleep(0.01)
+    triggered = bool(_chute_home_pin.value) == _chute_endstop_active_high
+    return jsonify({"ok": triggered, "triggered": triggered})
+
+
 @app.post("/api/servo/move")
 def api_servo_move():
     body = request.json
@@ -157,6 +194,27 @@ def api_servo_disable():
     with _lock:
         servos[idx].enabled = False
     return jsonify({"ok": True})
+
+
+@app.get("/api/cameras")
+def api_cameras():
+    return jsonify({"cameras": list(_cameras.keys())})
+
+
+@app.get("/api/camera/stream/<name>")
+def api_camera_stream(name: str):
+    if name not in _cameras:
+        return jsonify({"error": "unknown camera"}), 404
+
+    def generate():
+        while True:
+            with _camera_lock:
+                frame = _camera_frames.get(name)
+            if frame:
+                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+            time.sleep(1 / 15)
+
+    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
 @app.post("/api/digital_output/set")
@@ -218,10 +276,18 @@ PAGE = """<!DOCTYPE html>
   .feedback { font-size: .72rem; color: var(--muted); min-height: 1.2em; }
   .feedback.ok  { color: var(--green); }
   .feedback.err { color: var(--red); }
+  .cam-row { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 4px; }
+  .cam-wrap { display: flex; flex-direction: column; align-items: center; gap: 4px; flex-shrink: 0; }
+  .cam-wrap img { height: 160px; width: auto; border-radius: 6px;
+                  border: 1px solid var(--border); background: var(--surface); }
+  .cam-label { font-size: .7rem; color: var(--muted); }
 </style>
 </head>
 <body>
 <h1>motor test</h1>
+
+<h2>cameras</h2>
+<div id="camera-row" class="cam-row"></div>
 
 <h2>steppers</h2>
 <div id="stepper-cards" class="cards"></div>
@@ -244,15 +310,20 @@ function feedback(el, res) {
   el._t = setTimeout(() => { el.textContent = ''; el.className = 'feedback'; }, 2500);
 }
 
-function mkStepperCard(name, info) {
+function mkStepperCard(name, info, keyNum) {
   const card = document.createElement('div');
   card.className = 'card';
   card.dataset.name = name;
+
+  const keyBadge = keyNum != null
+    ? `<span style="margin-left:auto;background:var(--border);color:var(--muted);font-size:.7rem;padding:2px 6px;border-radius:4px">${keyNum}</span>`
+    : '';
 
   card.innerHTML = `
     <div class="row">
       <div class="status-dot ${info.enabled ? 'on' : ''}"></div>
       <span class="card-title">${name}</span>
+      ${keyBadge}
     </div>
     <div class="row">
       <label>speed</label>
@@ -274,6 +345,7 @@ function mkStepperCard(name, info) {
       <button class="btn-green enable-btn">enable</button>
       <button class="btn-red disable-btn">disable</button>
       <button class="btn-muted stop-btn">stop</button>
+      ${info.can_home ? '<button class="btn-accent home-btn">home</button>' : ''}
     </div>
     <div class="feedback"></div>
   `;
@@ -304,6 +376,14 @@ function mkStepperCard(name, info) {
 
   card.querySelector('.stop-btn').onclick = () =>
     post('/api/stepper/stop', {name}).then(r => feedback(fb, r));
+
+  if (info.can_home) {
+    card.querySelector('.home-btn').onclick = () => {
+      fb.textContent = 'homing…';
+      fb.className = 'feedback';
+      post('/api/stepper/home', {name}).then(r => feedback(fb, r));
+    };
+  }
 
   return card;
 }
@@ -414,12 +494,40 @@ function mkDoutCard(info) {
   return card;
 }
 
+async function initCameras() {
+  const {cameras} = await fetch('/api/cameras').then(r => r.json());
+  const row = document.getElementById('camera-row');
+  if (!cameras.length) {
+    row.innerHTML = '<p style="color:var(--muted);font-size:.8rem">no cameras detected</p>';
+    return;
+  }
+  for (const name of cameras) {
+    const wrap = document.createElement('div');
+    wrap.className = 'cam-wrap';
+    const img = document.createElement('img');
+    img.src = `/api/camera/stream/${name}`;
+    img.onerror = () => { img.alt = 'no signal'; img.style.opacity = '0.3'; };
+    const label = document.createElement('span');
+    label.className = 'cam-label';
+    label.textContent = name;
+    wrap.appendChild(img);
+    wrap.appendChild(label);
+    row.appendChild(wrap);
+  }
+}
+
+const _stepperCards = [];
+
 async function init() {
+  initCameras();
   const {steppers, servos, digital_outputs} = await fetch('/api/status').then(r => r.json());
 
   const sc = document.getElementById('stepper-cards');
-  for (const [name, info] of Object.entries(steppers))
-    sc.appendChild(mkStepperCard(name, info));
+  for (const [i, [name, info]] of Object.entries(steppers).entries()) {
+    const card = mkStepperCard(name, info, i + 1);
+    _stepperCards.push(card);
+    sc.appendChild(card);
+  }
   if (!Object.keys(steppers).length)
     sc.innerHTML = '<p style="color:var(--muted);font-size:.8rem">no steppers detected</p>';
 
@@ -437,6 +545,13 @@ async function init() {
 }
 
 init();
+
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  const idx = parseInt(e.key) - 1;
+  if (isNaN(idx) || idx < 0 || idx >= _stepperCards.length) return;
+  _stepperCards[idx].querySelector('.move-steps-btn').click();
+});
 </script>
 </body>
 </html>"""
@@ -458,8 +573,53 @@ def buildGc(debug: bool) -> GlobalConfig:
     return gc
 
 
+def _enumerate_cameras() -> dict[str, int]:
+    """Return {label: device_index} for /dev/video* nodes that have actual capture formats."""
+    result: dict[str, int] = {}
+    for path in sorted(glob.glob("/dev/video[0-9]*")):
+        try:
+            out = subprocess.run(
+                ["v4l2-ctl", "-d", path, "--list-formats"],
+                capture_output=True, text=True, timeout=2,
+            ).stdout
+            if "'" in out:  # format entries look like [0]: 'MJPG'
+                idx = int(path.removeprefix("/dev/video"))
+                result[f"video{idx}"] = idx
+        except Exception:
+            pass
+    return result
+
+
+def _camera_capture_loop(name: str, index: int) -> None:
+    path = f"/dev/video{index}"
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        print(f"Camera {name!r} ({path}) failed to open — skipping")
+        return
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            time.sleep(0.1)
+            continue
+        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
+        with _camera_lock:
+            _camera_frames[name] = buf.tobytes()
+
+
+def _load_chute_home_config() -> int:
+    machine_toml = Path(__file__).resolve().parents[3] / "machine.toml"
+    if not machine_toml.exists():
+        return 0
+    with machine_toml.open("rb") as f:
+        data = tomllib.load(f)
+    return data.get("chute", {}).get("home_pin_channel", 0)
+
+
 def main() -> None:
-    global _steppers, _servos
+    global _steppers, _servos, _chute_home_pin, _chute_endstop_active_high, _cameras
 
     parser = argparse.ArgumentParser(description="Motor test web UI")
     parser.add_argument("--port", type=int, default=8765)
@@ -469,6 +629,9 @@ def main() -> None:
     gc = buildGc(args.debug)
     gc.logger.info("motor_test: discovering control boards (no required steppers)")
     boards = discover_control_boards(gc, required_stepper_names=[])
+
+    chute_home_channel = _load_chute_home_config()
+    _chute_endstop_active_high = True
 
     for board in boards:
         identity = board.identity
@@ -482,14 +645,22 @@ def main() -> None:
                 name = f"{name}__{identity.port}"
             _steppers[name] = ds.stepper
             ds.stepper.enabled = True
+            if ds.canonical_name == "chute_stepper" and _chute_home_pin is None:
+                _chute_home_pin = board.get_input(chute_home_channel)
         _servos.extend(board.servos)
         for i, dout in enumerate(board.interface.digital_outputs):
             label = f"24V rail {i}" if len(board.interface.digital_outputs) <= 2 else f"output {i}"
             _digital_outputs.append({"index": i, "label": label, "pin": dout, "value": dout.value})
 
+    _cameras = _enumerate_cameras()
+    for cam_name, cam_index in _cameras.items():
+        t = threading.Thread(target=_camera_capture_loop, args=(cam_name, cam_index), daemon=True)
+        t.start()
+
     print(f"\nDetected {len(_steppers)} stepper(s): {', '.join(_steppers) or 'none'}")
     print(f"Detected {len(_servos)} servo(s)")
     print(f"Detected {len(_digital_outputs)} digital output(s)")
+    print(f"Cameras: {', '.join(f'{n}={i}' for n, i in _cameras.items()) or 'none'}")
     import socket
     hostname = socket.gethostname()
     print(f"\nOpen http://{hostname}:{args.port}  (or http://<pi-ip>:{args.port})\n")
