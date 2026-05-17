@@ -24,6 +24,7 @@ permalink: /sorter/
 
 - **[Sorter architecture]({{ '/sorter/architecture/' | relative_url }})** — how the coordinator, the three subsystem state machines, the vision manager, the machine platform abstraction, and the SvelteKit UI fit together. For contributors touching the code.
 - **[Sorting profile reference]({{ '/sorter/profile-reference/' | relative_url }})** — the on-disk shape of `sorting_profile.json` — rules, conditions, `part_to_category`, set inventories. Accurate for `schema_version: 1`.
+- **[machine.toml reference]({{ '/sorter/machine-toml-reference/' | relative_url }})** — every field in the machine-specific config file: servo, chute, carousel, stepper bindings and overrides, cameras, and GPIO LEDs. This lives in the docs site, not the Sorter UI.
 
 ## Coming soon
 
