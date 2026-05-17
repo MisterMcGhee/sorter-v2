@@ -304,7 +304,7 @@ def _installed_index() -> set[tuple[str, str]]:
 
 def list_remote_models(target_id: str, **filters: Any) -> dict:
     """Fetch the remote model catalog for ``target_id`` and tag installs."""
-    client, _target = _get_client_for_target(target_id)
+    client, target = _get_client_for_target(target_id)
     page = client.list_models(**filters)
 
     installed = _installed_index()
@@ -318,7 +318,56 @@ def list_remote_models(target_id: str, **filters: Any) -> dict:
                 item["installed"] = (target_id, model_id) in installed
             else:
                 item["installed"] = False
+            item["target_id"] = target_id
+            item["target_url"] = target.get("url")
+            item["target_name"] = target.get("name")
     return page
+
+
+def list_remote_models_all(**filters: Any) -> dict:
+    """Aggregate the model catalog across every enabled Hive target.
+
+    Each item is tagged with ``target_id`` / ``target_url`` / ``target_name``
+    so the UI (and downstream download calls) can tell where it came from.
+    Per-target failures are reported under ``errors`` so one unreachable Hive
+    doesn't blank the entire list.
+    """
+    page = max(1, int(filters.pop("page", 1) or 1))
+    page_size = max(1, int(filters.pop("page_size", 30) or 30))
+    # Fetch up to (page * page_size) from each target so we can sort + slice
+    # the combined view; gives us deterministic pagination without hammering.
+    per_target_limit = max(page_size, page * page_size)
+    per_target_filters = {**filters, "page": 1, "page_size": min(200, per_target_limit)}
+
+    aggregated: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    for target in resolve_targets():
+        try:
+            target_page = list_remote_models(target["id"], **per_target_filters)
+        except (HiveError, ValueError) as exc:
+            errors.append({"target_id": target["id"], "target_url": target.get("url") or "", "error": str(exc)})
+            continue
+        items = target_page.get("items") if isinstance(target_page, dict) else None
+        if isinstance(items, list):
+            aggregated.extend(item for item in items if isinstance(item, dict))
+
+    def _published_key(item: dict[str, Any]) -> str:
+        value = item.get("published_at")
+        return value if isinstance(value, str) else ""
+
+    aggregated.sort(key=_published_key, reverse=True)
+    total = len(aggregated)
+    pages = (total + page_size - 1) // page_size if total else 1
+    start = (page - 1) * page_size
+    end = start + page_size
+    return {
+        "items": aggregated[start:end],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": max(1, pages),
+        "errors": errors,
+    }
 
 
 def get_remote_model(target_id: str, model_id: str) -> dict:

@@ -271,7 +271,6 @@ def list_models(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=30, ge=1, le=200),
 ) -> dict:
-    resolved_target = _resolve_target_id(target_id)
     filters: dict[str, Any] = {"page": page, "page_size": page_size}
     if scope:
         filters["scope"] = scope
@@ -281,13 +280,19 @@ def list_models(
         filters["family"] = family
     if q:
         filters["q"] = q
+
+    # No target_id → aggregate across every enabled Hive so the UI can present
+    # a single merged catalog and tag each row with its source Hive.
+    if not target_id:
+        return hive_models_service.list_remote_models_all(**filters)
+
     try:
-        payload = hive_models_service.list_remote_models(resolved_target, **filters)
+        payload = hive_models_service.list_remote_models(target_id, **filters)
     except HiveError as exc:
         raise _hive_error_response(exc)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    return {"target_id": resolved_target, **(payload if isinstance(payload, dict) else {})}
+    return {"target_id": target_id, **(payload if isinstance(payload, dict) else {})}
 
 
 # NOTE: ``/models/installed`` must be declared before ``/models/{model_id}``
