@@ -36,6 +36,10 @@ jobs:
         working-directory: software/firmware/sorter_interface_firmware
         run: make build-distribution-v1-2
 
+      - name: Build feeder-skr
+        working-directory: software/firmware/sorter_interface_firmware
+        run: make build-feeder-skr
+
       - name: Build distribution-skr
         working-directory: software/firmware/sorter_interface_firmware
         run: make build-distribution-skr
@@ -47,6 +51,7 @@ jobs:
           cp build-feeder-v1-1/sorter_interface_firmware.uf2        feeder-v1-1_${TAG}.uf2
           cp build-distribution-v1-1/sorter_interface_firmware.uf2   distribution-v1-1_${TAG}.uf2
           cp build-distribution-v1-2/sorter_interface_firmware.uf2   distribution-v1-2_${TAG}.uf2
+          cp build-feeder-skr/sorter_interface_firmware.uf2          feeder-skr_${TAG}.uf2
           cp build-distribution-skr/sorter_interface_firmware.uf2    distribution-skr_${TAG}.uf2
 
       - name: Create GitHub Release
@@ -59,25 +64,28 @@ jobs:
 
             Flash the `.uf2` for your board revision and role. Hold BOOTSEL while plugging in the Pico, then drag the file onto the RPI-RP2 drive.
 
-            **v1-1 boards** — labeled either "Feeder" or "Distribution" on the board. Download both:
+            **basically v1-1** — labeled either "Feeder" or "Distribution" on the board. Download both:
             - `feeder-v1-1` → the board controlling the feeder stages
             - `distribution-v1-1` → the board controlling the chute and bin tower
 
-            **v1-2 boards** — has 5 total steppers. Only one firmware needed:
+            **basically v1-2** — has 5 total steppers. Only one firmware needed:
             - `distribution-v1-2` → handles everything on the v1-2 board
 
-            **SKR Pico** — alternative distribution controller:
-            - `distribution-skr` → for the SKR Pico board (distribution role only)
+            **SKR Pico** — labeled either "Feeder" or "Distribution" on the board. Download both:
+            - `feeder-skr` → the board controlling the feeder stages
+            - `distribution-skr` → the board controlling the chute and bin tower
 
             | File | Board | Role |
             |------|-------|------|
-            | `feeder-v1-1_*.uf2` | Basically v1-1 | Feeder MB |
-            | `distribution-v1-1_*.uf2` | Basically v1-1 | Distribution MB |
-            | `distribution-v1-2_*.uf2` | Basically v1-2 | Distribution MB (all-in-one) |
+            | `feeder-v1-1_*.uf2` | basically v1-1 | Feeder MB |
+            | `distribution-v1-1_*.uf2` | basically v1-1 | Distribution MB |
+            | `distribution-v1-2_*.uf2` | basically v1-2 | Distribution MB (all-in-one) |
+            | `feeder-skr_*.uf2` | SKR Pico | Feeder MB |
             | `distribution-skr_*.uf2` | SKR Pico | Distribution MB |
 
           files: |
             software/firmware/sorter_interface_firmware/feeder-v1-1_*.uf2
             software/firmware/sorter_interface_firmware/distribution-v1-1_*.uf2
             software/firmware/sorter_interface_firmware/distribution-v1-2_*.uf2
+            software/firmware/sorter_interface_firmware/feeder-skr_*.uf2
             software/firmware/sorter_interface_firmware/distribution-skr_*.uf2

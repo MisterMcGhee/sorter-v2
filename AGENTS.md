@@ -1,5 +1,9 @@
 this is the software for our lego sorting machine called "Sorter"
 
+# branding
+
+- The feeder/distribution controller board brand is **basically** — always lowercase, no capitalization.
+
 # status
 
 We're still in the middle of bringing up the Orange Pi system. Things that worked fine on the Mac may hit new, environment-specific issues on the Pi (services, paths, permissions, hardware access, etc.). Expect rough edges there and don't assume parity with the Mac dev setup.
