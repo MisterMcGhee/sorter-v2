@@ -164,8 +164,17 @@ _RUNTIME_DEFAULT_EXTENSIONS = {
 
 
 def build_download_filename(model, variant) -> str:
-    """Build a self-describing filename: {slug}_v{version}_{YYYY-MM-DD}_{runtime}{.ext}."""
-    suffix = Path(variant.file_name or "").suffix
+    """Build a self-describing filename: {slug}_v{version}_{YYYY-MM-DD}_{runtime}{.ext}.
+
+    Preserves compound suffixes like ``.tar.gz`` so the file extension reflects
+    what's actually on disk (Path.suffix alone only returns ``.gz``).
+    """
+    file_name = variant.file_name or ""
+    suffix = ""
+    if file_name.endswith(".tar.gz"):
+        suffix = ".tar.gz"
+    else:
+        suffix = Path(file_name).suffix
     if not suffix:
         suffix = _RUNTIME_DEFAULT_EXTENSIONS.get(variant.runtime, "")
     date_part = model.published_at.strftime("%Y-%m-%d")
