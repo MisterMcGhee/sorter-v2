@@ -83,6 +83,8 @@ Multiple agents may be running simultaneously in this project. This is unlikely 
 
 Agent notes live in a separate repo: `sorter-v2-agent-notes` (sibling to this repo on disk at `/Users/spencer/Documents/GitHub/sorter-v2-agent-notes/`). These are internal agent-facing docs — learnings about the env, hardware quirks, infra changes, etc. that help future sessions avoid relearning.
 
+**These notes are not source-of-truth.** They were written during in-progress work that may have had bugs, half-correct assumptions, or stale state. Treat them as hints/context, not authoritative facts. When something matters, verify against the actual code, hardware, or running system before acting on a note. If you find a note that's wrong or outdated, fix it.
+
 - **Read** them at the start of every session.
 - **Write** new notes or updates there when you discover something worth preserving.
 - **Commit** changes directly to that repo (it has its own git). Do not commit AGENT_NOTES/ in this repo — it stays gitignored here.
