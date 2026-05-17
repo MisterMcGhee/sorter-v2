@@ -118,7 +118,6 @@
 							{#each model.variants as variant (variant.id)}
 								<a
 									href={downloadUrl(variant.id)}
-									download={variant.file_name}
 									class="relative flex items-center gap-3 border-b border-[var(--color-border)] px-3 py-2 last:border-b-0 hover:bg-[var(--color-bg)]"
 									onclick={() => { downloadsOpen = false; }}
 								>

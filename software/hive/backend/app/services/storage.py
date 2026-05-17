@@ -139,9 +139,13 @@ def serve_model_variant(
     sha256: str,
     file_size: int,
 ) -> Response:
+    # Don't set Content-Length here — the response can be a 307 redirect to a
+    # presigned S3 URL (empty body) or a streamed download. Letting the
+    # framework size the body avoids "content shorter than Content-Length"
+    # errors when serve_mode=redirect.
     headers = {
         "X-Model-SHA256": sha256,
-        "Content-Length": str(file_size),
+        "X-Model-Size": str(file_size),
     }
     return serve_stored_file(
         stored_path,
