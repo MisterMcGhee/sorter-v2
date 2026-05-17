@@ -25,7 +25,8 @@ from uuid import uuid4
 
 import cv2
 import numpy as np
-from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+from aiortc import RTCPeerConnection, RTCRtpSender, RTCSessionDescription, VideoStreamTrack
+from aiortc.mediastreams import MediaStreamError, VIDEO_CLOCK_RATE, VIDEO_TIME_BASE
 from aiortc.rtcconfiguration import RTCConfiguration
 from av import VideoFrame
 from fastapi import APIRouter, HTTPException
@@ -51,6 +52,7 @@ from server.camera_calibration import (
     generate_color_profile_from_analysis,
 )
 from server.camera_discovery import getDiscoveredCameraStreams
+from vision.media_pipeline import build_camera_media_pipeline_plan
 
 router = APIRouter()
 
@@ -73,6 +75,16 @@ _DASHBOARD_CROP_PADDING_FACTOR = 0.14
 _DASHBOARD_CROP_MIN_PADDING_PX = 48.0
 _DASHBOARD_MASK_BACKGROUND_BGR = (230, 230, 230)
 _DASHBOARD_QUAD_PADDING_FACTOR = 0.1
+WEBRTC_CAMERA_TARGET_FPS = max(
+    1.0,
+    min(30.0, float(os.getenv("SORTER_WEBRTC_CAMERA_TARGET_FPS", "12"))),
+)
+WEBRTC_H264_DEFAULT_BITRATE_BPS = int(
+    os.getenv("SORTER_WEBRTC_H264_DEFAULT_BITRATE_BPS", "12000000")
+)
+WEBRTC_H264_MAX_BITRATE_BPS = int(os.getenv("SORTER_WEBRTC_H264_MAX_BITRATE_BPS", "30000000"))
+WEBRTC_VP8_DEFAULT_BITRATE_BPS = int(os.getenv("SORTER_WEBRTC_VP8_DEFAULT_BITRATE_BPS", "8000000"))
+WEBRTC_VP8_MAX_BITRATE_BPS = int(os.getenv("SORTER_WEBRTC_VP8_MAX_BITRATE_BPS", "16000000"))
 CALIBRATION_METHOD_TARGET_PLATE = "target_plate"
 CALIBRATION_METHOD_LLM_GUIDED = "llm_guided"
 CALIBRATION_METHOD_EXPOSURE_HISTOGRAM = "exposure_histogram"
@@ -86,6 +98,27 @@ DEFAULT_LLM_CALIBRATION_MODEL = "google/gemini-3.1-pro-preview"
 DEFAULT_LLM_CALIBRATION_MAX_ITERATIONS = 10
 
 logger = logging.getLogger(__name__)
+
+
+def _configure_aiortc_video_quality() -> None:
+    """Raise aiortc's conservative defaults to camera-preview quality.
+
+    aiortc defaults are tuned for small realtime calls (VP8 max 1.5 Mbit/s,
+    H264 max 3 Mbit/s). That is visibly too soft for local 4K inspection
+    streams, even when the captured frame is actually 3840x2160.
+    """
+    try:
+        from aiortc.codecs import h264, vpx
+
+        h264.DEFAULT_BITRATE = max(1_000_000, WEBRTC_H264_DEFAULT_BITRATE_BPS)
+        h264.MAX_BITRATE = max(h264.DEFAULT_BITRATE, WEBRTC_H264_MAX_BITRATE_BPS)
+        vpx.DEFAULT_BITRATE = max(500_000, WEBRTC_VP8_DEFAULT_BITRATE_BPS)
+        vpx.MAX_BITRATE = max(vpx.DEFAULT_BITRATE, WEBRTC_VP8_MAX_BITRATE_BPS)
+    except Exception:
+        logger.exception("Failed to configure WebRTC camera bitrate limits")
+
+
+_configure_aiortc_video_quality()
 
 
 from server.config_helpers import (
@@ -3763,6 +3796,22 @@ class CameraWebRtcAnswer(BaseModel):
 _camera_webrtc_peer_connections: set[RTCPeerConnection] = set()
 
 
+def _preferred_webrtc_video_codecs() -> list[Any]:
+    try:
+        codecs = RTCRtpSender.getCapabilities("video").codecs
+    except Exception:
+        return []
+    h264 = [codec for codec in codecs if codec.mimeType.lower() == "video/h264"]
+    vp8 = [codec for codec in codecs if codec.mimeType.lower() == "video/vp8"]
+    rtx = [codec for codec in codecs if codec.mimeType.lower() == "video/rtx"]
+    others = [
+        codec
+        for codec in codecs
+        if codec.mimeType.lower() not in {"video/h264", "video/vp8", "video/rtx"}
+    ]
+    return [*vp8, *h264, *rtx, *others]
+
+
 class _CameraRoleVideoTrack(VideoStreamTrack):
     def __init__(
         self,
@@ -3783,6 +3832,21 @@ class _CameraRoleVideoTrack(VideoStreamTrack):
         self._cached_dashboard_spec: Dict[str, Any] | None = None
         self._last_shape: tuple[int, int] = (640, 360)
         self._last_frame_timestamp: float | None = None
+        self._target_fps = WEBRTC_CAMERA_TARGET_FPS
+        self._timestamp_step = max(1, int(round(VIDEO_CLOCK_RATE / self._target_fps)))
+
+    async def _next_preview_timestamp(self) -> tuple[int, Any]:
+        if self.readyState != "live":
+            raise MediaStreamError
+        if hasattr(self, "_timestamp"):
+            self._timestamp += self._timestamp_step
+            wait = self._start + (self._timestamp / VIDEO_CLOCK_RATE) - time.time()
+            if wait > 0:
+                await asyncio.sleep(wait)
+        else:
+            self._start = time.time()
+            self._timestamp = 0
+        return self._timestamp, VIDEO_TIME_BASE
 
     def _dashboard_frame(self, frame: np.ndarray) -> np.ndarray:
         if not self._dashboard:
@@ -3823,7 +3887,7 @@ class _CameraRoleVideoTrack(VideoStreamTrack):
         return np.full((height, width, 3), 230, dtype=np.uint8)
 
     async def recv(self):
-        pts, time_base = await self.next_timestamp()
+        pts, time_base = await self._next_preview_timestamp()
         frame = await asyncio.to_thread(self._read_frame)
         if frame is None:
             frame = self._blank_frame()
@@ -3849,6 +3913,7 @@ class _CameraRoleVideoTrack(VideoStreamTrack):
             "timestamp": self._last_frame_timestamp,
             "width": width,
             "height": height,
+            "fps": self._target_fps,
             "status": health,
             "annotated": self._annotated,
             "dashboard": self._dashboard,
@@ -3901,7 +3966,16 @@ async def camera_webrtc_offer(role: str, offer: CameraWebRtcOffer) -> CameraWebR
         color_correct=offer.color_correct,
         show_regions=offer.show_regions,
     )
-    pc.addTrack(track)
+    sender = pc.addTrack(track)
+    preferred_codecs = _preferred_webrtc_video_codecs()
+    if preferred_codecs:
+        for transceiver in pc.getTransceivers():
+            if transceiver.sender is sender:
+                try:
+                    transceiver.setCodecPreferences(preferred_codecs)
+                except Exception:
+                    logger.exception("Failed to set WebRTC camera codec preferences")
+                break
 
     async def send_metadata(channel: Any) -> None:
         try:
@@ -4696,6 +4770,65 @@ def get_camera_capture_modes(role: str) -> Dict[str, Any]:
         "modes": modes,
         "current": current,
         "live": live,
+    }
+
+
+@router.get("/api/cameras/media-pipeline")
+def get_camera_media_pipeline_status() -> Dict[str, Any]:
+    """Return the desired media pipeline for each active camera role.
+
+    Python remains the control plane. Browser live video should migrate to a
+    platform hardware-encoded WebRTC path whenever the machine has the required
+    GStreamer/encoder stack.
+    """
+    _, config = _read_machine_params_config()
+    svc = shared_state.camera_service
+    roles = sorted(svc.feeds.keys()) if svc is not None else sorted(CAMERA_SETUP_ROLES)
+    saved_capture_modes = (
+        config.get("camera_capture_modes", {})
+        if isinstance(config.get("camera_capture_modes"), dict)
+        else {}
+    )
+    plans: Dict[str, Any] = {}
+
+    for role in roles:
+        try:
+            source = _camera_source_for_role(config, role)
+        except HTTPException:
+            continue
+
+        mode: Dict[str, Any] | None = None
+        if svc is not None and hasattr(svc, "get_capture_mode_for_role"):
+            try:
+                mode = svc.get_capture_mode_for_role(role)
+            except Exception:
+                mode = None
+
+        saved_mode = saved_capture_modes.get(role) if isinstance(saved_capture_modes, dict) else None
+        if not isinstance(mode, dict):
+            mode = saved_mode if isinstance(saved_mode, dict) else {}
+
+        width = int(mode.get("width") or 1920)
+        height = int(mode.get("height") or 1080)
+        fps = int(mode.get("fps") or 30)
+        plans[role] = build_camera_media_pipeline_plan(
+            role,
+            source=source,
+            width=width,
+            height=height,
+            capture_fps=fps,
+            preview_fps=WEBRTC_CAMERA_TARGET_FPS,
+        ).to_dict()
+
+    return {
+        "ok": True,
+        "architecture": {
+            "control_plane": "python",
+            "live_video_target": "webrtc with platform hardware H.264 encoding",
+            "overlay_target": "browser metadata overlay, not burned into video",
+            "still_capture_target": "Python/OpenCV high-quality frame access",
+        },
+        "roles": plans,
     }
 
 

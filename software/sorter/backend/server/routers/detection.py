@@ -1666,6 +1666,27 @@ def _normalize_channel_exit_channel(value: str | None) -> str | None:
     raise HTTPException(status_code=400, detail="Unsupported channel exit incident channel.")
 
 
+def _normalize_channel_dropzone_channel(value: str | None) -> str | None:
+    if value is None:
+        return None
+    candidate = value.strip().lower().replace("-", "_")
+    if candidate in ("c2", "ch2", "c_channel_2", "channel_2"):
+        return "c2"
+    if candidate in ("c3", "ch3", "c_channel_3", "channel_3"):
+        return "c3"
+    if candidate in (
+        "c4",
+        "ch4",
+        "channel_4",
+        "c_channel_4",
+        "carousel",
+        "classification",
+        "classification_channel",
+    ):
+        return "c4"
+    raise HTTPException(status_code=400, detail="Unsupported channel dropzone incident channel.")
+
+
 def _active_channel_exit_incident(
     requested_channel: str | None = None,
 ) -> tuple[Any, Dict[str, Any]]:
@@ -1713,10 +1734,10 @@ def _active_channel_dropzone_incident(
     runtime_stats = _runtime_stats_or_503()
     active = runtime_stats.activeIncident() if hasattr(runtime_stats, "activeIncident") else None
     if not isinstance(active, dict) or active.get("kind") != CHANNEL_DROPZONE_STUCK_INCIDENT_KIND:
-        raise HTTPException(status_code=409, detail="No C2/C3 dropzone incident is waiting.")
+        raise HTTPException(status_code=409, detail="No channel dropzone incident is waiting.")
 
-    active_channel = _normalize_channel_exit_channel(str(active.get("channel") or ""))
-    wanted_channel = _normalize_channel_exit_channel(requested_channel)
+    active_channel = _normalize_channel_dropzone_channel(str(active.get("channel") or ""))
+    wanted_channel = _normalize_channel_dropzone_channel(requested_channel)
     if wanted_channel is not None and wanted_channel != active_channel:
         raise HTTPException(status_code=400, detail="The active dropzone incident belongs to another channel.")
 

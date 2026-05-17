@@ -289,6 +289,7 @@ class ClassificationChannelConfig:
     intake_angle_deg: float
     intake_body_half_width_deg: float
     intake_guard_deg: float
+    intake_registration_window_deg: float
     drop_angle_deg: float
     drop_tolerance_deg: float
     point_of_no_return_deg: float
@@ -315,27 +316,21 @@ class ClassificationChannelConfig:
 
     def __init__(self) -> None:
         self.use_dynamic_zones = True
-        # 2 pieces simultaneously: one in the hood/classification, one
-        # queued at intake. With drop-to-intake = 85° and max compartment
-        # width = 79° the pure-angular intake_guard can prevent
-        # same-compartment loading OR allow parallel-with-drop admission
-        # but not both (constraints don't overlap). max_zones=2 + a
-        # generous intake_guard keeps the platter clean: at most two
-        # pieces, each in its own compartment, and the drop window only
-        # ever sees one piece at a time (the leader).
-        self.max_zones = 2
+        # Keep C4 pipelined instead of serialised: target one piece in the
+        # intake/drop zone and three more spread across the platter on the way
+        # to the exit. Zone hard-guards still prevent same-sector loading.
+        self.max_zones = 4
         self.intake_angle_deg = 305.0
         self.intake_body_half_width_deg = 10.0
-        # Compartments on this platter measure 65°-79° wide. To guarantee
-        # the new piece lands in the *next* compartment (not the same one
-        # the previous piece is still in), the intake exclusion window
-        # must be at least one full compartment wide plus margin. body
-        # (10°) + guard (80°) = 90° on each side of intake — comfortably
-        # above the widest observed compartment. Drop-committed pieces are
-        # explicitly excluded from this check in running._updateIntakeGate
-        # so a piece waiting at drop doesn't artificially block intake
-        # (drop-to-intake distance is only 85°, less than the guard alone).
-        self.intake_guard_deg = 80.0
+        # Admission is governed by the actual intake/dropzone being clear, not
+        # by an extra angular safety moat. Existing piece hard-zones still
+        # protect the landing zone; this guard stays at zero for C4 dynamic
+        # intake so C3 can refill as soon as the last piece has left intake.
+        self.intake_guard_deg = 0.0
+        # A newly dropped piece may appear a bit downstream before the tracker
+        # has enough hits to register it. Keep that registration search wider
+        # than the admission-clearance window.
+        self.intake_registration_window_deg = 46.0
         # Live calibration on the dedicated classification channel shows the
         # real guide / point-of-no-return on the lower-right quadrant, not on
         # the legacy left-side position from the old chamber model.

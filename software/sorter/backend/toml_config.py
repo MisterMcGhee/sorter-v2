@@ -225,7 +225,7 @@ _INCIDENT_DEFINITIONS: tuple[dict[str, Any], ...] = (
     {
         "kind": "channel_dropzone_stuck",
         "label": "Dropzone Stuck",
-        "scope": "C2/C3",
+        "scope": "C2/C3/C4",
         "description": "A piece is not moving as expected.",
         "off_label": "Leave normal backpressure unchanged",
         "manual_label": "Operator acknowledges ignore",

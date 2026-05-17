@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from defs.channel import ChannelDetection
 from subsystems.channels.base import (
     CHANNEL_DROPZONE_STUCK_INCIDENT_KIND,
     publish_channel_dropzone_stuck_incident,
 )
-from subsystems.feeder.analysis import bboxSectionOverlapRatio
+from subsystems.feeder.analysis import bboxSectionOverlapRatio, getBboxSections
 
 
 DROPZONE_STUCK_OVERLAP_THRESHOLD: float = 2.0 / 3.0
@@ -35,12 +35,12 @@ class _IgnoredDropzoneTrack:
 
 
 class DropzoneStuckIncidentManager:
-    """Detect and manage C2/C3 objects parked in a dropzone.
+    """Detect and manage C2/C3/C4 objects parked in a dropzone.
 
     A newly stuck track is operator-facing and blocks the process via
     ``runtime_stats.active_incident``. Once acknowledged, only that exact track
-    is ignored for dropzone backpressure until it leaves the dropzone or
-    disappears for a short grace period.
+    is ignored for dropzone backpressure / intake admission until it leaves the
+    dropzone or disappears for a short grace period.
     """
 
     def __init__(
@@ -50,16 +50,31 @@ class DropzoneStuckIncidentManager:
         overlap_threshold: float = DROPZONE_STUCK_OVERLAP_THRESHOLD,
         stall_ms: int = DROPZONE_STUCK_STALL_MS,
         missing_grace_s: float = DROPZONE_IGNORED_MISSING_GRACE_S,
+        on_ignored_change: Callable[[int, int, bool], None] | None = None,
     ) -> None:
         self._gc = gc
         self._overlap_threshold = float(overlap_threshold)
         self._stall_ms = int(stall_ms)
         self._missing_grace_s = float(missing_grace_s)
+        self._on_ignored_change = on_ignored_change
         self._candidates: dict[tuple[int, int], _DropzoneTrackState] = {}
         self._ignored: dict[tuple[int, int], _IgnoredDropzoneTrack] = {}
+        self._pending_motion_s_by_channel: dict[int, float] = {}
 
     def ignored_detection_ids(self) -> set[tuple[int, int]]:
         return set(self._ignored.keys())
+
+    def note_channel_motion(self, channel_id: int, duration_s: float) -> None:
+        """Credit commanded channel motion to stuck candidates on next update."""
+        channel = int(channel_id)
+        if channel not in (2, 3, 4):
+            return
+        duration = max(0.0, float(duration_s))
+        if duration <= 0.0:
+            return
+        self._pending_motion_s_by_channel[channel] = (
+            self._pending_motion_s_by_channel.get(channel, 0.0) + duration
+        )
 
     def update(
         self,
@@ -72,13 +87,15 @@ class DropzoneStuckIncidentManager:
 
         The incident timer is accumulated rotor-active time, not wall-clock
         time. A piece may sit in a dropzone while the sorter is paused without
-        getting blamed; only C2/C3 motion while it remains in that dropzone
+        getting blamed; only C2/C3/C4 motion while it remains in that dropzone
         counts toward the threshold.
 
         Returns True when this call published a new blocking incident, allowing
         the feeder tick to stop before sending more pulses.
         """
         rotating_channel_ids = rotating_channel_ids or set()
+        motion_credit_by_channel = self._pending_motion_s_by_channel
+        self._pending_motion_s_by_channel = {}
         seen_in_dropzone: set[tuple[int, int]] = set()
         seen_currently: set[tuple[int, int]] = set()
         published = False
@@ -89,20 +106,21 @@ class DropzoneStuckIncidentManager:
                 continue
             seen_currently.add(key)
             overlap = bboxSectionOverlapRatio(det.bbox, det.channel, det.channel.dropzone_sections)
-            if overlap > 0.0:
+            blocks_dropzone = self._blocks_dropzone(det, overlap)
+            if blocks_dropzone:
                 seen_in_dropzone.add(key)
 
             ignored = self._ignored.get(key)
             if ignored is not None:
-                if overlap > 0.0:
+                if blocks_dropzone:
                     ignored.last_seen_mono = float(now_mono)
                     ignored.bbox = self._bbox(det)
                 else:
-                    self._ignored.pop(key, None)
+                    self._clear_ignored(key)
                 self._candidates.pop(key, None)
                 continue
 
-            if overlap < self._overlap_threshold:
+            if not blocks_dropzone:
                 self._candidates.pop(key, None)
                 continue
 
@@ -120,6 +138,10 @@ class DropzoneStuckIncidentManager:
                 )
                 self._candidates[key] = state
             else:
+                state.accumulated_motion_s += motion_credit_by_channel.get(
+                    int(det.channel_id),
+                    0.0,
+                )
                 if rotating_now and state.was_rotating:
                     state.accumulated_motion_s += max(
                         0.0,
@@ -143,10 +165,13 @@ class DropzoneStuckIncidentManager:
         channel_id, global_id = self._key_for_incident(active)
         bbox = self._bbox_from_incident(active)
         key = (channel_id, global_id)
-        self._ignored[key] = _IgnoredDropzoneTrack(
-            acknowledged_at_mono=float(now_mono),
-            last_seen_mono=float(now_mono),
-            bbox=bbox,
+        self._set_ignored(
+            key,
+            _IgnoredDropzoneTrack(
+                acknowledged_at_mono=float(now_mono),
+                last_seen_mono=float(now_mono),
+                bbox=bbox,
+            ),
         )
         self._candidates.pop(key, None)
         runtime_stats = getattr(self._gc, "runtime_stats", None)
@@ -165,7 +190,7 @@ class DropzoneStuckIncidentManager:
         channel_id, global_id = self._key_for_incident(active)
         key = (channel_id, global_id)
         self._candidates.pop(key, None)
-        self._ignored.pop(key, None)
+        self._clear_ignored(key)
         runtime_stats = getattr(self._gc, "runtime_stats", None)
         if runtime_stats is not None and hasattr(runtime_stats, "clearActiveIncident"):
             runtime_stats.clearActiveIncident(kind=CHANNEL_DROPZONE_STUCK_INCIDENT_KIND)
@@ -176,6 +201,21 @@ class DropzoneStuckIncidentManager:
             "global_id": global_id,
             "track_id": global_id,
         }
+
+    def _set_ignored(
+        self,
+        key: tuple[int, int],
+        ignored: _IgnoredDropzoneTrack,
+    ) -> None:
+        self._ignored[key] = ignored
+        if self._on_ignored_change is not None:
+            self._on_ignored_change(int(key[0]), int(key[1]), True)
+
+    def _clear_ignored(self, key: tuple[int, int]) -> None:
+        had_key = key in self._ignored
+        self._ignored.pop(key, None)
+        if had_key and self._on_ignored_change is not None:
+            self._on_ignored_change(int(key[0]), int(key[1]), False)
 
     def _publish(
         self,
@@ -192,10 +232,13 @@ class DropzoneStuckIncidentManager:
             return False
         if self._automatic_enabled(CHANNEL_DROPZONE_STUCK_INCIDENT_KIND):
             key = (int(det.channel_id), int(global_id))
-            self._ignored[key] = _IgnoredDropzoneTrack(
-                acknowledged_at_mono=float(state.last_seen_mono),
-                last_seen_mono=float(state.last_seen_mono),
-                bbox=state.bbox,
+            self._set_ignored(
+                key,
+                _IgnoredDropzoneTrack(
+                    acknowledged_at_mono=float(state.last_seen_mono),
+                    last_seen_mono=float(state.last_seen_mono),
+                    bbox=state.bbox,
+                ),
             )
             self._candidates.pop(key, None)
             logger = getattr(self._gc, "logger", None)
@@ -239,13 +282,13 @@ class DropzoneStuckIncidentManager:
             if key in seen_in_dropzone:
                 continue
             if key in seen_currently or (now_mono - state.last_seen_mono) >= self._missing_grace_s:
-                self._ignored.pop(key, None)
+                self._clear_ignored(key)
 
     @staticmethod
     def _key_for_detection(det: ChannelDetection) -> tuple[int, int] | None:
         channel_id = getattr(det, "channel_id", None)
         global_id = getattr(det, "global_id", None)
-        if channel_id not in (2, 3) or not isinstance(global_id, int):
+        if channel_id not in (2, 3, 4) or not isinstance(global_id, int):
             return None
         return int(channel_id), int(global_id)
 
@@ -256,6 +299,8 @@ class DropzoneStuckIncidentManager:
             channel_id = 2
         elif channel == "c3":
             channel_id = 3
+        elif channel == "c4":
+            channel_id = 4
         else:
             raise ValueError("Unsupported dropzone incident channel.")
         global_id = active.get("global_id", active.get("track_id"))
@@ -269,11 +314,22 @@ class DropzoneStuckIncidentManager:
             return "c2", "c_channel_2", "C-Channel 2"
         if channel_id == 3:
             return "c3", "c_channel_3", "C-Channel 3"
+        if channel_id == 4:
+            return "c4", "carousel", "Classification Channel"
         return None
 
     @staticmethod
     def _bbox(det: ChannelDetection) -> tuple[int, int, int, int]:
         return tuple(int(value) for value in det.bbox[:4])
+
+    def _blocks_dropzone(self, det: ChannelDetection, overlap: float) -> bool:
+        """Mirror feeder backpressure so every blocker can become an incident."""
+        if overlap >= self._overlap_threshold:
+            return True
+        try:
+            return bool(getBboxSections(det.bbox, det.channel) & det.channel.dropzone_sections)
+        except Exception:
+            return overlap > 0.0
 
     @staticmethod
     def _bbox_from_incident(active: dict[str, Any]) -> tuple[int, int, int, int]:

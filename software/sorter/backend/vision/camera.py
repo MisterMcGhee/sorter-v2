@@ -17,6 +17,9 @@ from irl.config import (
 )
 from .types import CameraFrame
 
+CAPTURE_MODE_SETTLE_S = 2.0
+CAPTURE_EXPECTED_FRAME_FALLBACK_S = 10.0
+
 if platform.system() == "Darwin":
     try:
         from hardware.macos_uvc_controls import (
@@ -709,6 +712,8 @@ class CaptureThread:
         read_failures = 0
         next_open_attempt_at = 0.0
         previous_source: int | str | None = None
+        expected_frame_settle_until = 0.0
+        last_expected_frame_at = 0.0
 
         while not self._stop_event.is_set():
             source, is_url, width, height, fps, fourcc = self._get_config_snapshot()
@@ -718,16 +723,20 @@ class CaptureThread:
                 open_failures = 0
                 read_failures = 0
                 next_open_attempt_at = 0.0
+                expected_frame_settle_until = 0.0
+                last_expected_frame_at = 0.0
 
             if self._reopen_event.is_set():
                 self._reopen_event.clear()
                 if cap is not None:
                     cap.release()
                     cap = None
-                    self._cap = None
+                self._cap = None
                 open_failures = 0
                 read_failures = 0
                 next_open_attempt_at = 0.0
+                expected_frame_settle_until = 0.0
+                last_expected_frame_at = 0.0
 
             if source is None:
                 self.latest_frame = None
@@ -764,6 +773,12 @@ class CaptureThread:
                     open_failures = 0
                     read_failures = 0
                     next_open_attempt_at = 0.0
+                    expected_frame_settle_until = (
+                        time.time() + CAPTURE_MODE_SETTLE_S
+                        if not is_url and width > 0 and height > 0
+                        else 0.0
+                    )
+                    last_expected_frame_at = 0.0
 
                     if not is_url:
                         if isinstance(fourcc, str) and len(fourcc) >= 4:
@@ -790,6 +805,19 @@ class CaptureThread:
                 ret, frame = cap.read()
             if ret:
                 read_failures = 0
+                if not is_url and width > 0 and height > 0:
+                    frame_h, frame_w = frame.shape[:2]
+                    if (int(frame_w), int(frame_h)) != (int(width), int(height)):
+                        now = time.time()
+                        has_recent_expected = (
+                            last_expected_frame_at > 0.0
+                            and (now - last_expected_frame_at)
+                            < CAPTURE_EXPECTED_FRAME_FALLBACK_S
+                        )
+                        if now < expected_frame_settle_until or has_recent_expected:
+                            continue
+                    else:
+                        last_expected_frame_at = time.time()
                 picture_settings = self.getPictureSettings()
                 uncorrected_frame = apply_picture_settings(frame, picture_settings)
                 frame = apply_camera_color_profile(frame, self.getColorProfile())

@@ -55,6 +55,7 @@ INTAKE_FRESHNESS_GRACE_S = 0.35
 SAMPLE_MODE_TEACHER_CAPTURE_MIN_INTERVAL_S = 0.8
 SAMPLE_MODE_EMPTY_STATE_CAPTURE_INTERVAL_S = 5.0
 DEFAULT_EXIT_RELEASE_STEPPER_PER_OUTPUT_DEG = 130.0 / 12.0
+FAILED_DROP_RECOVERY_WINDOW_S = 8.0
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,12 @@ class Running(BaseState):
         self._deadline_defer_started_at_by_uuid: dict[str, float] = {}
         self._sample_teacher_capture_last_queued_mono: float | None = None
         self._sample_empty_state_last_captured_mono: float | None = None
+        self._last_drop_pulse_completed_mono: float | None = None
+        self._last_drop_pulse_completed_wall: float | None = None
+        self._last_drop_pulse_piece_uuid: str | None = None
+        self._last_drop_pulse_track_global_id: int | None = None
+        self._last_drop_pulse_exit_attempt_count: int = 0
+        self._exit_release_review_required_uuids: set[str] = set()
 
     @property
     def _config(self):
@@ -198,9 +205,9 @@ class Running(BaseState):
         if self._holdForExitReleaseIncidentReview():
             return None
 
-        track_extents = self._getTrackExtents()
+        track_extents = self._filterIgnoredDropzoneTrackExtents(self._getTrackExtents())
         self._registerNewIntakePiece(track_extents, now_wall, now_mono)
-        self._recoverExistingTrackedPieces(track_extents, now_wall)
+        self._recoverExistingTrackedPieces(track_extents, now_wall, now_mono)
         zones, expired_pieces = self.transport.updateTrackedPieces(track_extents)
         self._refreshLatestCapturedCrops(now_wall)
         self._emitExpiredPieceEvents(expired_pieces)
@@ -291,6 +298,12 @@ class Running(BaseState):
         self._exit_release_plan = []
         self._exit_release_next_move_not_before_mono = 0.0
         self._exit_release_attempt_by_uuid = {}
+        self._exit_release_review_required_uuids = set()
+        self._last_drop_pulse_completed_mono = None
+        self._last_drop_pulse_completed_wall = None
+        self._last_drop_pulse_piece_uuid = None
+        self._last_drop_pulse_track_global_id = None
+        self._last_drop_pulse_exit_attempt_count = 0
         self._exit_release_manual_test = False
         self._clearExitReleaseIncident()
         self._awaiting_intake_piece = False
@@ -321,6 +334,76 @@ class Running(BaseState):
             )
             return []
 
+    def _filterIgnoredDropzoneTrackExtents(
+        self,
+        track_extents: list[TrackAngularExtent],
+    ) -> list[TrackAngularExtent]:
+        ignored_getter = getattr(
+            self.shared,
+            "ignored_classification_dropzone_track_ids",
+            None,
+        )
+        if ignored_getter is None:
+            return track_extents
+        try:
+            ignored_ids = {int(track_id) for track_id in ignored_getter()}
+        except Exception:
+            return track_extents
+        if not ignored_ids:
+            return track_extents
+        return [
+            extent
+            for extent in track_extents
+            if int(extent.global_id) not in ignored_ids
+        ]
+
+    def _upstreamC3ExitStillOccupied(self) -> bool:
+        if self.vision is None:
+            return False
+        probe = getattr(self.vision, "feederRoleExitOccupied", None)
+        if probe is None:
+            return False
+        try:
+            return bool(probe("c_channel_3"))
+        except Exception:
+            return False
+
+    def _classificationDropzoneWindow(self) -> tuple[float, float]:
+        """Return the operator-drawn C4 dropzone as (center, half-width).
+
+        C4 intake admission must follow the saved zone geometry from the Zone
+        editor. ``intake_angle_deg`` is only a fallback for old configs that do
+        not have classification-channel arc zones yet.
+        """
+        try:
+            from blob_manager import getChannelPolygons
+            from subsystems.feeder.analysis import (
+                normalizeAngle,
+                parseSavedChannelArcZones,
+                positiveAngleSpan,
+            )
+
+            saved = getChannelPolygons()
+            if isinstance(saved, dict):
+                arc = parseSavedChannelArcZones(
+                    "classification_channel",
+                    saved.get("channel_angles", {}),
+                    saved.get("arc_params", {}),
+                )
+                if arc is not None:
+                    span = float(positiveAngleSpan(arc.drop_start_angle, arc.drop_end_angle))
+                    if np.isfinite(span) and 0.0 < span < 180.0:
+                        return (
+                            float(normalizeAngle(arc.drop_start_angle + (span * 0.5))),
+                            max(1.0, span * 0.5),
+                        )
+        except Exception:
+            pass
+        return (
+            float(self._config.intake_angle_deg),
+            float(self._config.intake_body_half_width_deg),
+        )
+
     def _registerNewIntakePiece(
         self,
         track_extents: list[TrackAngularExtent],
@@ -331,11 +414,19 @@ class Running(BaseState):
             return
         if not self._awaiting_intake_piece:
             return
+        if self._upstreamC3ExitStillOccupied():
+            self.shared.set_classification_gate(
+                False,
+                reason="awaiting_upstream_exit_clear",
+            )
+            return
 
+        intake_center_deg, intake_half_width_deg = self._classificationDropzoneWindow()
         candidate_window_deg = (
-            float(self._config.intake_body_half_width_deg)
-            + float(self._config.intake_guard_deg)
-            + 8.0
+            max(
+                float(getattr(self._config, "intake_registration_window_deg", 0.0)),
+                intake_half_width_deg + 8.0,
+            )
         )
         unmatched = [
             extent
@@ -348,7 +439,7 @@ class Running(BaseState):
                 >= (self._intake_requested_at_wall - INTAKE_FRESHNESS_GRACE_S)
             )
             and abs(
-                _circular_diff_deg(extent.center_deg, self._config.intake_angle_deg)
+                _circular_diff_deg(extent.center_deg, intake_center_deg)
             )
             <= candidate_window_deg
         ]
@@ -356,7 +447,7 @@ class Running(BaseState):
             return
         unmatched.sort(
             key=lambda extent: abs(
-                _circular_diff_deg(extent.center_deg, self._config.intake_angle_deg)
+                _circular_diff_deg(extent.center_deg, intake_center_deg)
             )
         )
         if len(self.transport.activePieces()) >= int(self._config.max_zones):
@@ -407,6 +498,7 @@ class Running(BaseState):
         self,
         track_extents: list[TrackAngularExtent],
         now_wall: float,
+        now_mono: float,
     ) -> None:
         if self.transport.zone_manager is None:
             return
@@ -466,6 +558,22 @@ class Running(BaseState):
                 float(extent.center_deg),
                 float(self._config.drop_angle_deg),
             )
+            if self._looksLikeRecoveredFailedDrop(extent, now_wall, now_mono):
+                self._exit_release_review_required_uuids.add(obj.uuid)
+                self._exit_release_attempt_by_uuid[obj.uuid] = max(
+                    int(self._exit_release_attempt_by_uuid.get(obj.uuid, 0)),
+                    int(self._last_drop_pulse_exit_attempt_count),
+                )
+                self.logger.warning(
+                    "ClassificationChannel: track %s reappeared after drop pulse "
+                    "for %s; next C4 exit release will require incident handling "
+                    "(attempt %d)"
+                    % (
+                        extent.global_id,
+                        (self._last_drop_pulse_piece_uuid or "unknown")[:8],
+                        self._exit_release_attempt_by_uuid[obj.uuid] + 1,
+                    )
+                )
             self._refreshLatestCapturedCrop(obj, now_wall=now_wall, emit=False)
             obj.updated_at = now_wall
             if self.event_queue is not None:
@@ -485,6 +593,33 @@ class Running(BaseState):
             "ClassificationChannel: recovered %d existing track(s) already present in chamber"
             % adopted
         )
+
+    def _looksLikeRecoveredFailedDrop(
+        self,
+        extent: TrackAngularExtent,
+        now_wall: float,
+        now_mono: float,
+    ) -> bool:
+        last_mono = self._last_drop_pulse_completed_mono
+        if last_mono is None:
+            return False
+        if (now_mono - float(last_mono)) > FAILED_DROP_RECOVERY_WINDOW_S:
+            return False
+
+        # If the track predates the drop pulse, it is probably another already
+        # resident C4 piece that was merely hidden. A failed drop normally
+        # reappears as a fresh tracker id because _finalizePulse kills the old
+        # id after declaring the piece delivered.
+        first_seen = getattr(extent, "first_seen_ts", None)
+        last_wall = self._last_drop_pulse_completed_wall
+        if (
+            isinstance(first_seen, (int, float))
+            and float(first_seen) > 0.0
+            and last_wall is not None
+            and float(first_seen) < float(last_wall) - INTAKE_FRESHNESS_GRACE_S
+        ):
+            return False
+        return True
 
     def _refreshLatestCapturedCrops(self, now_wall: float) -> None:
         for piece in self.transport.activePieces():
@@ -621,27 +756,27 @@ class Running(BaseState):
             self.shared.set_classification_gate(False, reason="drop_approach_busy")
             return
 
-        # The intake guard is wider (90°) than the drop-to-intake distance
-        # (85°), so a piece at or near drop would otherwise overlap the
-        # intake clearance window and freeze the gate. Drop-committed
-        # pieces are physically about to leave the platter via the chute,
-        # so exclude their zones from the clearance check AND from the
-        # max_zones cap — otherwise max_zones=2 caps at one resident piece
-        # whenever there's also a piece in the drop window, defeating the
-        # whole point of the cap (one in classification + one at intake).
+        # C4 intake admission is deliberately tied to the operator-drawn
+        # dropzone: as soon as tracked pieces have moved out of that landing
+        # zone, C3 may feed again. There is no extra guard moat here; existing
+        # piece hard-zones only need to avoid overlapping the drawn dropzone
+        # window.
+        # Drop-committed pieces are physically about to leave the platter via
+        # the chute, so exclude them from the max_zones cap as well.
         active_pieces = self.transport.activePieces()
         drop_committed_uuids = {
             piece.uuid for piece in active_pieces if self._isDropCommitted(piece)
         }
+        intake_center_deg, intake_half_width_deg = self._classificationDropzoneWindow()
         resident_count = sum(
             1 for piece in active_pieces if piece.uuid not in drop_committed_uuids
         )
         can_request = (
             resident_count < int(self._config.max_zones)
             and zone_manager.is_arc_clear(
-                center_deg=self._config.intake_angle_deg,
-                body_half_width_deg=self._config.intake_body_half_width_deg,
-                hard_guard_deg=self._config.intake_guard_deg,
+                center_deg=intake_center_deg,
+                body_half_width_deg=intake_half_width_deg,
+                hard_guard_deg=0.0,
                 ignore_piece_uuids=drop_committed_uuids,
             )
         )
@@ -1070,26 +1205,27 @@ class Running(BaseState):
         from drop within which a piece is considered close enough to drop
         that the intake gate should react to it.
         """
-        return max(
-            float(self._config.point_of_no_return_deg) + 8.0,
-            float(self._config.positioning_window_deg) * 0.7,
-        )
+        # Keep this only slightly wider than the point-of-no-return window.
+        # The previous positioning-window based value (~34°) held C3 off while
+        # pieces were merely approaching the exit, which starved the C4
+        # pipeline. The wider positioning window is still used for drop
+        # selection; this guard only protects the final few degrees before a
+        # piece becomes drop-committed.
+        return float(self._config.point_of_no_return_deg) + 4.0
 
     def _isDropCommitted(self, piece) -> bool:
         """A piece is drop-committed once its center has entered the
         point-of-no-return window of the drop angle. From that moment on
         braking can no longer cancel the drop — the only outcomes are
         pulse-drop, exit-release shimmy, or multi_drop_fail. Drop-
-        committed pieces must NOT block intake: drop-to-intake distance
-        is only 85°, less than the 90° intake_guard alone, so a piece
-        committed to dropping would otherwise serialise the platter to
-        one piece at a time (matches the config comment in
-        ``ClassificationChannelConfig`` that promised this exclusion).
+        committed pieces must NOT block intake: they are physically about
+        to leave the platter and should not count against the next C3
+        admission slot.
 
         Uses ``point_of_no_return_deg`` as the symmetric threshold so the
         window stays narrower than ``_dropApproachWindowDeg`` — pieces in
-        the wider approach band ``(PoNR, approach]`` are still
-        "approaching but not yet committed" and continue to hold intake.
+        the narrow approach band ``(PoNR, approach]`` are still
+        "approaching but not yet committed" and briefly hold intake.
         """
         center_deg = getattr(piece, "classification_channel_zone_center_deg", None)
         if not isinstance(center_deg, (int, float)):
@@ -1631,6 +1767,8 @@ class Running(BaseState):
         if not plan:
             return False
         review = self._exit_release_review
+        if piece_uuid in self._exit_release_review_required_uuids:
+            review_allowed = True
         if review_allowed and self._exitReleaseReviewEnabled():
             if review is not None and review.piece_uuid == piece_uuid and review.approved:
                 stage_index = review.stage_index
@@ -1650,6 +1788,7 @@ class Running(BaseState):
         self._exit_release_plan = plan
         self._exit_release_next_move_not_before_mono = 0.0
         self._exit_release_attempt_by_uuid[piece_uuid] = stage_index + 1
+        self._exit_release_review_required_uuids.discard(piece_uuid)
         self.logger.info(
             "ClassificationChannel: exit-release shimmy stage %d/%d %s for %s "
             "(output_amp %.2f deg, cycles %d, offset %.1f deg, overlap %.2f, center_crossed=%s)"
@@ -1879,10 +2018,21 @@ class Running(BaseState):
         result = self.transport.advanceTransport(dropped_uuid=self._pending_drop_uuid)
         dropped_piece = result.piece_for_distribution_drop
         if dropped_piece is not None:
+            self._last_drop_pulse_completed_mono = now_mono
+            self._last_drop_pulse_completed_wall = time.time()
+            self._last_drop_pulse_piece_uuid = dropped_piece.uuid
+            global_id = getattr(dropped_piece, "tracked_global_id", None)
+            self._last_drop_pulse_track_global_id = (
+                int(global_id) if isinstance(global_id, int) else None
+            )
+            self._last_drop_pulse_exit_attempt_count = int(
+                self._exit_release_attempt_by_uuid.get(dropped_piece.uuid, 0)
+            )
             self._recognition_retry_not_before_by_uuid.pop(dropped_piece.uuid, None)
             self._exit_release_attempt_by_uuid.pop(dropped_piece.uuid, None)
+            self._exit_release_review_required_uuids.discard(dropped_piece.uuid)
+            self._clearExitReleaseIncident(dropped_piece.uuid)
             runtime_stats = getattr(self.gc, "runtime_stats", None)
-            global_id = getattr(dropped_piece, "tracked_global_id", None)
             if runtime_stats is not None and hasattr(runtime_stats, "observeChannelExit"):
                 runtime_stats.observeChannelExit(
                     "classification_channel",

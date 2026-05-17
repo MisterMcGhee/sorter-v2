@@ -46,6 +46,8 @@ sections:
         pages:
           - title: Architecture
             url: /sorter/architecture/
+          - title: Camera media pipeline
+            url: /sorter/camera-media-pipeline/
           - title: Sorting profile reference
             url: /sorter/profile-reference/
 

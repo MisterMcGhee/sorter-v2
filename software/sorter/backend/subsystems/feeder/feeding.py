@@ -150,7 +150,10 @@ class Feeding(BaseState):
         self._feeder_detection_unavailable_since: float | None = None
         self._feeder_detection_pause_enqueued: bool = False
         self._sample_speed_limit_cache: dict[str, int] = {}
-        self._dropzone_incidents = DropzoneStuckIncidentManager(gc=self.gc)
+        self._dropzone_incidents = DropzoneStuckIncidentManager(
+            gc=self.gc,
+            on_ignored_change=self._onDropzoneIncidentIgnoredChange,
+        )
         self._c1_jam_recovery = C1JamRecoveryStrategy(
             stepper=self.irl.c_channel_1_rotor_stepper,
             logger=self.gc.logger,
@@ -344,7 +347,23 @@ class Feeding(BaseState):
             rotating.add(2)
         if self._isStepperMotionActive(self.irl.c_channel_3_rotor_stepper, now_mono):
             rotating.add(3)
+        carousel_stepper = getattr(self.irl, "carousel_stepper", None)
+        if carousel_stepper is not None and not bool(getattr(carousel_stepper, "stopped", True)):
+            rotating.add(4)
         return rotating
+
+    def _onDropzoneIncidentIgnoredChange(
+        self,
+        channel_id: int,
+        global_id: int,
+        ignored: bool,
+    ) -> None:
+        if int(channel_id) != 4:
+            return
+        setter = getattr(self.shared, "set_classification_dropzone_track_ignored", None)
+        if setter is None:
+            return
+        setter(int(global_id), bool(ignored))
 
     def _activeDropzoneIncident(
         self,
@@ -353,7 +372,7 @@ class Feeding(BaseState):
     ) -> dict:
         active = self.gc.runtime_stats.activeIncident()
         if not isinstance(active, dict) or active.get("kind") != "channel_dropzone_stuck":
-            raise RuntimeError("No C2/C3 dropzone incident is waiting.")
+            raise RuntimeError("No channel dropzone incident is waiting.")
         if channel is not None and active.get("channel") != channel:
             raise ValueError("The active dropzone incident belongs to another channel.")
         if global_id is not None and int(active.get("global_id") or -1) != int(global_id):
@@ -531,6 +550,20 @@ class Feeding(BaseState):
                     time.monotonic()
                     + (CLASSIFICATION_CHANNEL_PENDING_ADMISSION_MS / 1000.0)
                 )
+            if label.startswith("ch2"):
+                dropzone_incidents = getattr(self, "_dropzone_incidents", None)
+                if dropzone_incidents is not None:
+                    dropzone_incidents.note_channel_motion(
+                        2,
+                        max(0.0, exec_ms) / 1000.0,
+                    )
+            elif label.startswith("ch3"):
+                dropzone_incidents = getattr(self, "_dropzone_incidents", None)
+                if dropzone_incidents is not None:
+                    dropzone_incidents.note_channel_motion(
+                        3,
+                        max(0.0, exec_ms) / 1000.0,
+                    )
         else:
             # Back off briefly after a rejected hardware move to avoid a hot retry loop.
             cooldown_ms = max(500, cfg.delay_between_pulse_ms)

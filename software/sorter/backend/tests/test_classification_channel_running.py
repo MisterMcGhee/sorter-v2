@@ -1,10 +1,53 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
 
 from defs.known_object import ClassificationStatus, KnownObject
+from irl.config import ClassificationChannelConfig
 from subsystems.classification_channel.running import Running
 from subsystems.classification_channel.zone_manager import TrackAngularExtent
+
+
+@pytest.fixture(autouse=True)
+def _isolated_machine_params(monkeypatch, tmp_path):
+    monkeypatch.setenv("MACHINE_SPECIFIC_PARAMS_PATH", str(tmp_path / "machine_params.toml"))
+
+
+def _classification_channel_zone_payload(
+    *,
+    drop_start: float = 100.0,
+    drop_end: float = 140.0,
+) -> dict[str, object]:
+    return {
+        "resolution": [400, 400],
+        "polygons": {
+            "classification_channel": [[30, 30], [370, 30], [370, 370], [30, 370]],
+        },
+        "channel_angles": {"classification_channel": 0.0},
+        "arc_params": {
+            "classification_channel": {
+                "center": [200, 200],
+                "inner_radius": 70,
+                "outer_radius": 170,
+                "resolution": [400, 400],
+                "drop_zone": {
+                    "start_outer_angle": drop_start,
+                    "end_outer_angle": drop_end,
+                    "start_inner_angle": drop_start,
+                    "end_inner_angle": drop_end,
+                },
+                "exit_zone": {
+                    "start_outer_angle": 320,
+                    "end_outer_angle": 350,
+                    "start_inner_angle": 320,
+                    "end_inner_angle": 350,
+                },
+            },
+        },
+    }
 
 
 class _Logger:
@@ -98,6 +141,16 @@ class _Transport:
     def updateTrackedPieces(self, track_extents):
         return [], []
 
+    def advanceTransport(self, dropped_uuid: str | None = None):
+        dropped_piece = None
+        if dropped_uuid is not None:
+            for track_id, piece in list(self._pieces_by_track.items()):
+                if getattr(piece, "uuid", None) == dropped_uuid:
+                    dropped_piece = piece
+                    del self._pieces_by_track[track_id]
+                    break
+        return SimpleNamespace(piece_for_distribution_drop=dropped_piece)
+
     def isPendingClassification(self, uuid: str) -> bool:
         return False
 
@@ -126,6 +179,7 @@ class _Shared:
         self.classification_gate_calls: list[tuple[bool, str | None]] = []
         self.distribution_ready = True
         self.sample_collection_mode = False
+        self._ignored_classification_dropzone_track_ids: set[int] = set()
 
     def set_classification_gate(self, open: bool, reason: str | None = None) -> None:
         self.classification_gate_calls.append((bool(open), reason))
@@ -138,6 +192,15 @@ class _Shared:
 
     def publish_piece_request(self, *args, **kwargs) -> None:
         pass
+
+    def set_classification_dropzone_track_ignored(self, global_id: int, ignored: bool) -> None:
+        if ignored:
+            self._ignored_classification_dropzone_track_ids.add(int(global_id))
+        else:
+            self._ignored_classification_dropzone_track_ids.discard(int(global_id))
+
+    def ignored_classification_dropzone_track_ids(self) -> set[int]:
+        return set(self._ignored_classification_dropzone_track_ids)
 
 
 class _EventQueue:
@@ -153,6 +216,7 @@ class _Vision:
         self.teacher_capture_calls: list[dict[str, object]] = []
         self.empty_state_calls = 0
         self.latest_crop_by_id: dict[int, dict[str, object]] = {}
+        self.c3_exit_occupied = False
 
     def scheduleClassificationChannelTeacherCaptureAfterMove(self, **kwargs) -> None:
         self.teacher_capture_calls.append(dict(kwargs))
@@ -163,6 +227,9 @@ class _Vision:
 
     def getLatestFeederTrackPieceCrop(self, global_id: int):
         return self.latest_crop_by_id.get(int(global_id))
+
+    def feederRoleExitOccupied(self, role: str) -> bool:
+        return role == "c_channel_3" and self.c3_exit_occupied
 
 
 def _make_running() -> tuple[Running, _Transport, _Shared, _EventQueue]:
@@ -319,7 +386,8 @@ def test_running_registers_piece_from_confirmed_track_when_awaiting_handoff() ->
         first_seen_ts=9.9,
     )
 
-    running._registerNewIntakePiece([strong_track], now_wall=10.0, now_mono=20.0)
+    with patch("blob_manager.getChannelPolygons", return_value={}):
+        running._registerNewIntakePiece([strong_track], now_wall=10.0, now_mono=20.0)
 
     assert transport.register_calls == [41]
     assert running._awaiting_intake_piece is False
@@ -327,6 +395,60 @@ def test_running_registers_piece_from_confirmed_track_when_awaiting_handoff() ->
     assert running._intake_requested_at_wall is None
     assert shared.classification_gate_calls[-1] == (False, "piece_in_hood")
     assert len(events.items) == 1
+
+
+def test_running_defers_c4_intake_while_c3_exit_still_occupied() -> None:
+    running, transport, shared, _events = _make_running()
+    vision = _Vision()
+    vision.c3_exit_occupied = True
+    running.vision = vision
+    running._awaiting_intake_piece = True
+    running._intake_requested_at_mono = 19.0
+    running._intake_requested_at_wall = 9.8
+    track = TrackAngularExtent(
+        global_id=41,
+        center_deg=1.5,
+        half_width_deg=6.0,
+        last_seen_ts=10.0,
+        hit_count=3,
+        first_seen_ts=9.9,
+    )
+
+    running._registerNewIntakePiece([track], now_wall=10.0, now_mono=20.0)
+
+    assert transport.register_calls == []
+    assert running._awaiting_intake_piece is True
+    assert shared.classification_gate_calls[-1] == (False, "awaiting_upstream_exit_clear")
+
+    vision.c3_exit_occupied = False
+    with patch("blob_manager.getChannelPolygons", return_value={}):
+        running._registerNewIntakePiece([track], now_wall=10.1, now_mono=20.1)
+
+    assert transport.register_calls == [41]
+    assert running._awaiting_intake_piece is False
+
+
+def test_running_filters_ignored_c4_dropzone_track_extents() -> None:
+    running, _transport, shared, _events = _make_running()
+    shared.set_classification_dropzone_track_ignored(42, True)
+    kept = TrackAngularExtent(
+        global_id=41,
+        center_deg=1.5,
+        half_width_deg=6.0,
+        last_seen_ts=10.0,
+        hit_count=3,
+    )
+    ignored = TrackAngularExtent(
+        global_id=42,
+        center_deg=2.5,
+        half_width_deg=6.0,
+        last_seen_ts=10.0,
+        hit_count=3,
+    )
+
+    result = running._filterIgnoredDropzoneTrackExtents([kept, ignored])
+
+    assert result == [kept]
 
 
 def test_running_ignores_stale_track_that_predates_handoff_request() -> None:
@@ -415,7 +537,7 @@ def test_running_recovers_existing_tracks_without_waiting_for_new_handoff() -> N
         first_seen_ts=10.0,
     )
 
-    running._recoverExistingTrackedPieces([old_track], now_wall=20.0)
+    running._recoverExistingTrackedPieces([old_track], now_wall=20.0, now_mono=20.0)
 
     assert transport.register_calls == [52]
     assert len(transport.activePieces()) == 1
@@ -929,6 +1051,107 @@ def test_normal_drop_path_can_start_release_without_operator_review() -> None:
     assert running.gc.runtime_stats.active_incident is None
 
 
+def test_recovered_track_after_failed_drop_requires_exit_incident_review() -> None:
+    running, transport, shared, _events = _make_running()
+    _force_manual_exit_incident(running)
+    running._config.exit_release_review_pause_enabled = True
+    running._last_drop_pulse_completed_mono = 100.0
+    running._last_drop_pulse_completed_wall = 1000.0
+    running._last_drop_pulse_piece_uuid = "previous-drop"
+    running._last_drop_pulse_exit_attempt_count = 1
+    recovered_track = TrackAngularExtent(
+        global_id=6254,
+        center_deg=31.0,
+        half_width_deg=7.0,
+        last_seen_ts=1001.0,
+        hit_count=6,
+        first_seen_ts=1000.2,
+    )
+
+    running._recoverExistingTrackedPieces(
+        [recovered_track],
+        now_wall=1001.0,
+        now_mono=101.0,
+    )
+    piece = transport.pieceForTrack(6254)
+    assert piece is not None
+    piece.classification_status = ClassificationStatus.unknown
+
+    started = running._startExitReleaseShimmyIfNeeded(
+        piece.uuid,
+        review_allowed=False,
+    )
+
+    assert started is True
+    assert running.irl.carousel_stepper.moves == []
+    assert piece.uuid in running._exit_release_review_required_uuids
+    assert running.gc.runtime_stats.active_incident is not None
+    assert running.gc.runtime_stats.active_incident["kind"] == "exit_stuck"
+    assert running.gc.runtime_stats.active_incident["piece_uuid"] == piece.uuid
+    assert running.gc.runtime_stats.active_incident["stage_number"] == 2
+    assert shared.classification_gate_calls[-1] == (False, "exit_incident_review")
+
+
+def test_old_recovered_track_does_not_require_exit_incident_review() -> None:
+    running, transport, _shared, _events = _make_running()
+    _force_manual_exit_incident(running)
+    running._config.exit_release_review_pause_enabled = True
+    running._last_drop_pulse_completed_mono = 100.0
+    running._last_drop_pulse_completed_wall = 1000.0
+    old_track = TrackAngularExtent(
+        global_id=6255,
+        center_deg=31.0,
+        half_width_deg=7.0,
+        last_seen_ts=1001.0,
+        hit_count=6,
+        first_seen_ts=998.0,
+    )
+
+    running._recoverExistingTrackedPieces(
+        [old_track],
+        now_wall=1001.0,
+        now_mono=101.0,
+    )
+    piece = transport.pieceForTrack(6255)
+    assert piece is not None
+    piece.classification_status = ClassificationStatus.unknown
+
+    started = running._startExitReleaseShimmyIfNeeded(
+        piece.uuid,
+        review_allowed=False,
+    )
+
+    assert started is True
+    assert [round(move, 3) for move in running.irl.carousel_stepper.moves] == [2.708]
+    assert running.gc.runtime_stats.active_incident is None
+
+
+def test_exit_release_incident_clears_when_released_piece_drops() -> None:
+    running, transport, _shared, _events = _make_running()
+    piece = KnownObject(
+        uuid="piece-drop",
+        tracked_global_id=99,
+        classification_status=ClassificationStatus.classified,
+    )
+    transport._pieces_by_track = {99: piece}
+    running.gc.runtime_stats.setActiveIncident(
+        {
+            "kind": "exit_stuck",
+            "source_kind": "classification_exit_release",
+            "piece_uuid": piece.uuid,
+            "status": "running",
+        }
+    )
+    running._pending_drop_uuid = piece.uuid
+    running._pulse_in_flight = True
+
+    running._finalizePulse(now_mono=123.0)
+
+    assert running.gc.runtime_stats.active_incident is None
+    assert running._pulse_in_flight is False
+    assert running._pending_drop_uuid is None
+
+
 def test_sample_collection_mode_skips_exit_release_shimmy() -> None:
     running, transport, shared, _events = _make_running()
     shared.sample_collection_mode = True
@@ -1058,8 +1281,8 @@ class _RecordingZoneManager:
 
 
 def _make_production_geometry_running() -> tuple[Running, _Transport, _Shared]:
-    """Mirror the real C4 geometry so the intake-gate tests exercise the
-    actual conflict: drop-to-intake (85°) < intake_guard (90°)."""
+    """Mirror the real C4 geometry so intake-gate tests exercise the
+    production slot count, intake guard, and drop approach window."""
     transport = _Transport()
     shared = _Shared()
     running = Running(
@@ -1068,13 +1291,14 @@ def _make_production_geometry_running() -> tuple[Running, _Transport, _Shared]:
             classification_channel_config=SimpleNamespace(
                 intake_angle_deg=305.0,
                 intake_body_half_width_deg=10.0,
-                intake_guard_deg=80.0,
+                intake_guard_deg=0.0,
+                intake_registration_window_deg=46.0,
                 drop_angle_deg=30.0,
                 drop_tolerance_deg=14.0,
                 point_of_no_return_deg=18.0,
                 recognition_window_deg=60.0,
                 positioning_window_deg=48.0,
-                max_zones=2,
+                max_zones=4,
                 hood_dwell_ms=1200,
                 min_carousel_crops_for_recognize=0,
                 min_carousel_dwell_ms=0,
@@ -1102,6 +1326,27 @@ def _make_production_geometry_running() -> tuple[Running, _Transport, _Shared]:
     return running, transport, shared
 
 
+def test_production_c4_defaults_keep_four_piece_pipeline_open() -> None:
+    config = ClassificationChannelConfig()
+
+    assert config.max_zones == 4
+    assert config.intake_guard_deg == 0.0
+    assert config.intake_registration_window_deg == 46.0
+
+
+def test_c4_intake_window_comes_from_saved_dropzone() -> None:
+    running, _transport, _shared = _make_production_geometry_running()
+
+    with patch(
+        "blob_manager.getChannelPolygons",
+        return_value=_classification_channel_zone_payload(drop_start=100.0, drop_end=140.0),
+    ):
+        center, half_width = running._classificationDropzoneWindow()
+
+    assert center == 120.0
+    assert half_width == 20.0
+
+
 def test_is_drop_committed_true_when_piece_past_point_of_no_return() -> None:
     running, _t, _s = _make_production_geometry_running()
     piece = KnownObject(uuid="committed", tracked_global_id=1)
@@ -1121,9 +1366,8 @@ def test_is_drop_committed_false_when_piece_still_approaching() -> None:
 
 
 def test_intake_gate_opens_when_only_piece_is_drop_committed() -> None:
-    """The original bug: a piece sitting at drop (about to fall) blocked
-    intake because its 90°-guard exclusion overlapped the intake angle.
-    Drop-committed pieces are now skipped in the clearance check.
+    """A piece sitting at drop (about to fall) does not consume an intake
+    admission slot.
     """
     running, transport, shared = _make_production_geometry_running()
     zone_manager = _RecordingZoneManager(clear=True)
@@ -1138,9 +1382,53 @@ def test_intake_gate_opens_when_only_piece_is_drop_committed() -> None:
     # Gate opened (True) — the committed piece did NOT block intake.
     last_call = shared.classification_gate_calls[-1]
     assert last_call == (True, None), f"expected gate open, got {last_call}"
-    # Zone-manager call carries the committed uuid in ignore_piece_uuids.
     assert zone_manager.calls
     assert "committed" in zone_manager.calls[-1]["ignore_piece_uuids"]
+    assert zone_manager.calls[-1]["hard_guard_deg"] == 0.0
+
+
+def test_intake_gate_checks_saved_dropzone_not_fixed_intake_angle() -> None:
+    running, transport, shared = _make_production_geometry_running()
+    zone_manager = _RecordingZoneManager(clear=True)
+    transport.zone_manager = zone_manager
+
+    with patch(
+        "blob_manager.getChannelPolygons",
+        return_value=_classification_channel_zone_payload(drop_start=100.0, drop_end=140.0),
+    ):
+        running._updateIntakeGate(now_mono=100.0)
+
+    last_call = shared.classification_gate_calls[-1]
+    assert last_call == (True, None)
+    assert zone_manager.calls[-1]["center_deg"] == 120.0
+    assert zone_manager.calls[-1]["body_half_width_deg"] == 20.0
+    assert zone_manager.calls[-1]["hard_guard_deg"] == 0.0
+
+
+def test_registers_new_intake_piece_from_saved_dropzone_window() -> None:
+    running, transport, shared = _make_production_geometry_running()
+    running._awaiting_intake_piece = True
+    running._intake_requested_at_mono = 99.0
+    running._intake_requested_at_wall = 9.8
+
+    track = TrackAngularExtent(
+        global_id=41,
+        center_deg=120.0,
+        half_width_deg=6.0,
+        last_seen_ts=10.0,
+        hit_count=3,
+        first_seen_ts=9.9,
+    )
+
+    with patch(
+        "blob_manager.getChannelPolygons",
+        return_value=_classification_channel_zone_payload(drop_start=100.0, drop_end=140.0),
+    ):
+        running._registerNewIntakePiece([track], now_wall=10.0, now_mono=100.0)
+
+    assert transport.register_calls == [41]
+    assert running._awaiting_intake_piece is False
+    assert shared.classification_gate_calls[-1] == (False, "piece_in_hood")
 
 
 def test_intake_gate_stays_closed_when_approaching_piece_is_not_yet_committed() -> None:
@@ -1151,9 +1439,9 @@ def test_intake_gate_stays_closed_when_approaching_piece_is_not_yet_committed() 
     transport.zone_manager = _RecordingZoneManager(clear=True)
 
     piece = KnownObject(uuid="approaching", tracked_global_id=1)
-    # 30° drop − 25° approaching → center=5°. Inside approach window
-    # (33.6°) but outside PoNR (18°).
-    piece.classification_channel_zone_center_deg = 5.0
+    # 30° drop − 22° approaching → center=8°. Inside the short approach
+    # window (22°) but outside PoNR (18°).
+    piece.classification_channel_zone_center_deg = 8.0
     transport._pieces_by_track[1] = piece
 
     running._updateIntakeGate(now_mono=100.0)
@@ -1162,11 +1450,42 @@ def test_intake_gate_stays_closed_when_approaching_piece_is_not_yet_committed() 
     assert last_call == (False, "drop_approach_busy")
 
 
+def test_intake_gate_opens_with_three_resident_pieces() -> None:
+    """C4 should request another piece while three non-overlapping pieces
+    are already resident, targeting the four-piece pipeline.
+    """
+    running, transport, shared = _make_production_geometry_running()
+    transport.zone_manager = _RecordingZoneManager(clear=True)
+
+    for idx, center in enumerate((60.0, 150.0, 235.0), start=1):
+        piece = KnownObject(uuid=f"resident-{idx}", tracked_global_id=idx)
+        piece.classification_channel_zone_center_deg = center
+        transport._pieces_by_track[idx] = piece
+
+    running._updateIntakeGate(now_mono=100.0)
+
+    last_call = shared.classification_gate_calls[-1]
+    assert last_call == (True, None)
+
+
+def test_intake_gate_closes_at_four_resident_pieces() -> None:
+    running, transport, shared = _make_production_geometry_running()
+    transport.zone_manager = _RecordingZoneManager(clear=True)
+
+    for idx, center in enumerate((60.0, 150.0, 235.0, 330.0), start=1):
+        piece = KnownObject(uuid=f"resident-{idx}", tracked_global_id=idx)
+        piece.classification_channel_zone_center_deg = center
+        transport._pieces_by_track[idx] = piece
+
+    running._updateIntakeGate(now_mono=100.0)
+
+    last_call = shared.classification_gate_calls[-1]
+    assert last_call == (False, "intake_blocked")
+
+
 def test_intake_gate_max_zones_excludes_drop_committed_pieces() -> None:
-    """max_zones=2 must count resident pieces only — counting a drop-
-    committed piece against the cap defeats the "one in classification +
-    one at intake" design (the cap fires while the leaving piece is
-    still on the platter).
+    """Drop-committed pieces count as leaving, so they do not consume one of
+    the four resident C4 pipeline slots.
     """
     running, transport, shared = _make_production_geometry_running()
     transport.zone_manager = _RecordingZoneManager(clear=True)
@@ -1180,8 +1499,6 @@ def test_intake_gate_max_zones_excludes_drop_committed_pieces() -> None:
     resident.classification_channel_zone_center_deg = 150.0
     transport._pieces_by_track[2] = resident
 
-    # 2 active pieces, max_zones=2. Without the resident-count fix this
-    # would block intake forever.
     running._updateIntakeGate(now_mono=100.0)
 
     last_call = shared.classification_gate_calls[-1]
