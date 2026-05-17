@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from machine_platform.control_board import ControlBoard
     from machine_platform.machine_profile import MachineProfile
     from machine_platform.servo_controller import ServoController
-    from hardware.sorter_interface import StepperMotor, ServoMotor, DigitalInputPin
+    from hardware.sorter_interface import StepperMotor, ServoMotor, DigitalInputPin, DigitalOutputPin
     from subsystems.classification.carousel_hardware import CarouselHardware
     from subsystems.distribution.chute import Chute
 
@@ -47,6 +47,7 @@ from .parse_user_toml import (
     loadCarouselCalibrationConfig,
     loadChuteCalibrationConfig,
     loadCameraLayoutConfig,
+    loadGpioLedsConfig,
     applyStepperCurrentOverride,
 )
 from blob_manager import getBinCategories
@@ -614,12 +615,14 @@ class IRLInterface:
     control_boards: dict[str, "ControlBoard"]
     servo_controller: "ServoController | None"
     machine_profile: "MachineProfile | None"
+    gpio_led_pins: "list[DigitalOutputPin]"
 
     def __init__(self):
         self.interfaces: dict[str, SorterInterface] = {}
         self.control_boards = {}
         self.servo_controller = None
         self.machine_profile = None
+        self.gpio_led_pins = []
 
     def enableSteppers(self) -> None:
         for stepper_name in [
@@ -656,6 +659,11 @@ class IRLInterface:
                 stepper.enabled = False
 
     def shutdown(self) -> None:
+        for pin in self.gpio_led_pins:
+            try:
+                pin.value = False
+            except Exception:
+                pass
         if self.servo_controller is not None and hasattr(self.servo_controller, "shutdown"):
             try:
                 self.servo_controller.shutdown()
@@ -1235,15 +1243,61 @@ def mkIRLConfig(machine_params: dict[str, object] | None = None) -> IRLConfig:
     return irl_config
 
 
-REQUIRED_STEPPER_NAMES = [
-    "carousel",
-    "c_channel_3_rotor",
-    "c_channel_2_rotor",
-    "c_channel_1_rotor",
-    "chute_stepper",
-]
 HARDWARE_DISCOVERY_ATTEMPTS = 8
 HARDWARE_DISCOVERY_RETRY_DELAY_S = 0.75
+
+
+def _applyGpioLeds(
+    control_boards: list,
+    led_configs: list,
+    gc: GlobalConfig,
+) -> list:
+    from hardware.sorter_interface import DigitalOutputPin
+    from .parse_user_toml import GpioLedConfig
+
+    active: list[DigitalOutputPin] = []
+    for cfg in led_configs:
+        cfg: GpioLedConfig
+        matched = [
+            b for b in control_boards
+            if cfg.board == "any" or b.identity.role == cfg.board
+        ]
+        for board in matched:
+            outputs = board.interface.digital_outputs
+            if cfg.pin >= len(outputs):
+                gc.logger.warning(
+                    f"gpio_leds: board {board.identity.role} ({board.identity.device_name}) "
+                    f"has no digital output at pin {cfg.pin} (only {len(outputs)} outputs). Skipping."
+                )
+                continue
+            pin = outputs[cfg.pin]
+            try:
+                pin.value = True
+                gc.logger.info(
+                    f"gpio_leds: turned on pin {cfg.pin} on {board.identity.role} board "
+                    f"({board.identity.device_name})"
+                )
+                active.append(pin)
+            except Exception as exc:
+                gc.logger.warning(
+                    f"gpio_leds: failed to set pin {cfg.pin} on {board.identity.role} board: {exc}"
+                )
+    return active
+
+
+def _requiredCanonicalStepperNames(
+    machine_setup: MachineSetupDefinition,
+    stepper_binding_overrides: dict[str, str],
+) -> list[str]:
+    logical_required: list[str] = ["chute"]
+    if machine_setup.automatic_feeder:
+        logical_required.extend(["c_channel_1", "c_channel_2", "c_channel_3"])
+    if machine_setup.uses_carousel_transport:
+        logical_required.append("carousel")
+    return [
+        stepper_binding_overrides.get(logical, LOGICAL_STEPPER_BINDING_BASES[logical])
+        for logical in logical_required
+    ]
 
 
 def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
@@ -1263,9 +1317,16 @@ def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
     servo_closed_angle = machine_config.servo_closed_angle
     servo_channel_config = loadServoChannelConfig(gc, machine_specific_params)
     mcu_ports = MCUBus.enumerate_buses()
+    required_stepper_names = _requiredCanonicalStepperNames(
+        config.machine_setup, stepper_binding_overrides
+    )
+    gc.logger.info(
+        f"Required steppers for machine_setup={config.machine_setup.key}: "
+        f"{required_stepper_names}"
+    )
     control_boards = discover_control_boards(
         gc,
-        REQUIRED_STEPPER_NAMES,
+        required_stepper_names,
         attempts=HARDWARE_DISCOVERY_ATTEMPTS,
         retry_delay_s=HARDWARE_DISCOVERY_RETRY_DELAY_S,
     )
@@ -1275,6 +1336,9 @@ def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
     irl_interface.control_boards = {
         board.board_key: board for board in control_boards
     }
+
+    gpio_led_configs = loadGpioLedsConfig(gc, machine_specific_params)
+    irl_interface.gpio_led_pins = _applyGpioLeds(control_boards, gpio_led_configs, gc)
 
     stepper_entries: list[tuple[str, str, "StepperMotor", "ControlBoard"]] = []
     feeder_board: "ControlBoard | None" = None
@@ -1306,7 +1370,7 @@ def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
     )
 
     available_stepper_names = {name for name, _, _, _ in stepper_entries}
-    for stepper_name in REQUIRED_STEPPER_NAMES:
+    for stepper_name in required_stepper_names:
         if stepper_name not in available_stepper_names:
             gc.logger.warning(
                 f"Required stepper interface '{stepper_name}' not found in detected firmware actuators"
