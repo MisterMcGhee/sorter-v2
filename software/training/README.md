@@ -1,5 +1,8 @@
 # LEGO Training Hub
 
+> Need a concrete recipe? See **[RUNBOOK.md](RUNBOOK.md)** — every command we
+> ran for the 2026-05-17 c-channel-combined yolo26s run, copy-pasteable.
+
 Central workstation package for producing detection models. End-to-end pipeline:
 
 ```
