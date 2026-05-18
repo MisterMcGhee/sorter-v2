@@ -1,0 +1,19 @@
+@import 'tailwindcss';
+
+/* Brand tokens — KEEP IN SYNC with software/sorter/frontend/src/routes/layout.css.
+   Once tokens are split into a shared package, drop this duplicate. */
+@theme {
+    /* Placeholders — copy real values from the sorter frontend before going live. */
+    --color-brand-yellow: #FFD500;
+    --color-brand-red: #D01012;
+    --color-brand-green: #00852B;
+}
+
+html, body {
+    background: #0E0E0E;
+    color: #E8E6DD;
+    font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+/* Project rule: sharp edges everywhere (see sorter frontend CLAUDE.md). */
+* { border-radius: 0; }

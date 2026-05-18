@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>sorter — setup</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  /* Mirror the sorter frontend design: sharp edges, no rounded, dense. */
+  html, body { background: #0E0E0E; color: #E8E6DD; font-family: ui-sans-serif, system-ui, sans-serif; }
+  * { border-radius: 0 !important; }
+</style>
+</head>
+<body class="min-h-screen p-6 max-w-md mx-auto">
+  <header class="mb-8">
+    <p class="text-xs font-semibold tracking-wider uppercase text-neutral-400">basically</p>
+    <h1 class="text-2xl font-semibold mt-1">sorter setup</h1>
+    <p class="text-sm text-neutral-400 mt-2">
+      Pick the Wi-Fi network you want the sorter to join.
+    </p>
+  </header>
+
+  <section>
+    <label class="block text-sm font-medium mb-2">Wi-Fi network</label>
+    <select id="ssid" class="w-full bg-neutral-900 border border-neutral-700 px-3 py-2 text-sm">
+      <option value="">— select network —</option>
+    </select>
+
+    <label class="block text-sm font-medium mt-4 mb-2">Password</label>
+    <input id="password" type="password" autocomplete="off"
+           class="w-full bg-neutral-900 border border-neutral-700 px-3 py-2 text-sm" />
+
+    <button id="submit"
+            class="mt-6 w-full bg-yellow-400 text-black font-semibold py-3 text-sm">
+      Connect sorter
+    </button>
+
+    <p id="status" class="text-sm text-neutral-400 mt-4"></p>
+  </section>
+
+<script>
+async function loadNetworks() {
+  const r = await fetch("/api/networks");
+  const nets = await r.json();
+  const sel = document.getElementById("ssid");
+  for (const n of nets) {
+    const opt = document.createElement("option");
+    opt.value = n.ssid;
+    opt.textContent = `${n.ssid}  (${n.signal})`;
+    sel.appendChild(opt);
+  }
+}
+
+document.getElementById("submit").addEventListener("click", async () => {
+  const ssid = document.getElementById("ssid").value;
+  const password = document.getElementById("password").value;
+  const status = document.getElementById("status");
+  if (!ssid) { status.textContent = "Pick a network."; return; }
+  status.textContent = "Connecting...";
+  const r = await fetch("/api/connect", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ssid, password})
+  });
+  if (r.ok) {
+    status.textContent = "Sorter is joining the network. You can close this page in ~30 seconds.";
+  } else {
+    status.textContent = "Failed. Try again.";
+  }
+});
+
+loadNetworks();
+</script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+{
+  "name": "sorteros-setup",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-vercel": "^5",
+    "@sveltejs/kit": "^2",
+    "@sveltejs/vite-plugin-svelte": "^4",
+    "@tailwindcss/vite": "^4",
+    "svelte": "^5",
+    "svelte-check": "^4",
+    "tailwindcss": "^4",
+    "typescript": "^5",
+    "vite": "^5"
+  },
+  "type": "module"
+}
