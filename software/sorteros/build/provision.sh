@@ -152,8 +152,8 @@ EOF
 fi
 
 # ─── node 20 + pnpm ───
-log "installing node 20"
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+log "installing node 22"
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
 "${APT_INSTALL[@]}" nodejs
 npm install -g pnpm@latest
 

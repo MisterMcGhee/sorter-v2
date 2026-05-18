@@ -82,7 +82,7 @@ BASE_NAME=$(basename "$IN")
 # strip .zst / .img.zst / .img → bare stem
 STEM="${BASE_NAME%.zst}"; STEM="${STEM%.img}"
 if [[ -z $OUT ]]; then
-    OUT="$OUT_DIR_DEFAULT/sorteros-v2.5-${TS}.img"
+    OUT="$OUT_DIR_DEFAULT/sorteros-v2.7-${TS}.img"
 fi
 mkdir -p "$(dirname "$OUT")"
 
@@ -197,15 +197,17 @@ fi
 log "apt update"
 apt-get update -y
 
+log "upgrading to node 22 (pnpm@latest requires >=22.13)"
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+apt-get install "${APT_OPTS[@]}" nodejs
+npm install -g pnpm@latest
+
 log "installing cloud-init"
 apt-get install "${APT_OPTS[@]}" --no-install-recommends cloud-init
 
 log "writing /etc/cloud/cloud.cfg.d/99-sorteros.cfg"
 mkdir -p /etc/cloud/cloud.cfg.d
 cat >/etc/cloud/cloud.cfg.d/99-sorteros.cfg <<'EOF'
-# SorterOS — restrict cloud-init to the NoCloud datasource and read
-# seed files from the FAT partition mounted at /boot/firmware. Anything
-# else (EC2, Azure, GCE probes) wastes 30+s on first boot.
 datasource_list: [ NoCloud, None ]
 datasource:
   NoCloud:
@@ -214,6 +216,11 @@ datasource:
 # `sorteros-apply-network-config.service` translates Imager's seed.
 network:
   config: disabled
+# ssh_authkey_fingerprints fails on this platform (exits nonzero even
+# though it prints correctly), causing cloud-final.service to show as
+# failed. Disable it — fingerprints aren't needed at runtime.
+ssh_authkey_fingerprints:
+  enabled: false
 EOF
 
 log "creating /boot/firmware mountpoint + fstab entry"
@@ -231,12 +238,10 @@ STAMP=/var/lib/sorteros/network-config-applied
 mkdir -p "$(dirname "$STAMP")"
 [[ -f $STAMP ]] && exit 0
 [[ -f $SEED ]] || exit 0
-SSID=$(awk '/^[[:space:]]+[A-Za-z0-9_-]+:[[:space:]]*$/{gsub(":",""); name=$1} /password:/{print name; exit}' "$SEED" || true)
-PSK=$(awk -F'"' '/password:/{print $2; exit}' "$SEED" || true)
-if [[ -z $SSID || -z $PSK ]]; then
-    SSID=$(awk '/^[[:space:]]+[A-Za-z0-9_-]+:[[:space:]]*$/{gsub(":",""); name=$1} /psk:/{print name; exit}' "$SEED" || true)
-    PSK=$(awk -F'"' '/psk:/{print $2; exit}' "$SEED" || true)
-fi
+# RPi Imager writes: access-points:\n  "SSID":\n    password: "psk"
+# Extract the SSID key under access-points: and the password/psk value.
+SSID=$(awk '/access-points:/{found=1; next} found && /:[[:space:]]*$/{gsub(/^[[:space:]"]+|"[[:space:]]*:.*$/, ""); print; exit}' "$SEED" || true)
+PSK=$(awk '/password:|psk:/{gsub(/.*:[[:space:]"]*|"[[:space:]]*$/, ""); print; exit}' "$SEED" || true)
 if [[ -n $SSID && -n $PSK ]] && command -v nmcli >/dev/null 2>&1; then
     nmcli device wifi connect "$SSID" password "$PSK" || true
 fi
@@ -462,6 +467,17 @@ if [[ -n "${EXTEND_BRANCH:-}" && -d /home/orangepi/sorter-v2/.git ]]; then
         log "WARN: branch switch to $EXTEND_BRANCH failed; image keeps the inherited checkout"
 fi
 
+# ─── blank .env so lego-sorter-backend.service can load on first boot ───
+# The backend's EnvironmentFile= hard-fails if the file is missing.
+# A blank .env lets the service attempt to start; it will fail on missing
+# required vars, but that's a restart-loop rather than a load error.
+# The user populates this with real values after flashing.
+ENV_PATH=/home/orangepi/sorter-v2/software/.env
+if [[ ! -f "$ENV_PATH" ]]; then
+    log "creating blank .env at $ENV_PATH"
+    install -m 0600 -o 1000 -g 1000 /dev/null "$ENV_PATH"
+fi
+
 # ─── split firstboot: fast (blocks SSH) + deps (background, slow) ───
 # Original sorteros-firstboot.service blocked SSH for 10–15 min while
 # `uv sync` and `pnpm install` ran. Replace with a fast unit that only
@@ -597,10 +613,35 @@ rm -f "$MNT/tmp/extend-provision.sh"
 log "populating FAT partition with seed scaffolding"
 FAT_MNT=$(mktemp -d)
 mount "$FAT_PART" "$FAT_MNT"
+
+# v2.6: copy /boot/ from the ext4 rootfs onto the FAT. u-boot scans
+# the partition table in order and reads kernel + boot.scr from the
+# first partition it finds them on. With FAT-at-p1 and an empty FAT,
+# u-boot never found boot.scr/Image and silently bricked (no green
+# LED). Mirror /boot/ to the FAT so u-boot finds everything on the
+# bootable partition. The OS still keeps its own /boot/ on ext4 for
+# kernel package upgrades; a future flash-kernel-style hook can re-
+# sync to /boot/firmware (which is this FAT) on kernel updates.
+log "copying ext4 /boot/ → FAT /boot/ (so u-boot finds the kernel)"
+mkdir -p "$FAT_MNT/boot"
+# FAT can't store symlinks OR hard links. /boot has both — versionless
+# names like Image/uInitrd/dtb are symlinks to versioned files, and
+# kernel-package post-install creates additional hard links between
+# them. `cp -rL` recursively copies with symlinks dereferenced and
+# DOESN'T try to preserve hard-link structure (which `cp -a` would).
+# Result on the FAT: every name is a regular file. u-boot loads them
+# directly. Trade-off: ~84 MB on ext4 becomes ~120 MB on FAT (links
+# get duplicated as real files). Still fits in 256 MB.
+cp -rL "$MNT/boot/." "$FAT_MNT/boot/"
+sync
+
 : > "$FAT_MNT/meta-data"
 cat >"$FAT_MNT/README.txt" <<'EOF'
 SorterOS boot partition.
 RPi Imager writes user-data / network-config here for first-boot setup.
+The /boot/ subdirectory holds the kernel, initrd, dtbs and boot.scr
+that u-boot loads on power-on. Do not delete /boot/ — the Pi won't
+boot without it.
 EOF
 cat >"$FAT_MNT/user-data.example" <<'EOF'
 #cloud-config
