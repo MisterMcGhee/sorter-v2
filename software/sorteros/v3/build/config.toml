@@ -9,7 +9,8 @@ sha256 = ""  # fill in when known
 
 [output]
 dir = "out"
-name = "sorteros-v3-{date}.img"
+version = "3.2"
+name = "sorteros-v{version}-{date}.img"
 
 [chroot]
 # Documentation only — the actual apt invocation lives in chroot_apt.sh.

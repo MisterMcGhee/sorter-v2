@@ -382,7 +382,8 @@ def phase_finalize(ctx: BuildCtx) -> None:
         state_write(ctx, loop=None, partition=None)
 
     date = dt.date.today().isoformat()
-    name = ctx.config["output"]["name"].format(date=date)
+    version = ctx.config["output"]["version"]
+    name = ctx.config["output"]["name"].format(date=date, version=version)
     final = ctx.out_dir / name
     if final.exists():
         final.unlink()
