@@ -1,19 +1,80 @@
 <script lang="ts">
+    import { onMount } from 'svelte';
     import {
         patchImageFile,
         patchImageFileHandleInPlace,
         type SorterosConfig
     } from '$lib/img-patch';
 
+    const HOSTNAME_STORAGE_KEY = 'sorteros_setup_hostname';
+    const REMEMBER_HOSTNAME_STORAGE_KEY = 'sorteros_setup_remember_hostname';
+    const PASSWORD_STORAGE_KEY = 'sorteros_setup_wifi_password';
+    const REMEMBER_PASSWORD_STORAGE_KEY = 'sorteros_setup_remember_password';
+
     let file: File | null = $state(null);
     let hostname = $state('sorter');
+    let remember_hostname = $state(false);
     let ssid = $state('');
     let password = $state('');
+    let remember_password = $state(false);
     let sshKey = $state('');
     let status = $state('');
     let statusKind: 'info' | 'success' | 'danger' = $state('info');
     let busy = $state(false);
     let file_input: HTMLInputElement | null = $state(null);
+
+    onMount(() => {
+        try {
+            remember_hostname =
+                window.localStorage.getItem(REMEMBER_HOSTNAME_STORAGE_KEY) === 'true';
+            remember_password =
+                window.localStorage.getItem(REMEMBER_PASSWORD_STORAGE_KEY) === 'true';
+
+            if (remember_hostname) {
+                hostname = window.localStorage.getItem(HOSTNAME_STORAGE_KEY) || hostname;
+            }
+
+            if (remember_password) {
+                password = window.localStorage.getItem(PASSWORD_STORAGE_KEY) || '';
+            }
+        } catch (e) {
+            console.error(e);
+        }
+    });
+
+    $effect(() => {
+        if (typeof window === 'undefined') return;
+        try {
+            window.localStorage.setItem(
+                REMEMBER_HOSTNAME_STORAGE_KEY,
+                remember_hostname ? 'true' : 'false'
+            );
+            if (remember_hostname) {
+                window.localStorage.setItem(HOSTNAME_STORAGE_KEY, hostname);
+            } else {
+                window.localStorage.removeItem(HOSTNAME_STORAGE_KEY);
+            }
+        } catch (e) {
+            console.error(e);
+        }
+    });
+
+    $effect(() => {
+        if (typeof window === 'undefined') return;
+        try {
+            window.localStorage.setItem(
+                REMEMBER_PASSWORD_STORAGE_KEY,
+                remember_password ? 'true' : 'false'
+            );
+            if (remember_password) {
+                window.localStorage.setItem(PASSWORD_STORAGE_KEY, password);
+            } else {
+                window.localStorage.removeItem(PASSWORD_STORAGE_KEY);
+            }
+        } catch (e) {
+            console.error(e);
+        }
+    });
 
     function buildConfig(): SorterosConfig {
         return {
@@ -169,6 +230,14 @@
                 bind:value={hostname}
                 class="setup-control text-sm"
             />
+            <label class="mt-2 flex items-center gap-2 text-xs">
+                <input
+                    type="checkbox"
+                    bind:checked={remember_hostname}
+                    class="setup-toggle"
+                />
+                <span class="text-text-muted">Remember hostname on this device</span>
+            </label>
         </div>
 
         <div>
@@ -197,6 +266,14 @@
                 autocomplete="off"
                 class="setup-control text-sm"
             />
+            <label class="mt-2 flex items-center gap-2 text-xs">
+                <input
+                    type="checkbox"
+                    bind:checked={remember_password}
+                    class="setup-toggle"
+                />
+                <span class="text-text-muted">Remember Wi-Fi password on this device</span>
+            </label>
         </div>
 
         <div>
