@@ -215,13 +215,25 @@ def run_build(cfg: BuildConfig) -> None:
 
         flags_str = " ".join(shlex.quote(f) for f in flags)
         remote_log = f"{OUT_DIR_REMOTE}/extend.log"
+
+        # Kill any stuck previous build and clean up disk before launching.
+        push_log("[kickoff] killing any prior extend.sh and cleaning disk")
+        subprocess.run(
+            ssh_cmd(
+                "pkill -f 'bash extend.sh' 2>/dev/null || true; "
+                f"find {OUT_DIR_REMOTE} -maxdepth 1 "
+                r"\( -name 'sorteros-v*.img' -o -name '*.ext4.bin' \) -delete 2>/dev/null || true"
+            ),
+            capture_output=True, text=True, timeout=30,
+        )
+
         launch_cmd = (
             f"cd {BUILD_DIR_REMOTE} && "
             f"nohup bash extend.sh {flags_str} > {remote_log} 2>&1 & "
             f"disown; echo started"
         )
         push_log(f"[kickoff] launching: extend.sh {flags_str}")
-        result = subprocess.run(ssh_cmd(launch_cmd), capture_output=True, text=True, timeout=30)
+        result = subprocess.run(ssh_cmd(launch_cmd), capture_output=True, text=True, timeout=90)
         if result.returncode != 0:
             raise RuntimeError(f"launch failed: {result.stderr.strip()}")
 
