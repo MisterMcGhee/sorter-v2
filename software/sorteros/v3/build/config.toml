@@ -12,19 +12,25 @@ dir = "out"
 name = "sorteros-v3-{date}.img"
 
 [chroot]
-# apt packages to install on top of the base. Keep this list short —
-# every entry is build time and image bytes.
+# Documentation only — the actual apt invocation lives in chroot_apt.sh.
+# Keep this list in sync so config-readers see the real package set.
+# Every entry is build time and image bytes; keep it short.
 packages = [
-    "hostapd",
-    "dnsmasq",
+    # Wi-Fi client + hotspot. NM's built-in hotspot covers the AP path,
+    # so no bare hostapd/dnsmasq needed.
     "network-manager",
+    # Captive portal app (runs as a system service before firstboot finishes,
+    # so it can't rely on uv/venv — must be apt-installed).
     "python3-pip",
-    "nodejs",
-    "tailscale",
+    "python3-fastapi",
+    "python3-uvicorn",
+    "python3-pydantic",
 ]
 
-# Whether to upgrade to Node 22 via NodeSource. pnpm@latest requires >= 22.13.
-node22 = true
+# Installed via curl scripts in chroot_apt.sh (NOT apt):
+#   - Node 22 via deb.nodesource.com (pnpm@latest requires >=22.13)
+#   - Tailscale via tailscale.com/install.sh
+extra_curl_installs = ["node22", "tailscale"]
 
 [branch]
 # Git branch to encode in /etc/sorteros/branch so the firstboot daemon

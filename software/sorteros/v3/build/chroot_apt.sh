@@ -25,13 +25,17 @@ if ! node --version 2>/dev/null | grep -q '^v22'; then
     npm install -g pnpm@latest
 fi
 
-# Core v3 deltas: hostapd + dnsmasq for the AP, NetworkManager for client mode.
+# Core v3 deltas: NetworkManager (Wi-Fi client + hotspot mode) and python+fastapi
+# for the captive portal app. We use NM's built-in hotspot for the AP, so no
+# bare hostapd / dnsmasq required. Keep python-fastapi system-installed so the
+# AP service doesn't need a venv — it runs before firstboot finishes.
 log "installing core packages"
 apt-get install "${APT_OPTS[@]}" \
-    hostapd \
-    dnsmasq \
     network-manager \
-    python3-pip
+    python3-pip \
+    python3-fastapi \
+    python3-uvicorn \
+    python3-pydantic
 
 # Tailscale binary (NOT auto-up; firstboot decides based on /etc/sorteros).
 log "installing tailscale"
