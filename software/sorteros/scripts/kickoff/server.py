@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import re
+import select
 import shlex
 import subprocess
 import threading
@@ -227,19 +228,36 @@ def run_build(cfg: BuildConfig) -> None:
             capture_output=True, text=True, timeout=30,
         )
 
-        # ( nohup cmd < /dev/null & ) — subshell trick so the SSH session
-        # returns immediately. Non-interactive bash waits for bg jobs before
-        # exiting; wrapping in a subshell orphans the process to init and lets
-        # the parent shell (and SSH) exit right away.
         launch_cmd = (
             f"( cd {BUILD_DIR_REMOTE} && "
             f"nohup bash extend.sh {flags_str} > {remote_log} 2>&1 < /dev/null & ) ; "
             f"echo started"
         )
         push_log(f"[kickoff] launching: extend.sh {flags_str}")
-        result = subprocess.run(ssh_cmd(launch_cmd), capture_output=True, text=True, timeout=30)
-        if result.returncode != 0:
-            raise RuntimeError(f"launch failed: {result.stderr.strip()}")
+
+        # Don't wait for SSH to exit — a child on Hive can keep the connection
+        # open indefinitely via inherited FDs. Instead: read until we see
+        # "started" (the echo after the subshell), then kill the SSH client.
+        # The remote process is already running detached at that point.
+        proc = subprocess.Popen(
+            ssh_cmd(launch_cmd),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            deadline = time.time() + 20
+            confirmed = False
+            while time.time() < deadline:
+                ready, _, _ = select.select([proc.stdout], [], [], 1.0)
+                if ready:
+                    line = proc.stdout.readline().strip()
+                    if line == "started":
+                        confirmed = True
+                        break
+            if not confirmed:
+                raise RuntimeError("launch timed out — 'started' never received")
+        finally:
+            proc.kill()
+            proc.wait()
 
         # Poll remote log until image ready
         idle_loops = 0
