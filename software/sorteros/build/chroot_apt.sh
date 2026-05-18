@@ -25,37 +25,27 @@ if ! node --version 2>/dev/null | grep -q '^v22'; then
     npm install -g pnpm@latest
 fi
 
-# Core v3 deltas: NetworkManager (Wi-Fi client + hotspot mode) and python+fastapi
-# for the captive portal app. We use NM's built-in hotspot for the AP, so no
-# bare hostapd / dnsmasq required. Keep python-fastapi system-installed so the
-# AP service doesn't need a venv — it runs before firstboot finishes.
 log "installing core packages"
 apt-get install "${APT_OPTS[@]}" \
     network-manager \
     python3-pip \
-    python3-fastapi \
-    python3-uvicorn \
-    python3-pydantic \
     python3-tomli
 
 # Tailscale install is deferred to firstboot (sorteros-firstboot.py
 # stage_install_tailscale): the base image's ext4 is sized for an 8 GB
-# SD card and runs out of space if we bake in tailscale + node22 + the
-# AP captive-portal deps. After growfs the rootfs has room, and
-# tailscale-install can run idempotently on first boot when internet
-# is available.
+# SD card. After growfs the rootfs has room, and tailscale-install can
+# run idempotently on first boot when internet is available.
 
 log "cleaning apt caches"
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 
 # Enable the v3 services (they're installed by the overlay step).
-log "enabling sorteros-firstboot + sorteros-ap"
+log "enabling sorteros-firstboot"
 systemctl enable sorteros-firstboot.service || true
-systemctl enable sorteros-ap.service || true
 
-# NM pulls in dnsmasq as a dependency for hotspot mode, but systemd-resolved
-# already owns port 53. Mask it so it never starts and pollutes the boot log.
+# NM pulls in dnsmasq as a dependency, but systemd-resolved already owns
+# port 53. Mask it so it never starts and pollutes the boot log.
 systemctl mask dnsmasq.service || true
 
 # Ensure /root/.ssh exists so root SSH key auth works out of the box.

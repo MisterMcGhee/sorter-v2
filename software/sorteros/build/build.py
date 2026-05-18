@@ -36,14 +36,14 @@ PHASES = ["prep", "grow", "mount", "overlay", "chroot", "firstboot-config", "fin
 
 # Bytes of free space to add to the image before chroot. The Orange Pi
 # base image is sized for an 8 GB SD card but only ~2.5 GB is free
-# inside the ext4; node22 + the captive portal deps + tailscale fill it.
+# inside the ext4; node22 + tailscale fill it.
 # Grow by GROW_MIB before mounting; the rootfs will be GROW_MIB / 1024 GiB
 # larger than vendor. First-boot growfs on the Pi expands further to fill
 # whatever real SD card it's flashed to.
 GROW_MIB = 4096
 
 # Markers found by the browser-side patcher in sorteros-setup.
-# Must match software/sorteros/v3/sorteros-setup/src/lib/img-patch.ts.
+# Must match software/sorteros/sorteros-setup/src/lib/img-patch.ts.
 CFG_START_MARKER = "__SORTEROS_CFG_START__"
 CFG_END_MARKER = "__SORTEROS_CFG_END__"
 
@@ -263,21 +263,6 @@ def phase_overlay(ctx: BuildCtx) -> None:
     else:
         log("WARN: /boot/orangepiEnv.txt not found; wifi overlay not set")
 
-    # Install the on-device AP captive portal at /opt/sorter/ap-site/.
-    # Lives outside the overlay/ tree (it's a sibling component) so it
-    # can be `pnpm dev`'d / pytest'd directly without bind-mounting.
-    ap_src = SCRIPT_DIR.parent / "ap-site"
-    if ap_src.exists():
-        ap_dst = ctx.mnt / "opt" / "sorter" / "ap-site"
-        ap_dst.parent.mkdir(parents=True, exist_ok=True)
-        run([
-            "rsync", "-aH", "--no-times",
-            "--exclude=__pycache__", "--exclude=.pytest_cache",
-            f"{ap_src}/", f"{ap_dst}/",
-        ])
-        log(f"installed ap-site → {ap_dst}")
-    else:
-        log(f"WARN: {ap_src} not found; AP captive portal will be missing")
 
 
 # ─── chroot ────────────────────────────────────────────────────────────────
