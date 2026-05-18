@@ -42,6 +42,10 @@ body {
     font-family: var(--font-sans);
 }
 
+html.light {
+    color-scheme: light;
+}
+
 *:focus-visible {
     outline: 2px solid var(--color-text-muted);
     outline-offset: 2px;
@@ -95,6 +99,17 @@ body {
 .setup-button-primary:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+}
+
+.setup-button-secondary {
+    border: 1px solid #d6d3cb;
+    background: #f3f1ec;
+    color: var(--color-text);
+}
+
+.setup-button-secondary:hover {
+    border-color: #b9b5ab;
+    background: #ebe8e1;
 }
 
 .dark .setup-panel {

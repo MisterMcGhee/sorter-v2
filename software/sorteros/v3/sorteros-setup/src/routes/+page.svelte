@@ -9,6 +9,7 @@
     let status = $state('');
     let statusKind: 'info' | 'success' | 'danger' = $state('info');
     let busy = $state(false);
+    let file_input: HTMLInputElement | null = $state(null);
 
     async function handlePatch() {
         if (!file) {
@@ -46,6 +47,10 @@
         const files = (e.currentTarget as HTMLInputElement).files;
         file = files?.[0] ?? null;
     }
+
+    function openFilePicker() {
+        file_input?.click();
+    }
 </script>
 
 <svelte:head>
@@ -55,27 +60,42 @@
 <main class="mx-auto min-h-screen max-w-xl p-6">
     <header class="mb-10">
         <p class="text-text-muted text-xs font-semibold tracking-wider uppercase">basically</p>
-        <h1 class="mt-1 text-2xl font-semibold">sorteros setup</h1>
+        <h1 class="mt-1 text-2xl font-semibold">SorterOS Setup</h1>
         <p class="text-text-muted mt-2 text-sm">
-            Customize your sorter image before flashing. Everything stays in your
-            browser — nothing is uploaded.
+            Configure the image for your Orange Pi before flashing. Nothing is
+            uploaded to a server. Everything is done locally in your browser.
         </p>
     </header>
 
     <section class="space-y-4">
         <div>
             <label for="img" class="mb-2 block text-sm font-medium">SorterOS .img file</label>
+            <p class="text-text-muted mb-2 text-xs">
+                Select the SorterOS image you want to customize before flashing.
+            </p>
             <input
+                bind:this={file_input}
                 id="img"
                 type="file"
                 accept=".img"
                 onchange={pickFile}
-                class="setup-control text-sm"
+                class="sr-only"
             />
+            <div class="setup-control flex items-center gap-3 px-3 text-sm">
+                <button type="button" class="setup-button-secondary h-9 px-3 text-sm font-medium" onclick={openFilePicker}>
+                    Choose file
+                </button>
+                <span class:text-text-muted={!file} class="min-w-0 truncate">
+                    {file ? file.name : 'No file chosen'}
+                </span>
+            </div>
         </div>
 
         <div>
             <label for="hostname" class="mb-2 block text-sm font-medium">Hostname</label>
+            <p class="text-text-muted mb-2 text-xs">
+                The device name on your network, such as <code>sorter.local</code>.
+            </p>
             <input
                 id="hostname"
                 type="text"
@@ -86,17 +106,23 @@
 
         <div>
             <label for="ssid" class="mb-2 block text-sm font-medium">Wi-Fi SSID</label>
+            <p class="text-text-muted mb-2 text-xs">
+                The exact name of your Wi-Fi network. Optional if you plan to use Ethernet.
+            </p>
             <input
                 id="ssid"
                 type="text"
                 bind:value={ssid}
-                placeholder="optional — leave blank to use AP setup on the device"
+                placeholder="Optional"
                 class="setup-control text-sm"
             />
         </div>
 
         <div>
             <label for="pw" class="mb-2 block text-sm font-medium">Wi-Fi password</label>
+            <p class="text-text-muted mb-2 text-xs">
+                Leave this blank only if the Wi-Fi network is open or you are using Ethernet.
+            </p>
             <input
                 id="pw"
                 type="password"
@@ -108,11 +134,14 @@
 
         <div>
             <label for="ssh" class="mb-2 block text-sm font-medium">SSH public key</label>
+            <p class="text-text-muted mb-2 text-xs">
+                Optional. Adds your public key for password-free SSH access after first boot.
+            </p>
             <textarea
                 id="ssh"
                 bind:value={sshKey}
                 rows={3}
-                placeholder="optional — ssh-ed25519 AAAA..."
+                placeholder="ssh-ed25519 AAAA..."
                 class="setup-control font-mono text-sm"
             ></textarea>
         </div>
@@ -150,9 +179,8 @@
 
     <footer class="text-text-muted mt-12 space-y-1 text-xs">
         <p>
-            Leave the Wi-Fi SSID blank to make the sorter boot into AP mode — you'll
-            join its hotspot from your phone and pick a network there.
+            Leave the Wi-Fi SSID blank to make the sorter boot into AP mode. You can
+            join its hotspot from your phone and choose a network there.
         </p>
-        <p>Files never leave your browser. This page is fully client-side.</p>
     </footer>
 </main>
