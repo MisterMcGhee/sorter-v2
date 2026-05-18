@@ -7,12 +7,18 @@
     let password = $state('');
     let sshKey = $state('');
     let status = $state('');
+    let statusKind: 'info' | 'success' | 'danger' = $state('info');
     let busy = $state(false);
 
     async function handlePatch() {
-        if (!file) { status = 'Pick an .img file first.'; return; }
+        if (!file) {
+            statusKind = 'danger';
+            status = 'Pick an image file first.';
+            return;
+        }
         busy = true;
-        status = 'Patching...';
+        statusKind = 'info';
+        status = 'Patching image...';
         try {
             const buf = await file.arrayBuffer();
             const cfg: SorterosConfig = {
@@ -26,12 +32,19 @@
             a.href = URL.createObjectURL(blob);
             a.download = file.name.replace(/\.img$/, '') + '-customized.img';
             a.click();
+            statusKind = 'success';
             status = 'Done. Flash with balenaEtcher.';
-        } catch (e: any) {
-            status = `Error: ${e.message}`;
+        } catch (e: unknown) {
+            statusKind = 'danger';
+            status = `Error: ${e instanceof Error ? e.message : String(e)}`;
         } finally {
             busy = false;
         }
+    }
+
+    function pickFile(e: Event) {
+        const files = (e.currentTarget as HTMLInputElement).files;
+        file = files?.[0] ?? null;
     }
 </script>
 
@@ -39,11 +52,11 @@
     <title>sorter — setup</title>
 </svelte:head>
 
-<main class="min-h-screen max-w-xl mx-auto p-6">
+<main class="mx-auto min-h-screen max-w-xl p-6">
     <header class="mb-10">
-        <p class="text-xs font-semibold tracking-wider uppercase text-neutral-400">basically</p>
-        <h1 class="text-2xl font-semibold mt-1">sorteros setup</h1>
-        <p class="text-sm text-neutral-400 mt-2">
+        <p class="text-text-muted text-xs font-semibold tracking-wider uppercase">basically</p>
+        <h1 class="mt-1 text-2xl font-semibold">sorteros setup</h1>
+        <p class="text-text-muted mt-2 text-sm">
             Customize your sorter image before flashing. Everything stays in your
             browser — nothing is uploaded.
         </p>
@@ -51,49 +64,95 @@
 
     <section class="space-y-4">
         <div>
-            <label for="img" class="block text-sm font-medium mb-2">SorterOS .img file</label>
-            <input id="img" type="file" accept=".img"
-                onchange={(e) => file = (e.currentTarget as HTMLInputElement).files?.[0] ?? null}
-                class="w-full text-sm bg-neutral-900 border border-neutral-700 px-3 py-2" />
+            <label for="img" class="mb-2 block text-sm font-medium">SorterOS .img file</label>
+            <input
+                id="img"
+                type="file"
+                accept=".img"
+                onchange={pickFile}
+                class="setup-control text-sm"
+            />
         </div>
 
         <div>
-            <label for="hostname" class="block text-sm font-medium mb-2">Hostname</label>
-            <input id="hostname" type="text" bind:value={hostname}
-                class="w-full text-sm bg-neutral-900 border border-neutral-700 px-3 py-2" />
+            <label for="hostname" class="mb-2 block text-sm font-medium">Hostname</label>
+            <input
+                id="hostname"
+                type="text"
+                bind:value={hostname}
+                class="setup-control text-sm"
+            />
         </div>
 
         <div>
-            <label for="ssid" class="block text-sm font-medium mb-2">Wi-Fi SSID</label>
-            <input id="ssid" type="text" bind:value={ssid} placeholder="optional"
-                class="w-full text-sm bg-neutral-900 border border-neutral-700 px-3 py-2" />
+            <label for="ssid" class="mb-2 block text-sm font-medium">Wi-Fi SSID</label>
+            <input
+                id="ssid"
+                type="text"
+                bind:value={ssid}
+                placeholder="optional — leave blank to use AP setup on the device"
+                class="setup-control text-sm"
+            />
         </div>
 
         <div>
-            <label for="pw" class="block text-sm font-medium mb-2">Wi-Fi password</label>
-            <input id="pw" type="password" bind:value={password} autocomplete="off"
-                class="w-full text-sm bg-neutral-900 border border-neutral-700 px-3 py-2" />
+            <label for="pw" class="mb-2 block text-sm font-medium">Wi-Fi password</label>
+            <input
+                id="pw"
+                type="password"
+                bind:value={password}
+                autocomplete="off"
+                class="setup-control text-sm"
+            />
         </div>
 
         <div>
-            <label for="ssh" class="block text-sm font-medium mb-2">SSH public key</label>
-            <textarea id="ssh" bind:value={sshKey} rows="3" placeholder="optional — ssh-ed25519 AAAA…"
-                class="w-full text-sm bg-neutral-900 border border-neutral-700 px-3 py-2 font-mono"></textarea>
+            <label for="ssh" class="mb-2 block text-sm font-medium">SSH public key</label>
+            <textarea
+                id="ssh"
+                bind:value={sshKey}
+                rows={3}
+                placeholder="optional — ssh-ed25519 AAAA..."
+                class="setup-control font-mono text-sm"
+            ></textarea>
         </div>
 
-        <button onclick={handlePatch} disabled={busy}
-            class="w-full bg-yellow-400 text-black font-semibold py-3 text-sm disabled:opacity-50">
+        <button
+            onclick={handlePatch}
+            disabled={busy}
+            class="setup-button-primary text-sm"
+        >
             Customize &amp; download
         </button>
 
         {#if status}
-            <p class="text-sm text-neutral-400">{status}</p>
+            {@const kindToBorder = {
+                info: 'border-text-muted/40',
+                success: 'border-success/40',
+                danger: 'border-danger/40'
+            }}
+            {@const kindToText = {
+                info: 'text-text',
+                success: 'text-success',
+                danger: 'text-danger'
+            }}
+            <div
+                class={'border bg-surface/40 p-3 text-sm ' +
+                    kindToBorder[statusKind] +
+                    ' ' +
+                    kindToText[statusKind]}
+                role="status"
+            >
+                {status}
+            </div>
         {/if}
     </section>
 
-    <footer class="mt-12 text-xs text-neutral-500 space-y-1">
-        <p>If the SSID is empty, the sorter will boot into AP mode so you can
-        configure Wi-Fi from your phone after flashing.</p>
-        <p>Files never leave your browser.</p>
+    <footer class="text-text-muted mt-12 space-y-1 text-xs">
+        <p>
+            Leave the Wi-Fi SSID blank to make the sorter boot into AP mode — you'll
+            join its hotspot from your phone and pick a network there.
+        </p>
+        <p>Files never leave your browser. This page is fully client-side.</p>
     </footer>
 </main>
