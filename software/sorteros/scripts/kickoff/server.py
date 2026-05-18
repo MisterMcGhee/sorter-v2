@@ -227,13 +227,17 @@ def run_build(cfg: BuildConfig) -> None:
             capture_output=True, text=True, timeout=30,
         )
 
+        # ( nohup cmd < /dev/null & ) — subshell trick so the SSH session
+        # returns immediately. Non-interactive bash waits for bg jobs before
+        # exiting; wrapping in a subshell orphans the process to init and lets
+        # the parent shell (and SSH) exit right away.
         launch_cmd = (
-            f"cd {BUILD_DIR_REMOTE} && "
-            f"nohup bash extend.sh {flags_str} > {remote_log} 2>&1 & "
-            f"disown; echo started"
+            f"( cd {BUILD_DIR_REMOTE} && "
+            f"nohup bash extend.sh {flags_str} > {remote_log} 2>&1 < /dev/null & ) ; "
+            f"echo started"
         )
         push_log(f"[kickoff] launching: extend.sh {flags_str}")
-        result = subprocess.run(ssh_cmd(launch_cmd), capture_output=True, text=True, timeout=90)
+        result = subprocess.run(ssh_cmd(launch_cmd), capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
             raise RuntimeError(f"launch failed: {result.stderr.strip()}")
 
