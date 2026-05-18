@@ -20,6 +20,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+# tomllib is stdlib on Python 3.11+; Ubuntu Jammy ships 3.10 so we fall
+# back to the python3-tomli apt package (drop-in API-compatible).
+try:
+    import tomllib  # type: ignore
+except ImportError:
+    import tomli as tomllib  # type: ignore
+
 STAMP_DIR = Path("/var/lib/sorteros")
 CONFIG_PATH = Path("/etc/sorteros-config.toml")
 SOFTWARE_DIR = Path("/home/orangepi/sorter-v2/software")
@@ -65,13 +72,106 @@ def stage_grow_rootfs() -> None:
 
 
 def stage_apply_config_toml() -> None:
+    """Read /etc/sorteros-config.toml and apply it.
+
+    The file is always present (build.py bakes it in as a padded
+    placeholder); sorteros-setup (the browser-side patcher at
+    setup.basically.website) overwrites the body in-place with real
+    values. If no patching happened the file parses to an empty dict
+    and we no-op.
+
+    Keys honored — keep in sync with sorteros-setup/src/lib/img-patch.ts:
+      hostname              → set system hostname
+      [wifi].ssid           → write NM connection (autoconnect=true)
+      [wifi].password       → wpa-psk for the above
+      [ssh].authorized_key  → append to orangepi user's authorized_keys
+    """
     if not CONFIG_PATH.exists():
         return
-    # TODO: parse TOML, write NM connection for wifi block, set hostname,
-    # write authorized_keys. The TOML was patched in by sorteros-setup
-    # (the browser customizer) or left at placeholder bytes (in which
-    # case we no-op).
-    pass
+
+    raw = CONFIG_PATH.read_bytes()
+    try:
+        cfg = tomllib.loads(raw.decode("utf-8", "replace"))
+    except Exception as e:
+        log.warning("config toml unreadable: %s", e)
+        return
+
+    # hostname — apply via hostnamectl + /etc/hostname.
+    hostname = cfg.get("hostname")
+    if isinstance(hostname, str) and hostname.strip():
+        log.info("setting hostname: %s", hostname)
+        sh(["hostnamectl", "set-hostname", hostname])
+
+    # [wifi] — translate to an NM keyfile so it persists across reboots.
+    wifi = cfg.get("wifi") or {}
+    ssid = wifi.get("ssid")
+    psk = wifi.get("password", "")
+    if isinstance(ssid, str) and ssid.strip():
+        log.info("applying wifi config for ssid: %s", ssid)
+        _write_nm_wifi(ssid, str(psk))
+        # If the AP is currently up, tear it down so the new connection
+        # can attach to wlan0.
+        sh(["systemctl", "stop", "sorteros-ap.service"])
+        sh(["nmcli", "connection", "up", ssid])
+
+    # [ssh] — append authorized_key to orangepi user.
+    ssh_block = cfg.get("ssh") or {}
+    key = ssh_block.get("authorized_key")
+    if isinstance(key, str) and key.strip():
+        _append_authorized_key(key.strip())
+
+
+def _write_nm_wifi(ssid: str, psk: str) -> None:
+    """Write an NM keyfile for the given SSID + PSK and reload NM."""
+    # NM keyfile format. autoconnect=true so it picks the network up
+    # without manual intervention.
+    body = (
+        "[connection]\n"
+        f"id={ssid}\n"
+        "type=wifi\n"
+        "autoconnect=true\n"
+        "\n"
+        "[wifi]\n"
+        f"ssid={ssid}\n"
+        "mode=infrastructure\n"
+        "\n"
+        "[wifi-security]\n"
+        "key-mgmt=wpa-psk\n"
+        f"psk={psk}\n"
+        "\n"
+        "[ipv4]\n"
+        "method=auto\n"
+        "\n"
+        "[ipv6]\n"
+        "method=auto\n"
+    )
+    p = Path("/etc/NetworkManager/system-connections") / f"{ssid}.nmconnection"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body)
+    p.chmod(0o600)
+    # Make sure NM picks up the new file. Stamp so sorteros-ap stays down.
+    Path("/var/lib/sorteros/wifi-configured").parent.mkdir(parents=True, exist_ok=True)
+    Path("/var/lib/sorteros/wifi-configured").touch()
+    sh(["nmcli", "connection", "reload"])
+
+
+def _append_authorized_key(key: str) -> None:
+    """Append the given ssh public key to orangepi's authorized_keys
+    (no duplicates)."""
+    ssh_dir = Path("/home/orangepi/.ssh")
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    sh(["chown", "orangepi:orangepi", str(ssh_dir)])
+    ssh_dir.chmod(0o700)
+    auth = ssh_dir / "authorized_keys"
+    existing = auth.read_text() if auth.exists() else ""
+    if key in existing:
+        return
+    with auth.open("a") as f:
+        if existing and not existing.endswith("\n"):
+            f.write("\n")
+        f.write(key + "\n")
+    sh(["chown", "orangepi:orangepi", str(auth)])
+    auth.chmod(0o600)
 
 
 def stage_clone_repo() -> None:

@@ -35,7 +35,8 @@ apt-get install "${APT_OPTS[@]}" \
     python3-pip \
     python3-fastapi \
     python3-uvicorn \
-    python3-pydantic
+    python3-pydantic \
+    python3-tomli
 
 # Tailscale binary (NOT auto-up; firstboot decides based on /etc/sorteros).
 log "installing tailscale"

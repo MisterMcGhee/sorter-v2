@@ -34,6 +34,8 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 PHASES = ["prep", "mount", "overlay", "chroot", "firstboot-config", "finalize"]
 
+# Markers found by the browser-side patcher in sorteros-setup.
+# Must match software/sorteros/v3/sorteros-setup/src/lib/img-patch.ts.
 CFG_START_MARKER = "__SORTEROS_CFG_START__"
 CFG_END_MARKER = "__SORTEROS_CFG_END__"
 
@@ -157,6 +159,22 @@ def phase_overlay(ctx: BuildCtx) -> None:
     sorteros_etc.mkdir(parents=True, exist_ok=True)
     (sorteros_etc / "branch").write_text(ctx.branch + "\n")
     log(f"branch baked into image: {ctx.branch}")
+
+    # Install the on-device AP captive portal at /opt/sorter/ap-site/.
+    # Lives outside the overlay/ tree (it's a sibling component) so it
+    # can be `pnpm dev`'d / pytest'd directly without bind-mounting.
+    ap_src = SCRIPT_DIR.parent / "ap-site"
+    if ap_src.exists():
+        ap_dst = ctx.mnt / "opt" / "sorter" / "ap-site"
+        ap_dst.parent.mkdir(parents=True, exist_ok=True)
+        run([
+            "rsync", "-aH", "--no-times",
+            "--exclude=__pycache__", "--exclude=.pytest_cache",
+            f"{ap_src}/", f"{ap_dst}/",
+        ])
+        log(f"installed ap-site → {ap_dst}")
+    else:
+        log(f"WARN: {ap_src} not found; AP captive portal will be missing")
 
 
 # ─── chroot ────────────────────────────────────────────────────────────────

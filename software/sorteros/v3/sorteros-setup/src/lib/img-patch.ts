@@ -1,6 +1,13 @@
 // Byte-pattern search and in-place patch of the sorteros-config.toml
 // placeholder inside a .img file. Runs entirely in the browser on a
 // File / ArrayBuffer; nothing is uploaded.
+//
+// Contract: these marker strings AND the TOML key layout (hostname,
+// [wifi].ssid/.password, [ssh].authorized_key) must stay in sync with:
+//   - software/sorteros/v3/build/build.py        (writes the placeholder)
+//   - software/sorteros/v3/build/overlay/usr/local/sbin/sorteros-firstboot.py
+//                                                (reads the patched TOML)
+// If you change one, change all three.
 
 const START_MARKER = '__SORTEROS_CFG_START__';
 const END_MARKER = '__SORTEROS_CFG_END__';

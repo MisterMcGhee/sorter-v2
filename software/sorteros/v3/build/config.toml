@@ -25,6 +25,10 @@ packages = [
     "python3-fastapi",
     "python3-uvicorn",
     "python3-pydantic",
+    # Ubuntu Jammy ships Python 3.10 (no tomllib in stdlib). python3-tomli
+    # is API-compatible and used by sorteros-firstboot to parse
+    # /etc/sorteros-config.toml.
+    "python3-tomli",
 ]
 
 # Installed via curl scripts in chroot_apt.sh (NOT apt):
