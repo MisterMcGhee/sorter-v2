@@ -32,7 +32,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-PHASES = ["prep", "mount", "overlay", "chroot", "firstboot-config", "finalize"]
+PHASES = ["prep", "grow", "mount", "overlay", "chroot", "firstboot-config", "finalize"]
+
+# Bytes of free space to add to the image before chroot. The Orange Pi
+# base image is sized for an 8 GB SD card but only ~2.5 GB is free
+# inside the ext4; node22 + the captive portal deps + tailscale fill it.
+# Grow by GROW_MIB before mounting; the rootfs will be GROW_MIB / 1024 GiB
+# larger than vendor. First-boot growfs on the Pi expands further to fill
+# whatever real SD card it's flashed to.
+GROW_MIB = 4096
 
 # Markers found by the browser-side patcher in sorteros-setup.
 # Must match software/sorteros/v3/sorteros-setup/src/lib/img-patch.ts.
@@ -123,6 +131,51 @@ def phase_prep(ctx: BuildCtx) -> None:
     log(f"base image: {base}")
     log(f"copying base → {ctx.work_img}")
     shutil.copy2(base, ctx.work_img)
+
+
+# ─── grow ──────────────────────────────────────────────────────────────────
+
+def phase_grow(ctx: BuildCtx) -> None:
+    """Grow the image file and extend p1 + ext4 to use the new space.
+
+    Not partition surgery in the v2 sense — the partition table layout
+    stays the same (single ext4 at p1), we just push the partition end
+    further out and resize the filesystem. No second partition, no FAT,
+    no bootloader region touched.
+    """
+    if not ctx.work_img.exists():
+        sys.exit(f"{ctx.work_img} missing — run --phase prep first")
+    if is_mounted(ctx.mnt):
+        sys.exit("rootfs is mounted — grow must run before mount")
+
+    orig = ctx.work_img.stat().st_size
+    log(f"growing image by {GROW_MIB} MiB ({orig // (1024 * 1024)} MiB → {orig // (1024 * 1024) + GROW_MIB} MiB)")
+    # truncate appends zero bytes to the end of the file
+    with open(ctx.work_img, "rb+") as f:
+        f.seek(orig + GROW_MIB * 1024 * 1024 - 1)
+        f.write(b"\0")
+
+    # Attach via losetup so partition tools see partitions.
+    loop = subprocess.check_output(
+        ["losetup", "--show", "-fP", str(ctx.work_img)], text=True
+    ).strip()
+    try:
+        # Grow partition 1 to fill the new space.
+        run(["growpart", loop, "1"])
+        # Detach + reattach so the kernel rescans the (now larger) partition.
+        run(["losetup", "-d", loop])
+        loop = subprocess.check_output(
+            ["losetup", "--show", "-fP", str(ctx.work_img)], text=True
+        ).strip()
+        part = f"{loop}p1"
+        # e2fsck before resize2fs (refuses unclean fs)
+        p = subprocess.run(["e2fsck", "-fy", part])
+        if p.returncode not in (0, 1):
+            sys.exit(f"e2fsck exit {p.returncode}")
+        run(["resize2fs", part])
+    finally:
+        run(["losetup", "-d", loop])
+    log("grow complete")
 
 
 # ─── mount ─────────────────────────────────────────────────────────────────
@@ -316,6 +369,7 @@ def phase_finalize(ctx: BuildCtx) -> None:
 
 PHASE_FNS = {
     "prep": phase_prep,
+    "grow": phase_grow,
     "mount": phase_mount,
     "overlay": phase_overlay,
     "chroot": phase_chroot,

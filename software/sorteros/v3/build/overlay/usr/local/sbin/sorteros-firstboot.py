@@ -200,6 +200,14 @@ def stage_pnpm_install() -> None:
     sh(["su", "-", "orangepi", "-c", f"cd {frontend} && pnpm install --frozen-lockfile"])
 
 
+def stage_install_tailscale() -> None:
+    """Install Tailscale via the upstream install script. Deferred from
+    image build because the base ext4 doesn't have space for it pre-growfs."""
+    if Path("/usr/bin/tailscale").exists() or Path("/usr/sbin/tailscale").exists():
+        return
+    sh(["bash", "-c", "curl -fsSL https://tailscale.com/install.sh | sh"])
+
+
 def stage_tailscale_up() -> None:
     env = Path("/etc/sorteros/tailscale.env")
     if not env.exists():
@@ -215,6 +223,7 @@ STAGES: list[Stage] = [
     Stage("clone-repo", needs_internet=True, run=stage_clone_repo),
     Stage("uv-sync", needs_internet=True, run=stage_uv_sync),
     Stage("pnpm-install", needs_internet=True, run=stage_pnpm_install),
+    Stage("install-tailscale", needs_internet=True, run=stage_install_tailscale),
     Stage("tailscale-up", needs_internet=True, run=stage_tailscale_up),
 ]
 

@@ -38,9 +38,12 @@ apt-get install "${APT_OPTS[@]}" \
     python3-pydantic \
     python3-tomli
 
-# Tailscale binary (NOT auto-up; firstboot decides based on /etc/sorteros).
-log "installing tailscale"
-curl -fsSL https://tailscale.com/install.sh | sh
+# Tailscale install is deferred to firstboot (sorteros-firstboot.py
+# stage_install_tailscale): the base image's ext4 is sized for an 8 GB
+# SD card and runs out of space if we bake in tailscale + node22 + the
+# AP captive-portal deps. After growfs the rootfs has room, and
+# tailscale-install can run idempotently on first boot when internet
+# is available.
 
 log "cleaning apt caches"
 apt-get clean
