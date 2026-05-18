@@ -234,8 +234,19 @@ def stage_tailscale_up() -> None:
     env = Path("/etc/sorteros/tailscale.env")
     if not env.exists():
         return
-    # TODO: read env, tailscale up, scrub auth key from disk afterward.
-    pass
+    kvs = {}
+    for line in env.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, _, v = line.partition("=")
+            kvs[k.strip()] = v.strip()
+    key = kvs.get("TAILSCALE_AUTH_KEY", "")
+    tags = kvs.get("TAILSCALE_TAGS", "tag:sorter")
+    if not key:
+        return
+    sh(["tailscale", "up", f"--authkey={key}", f"--advertise-tags={tags}", "--ssh"])
+    # Scrub the key from disk so it doesn't persist after first use.
+    env.unlink()
 
 
 STAGES: list[Stage] = [

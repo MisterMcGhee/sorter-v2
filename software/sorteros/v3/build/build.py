@@ -236,6 +236,20 @@ def phase_overlay(ctx: BuildCtx) -> None:
     (sorteros_etc / "branch").write_text(ctx.branch + "\n")
     log(f"branch baked into image: {ctx.branch}")
 
+    # Bake Tailscale auth key into /etc/sorteros/tailscale.env (mode 600).
+    # Read from TAILSCALE_AUTH_KEY env var (populated from .env by main()).
+    # firstboot stage_tailscale_up reads this file, runs tailscale up, then
+    # scrubs it from disk so the key doesn't persist after first use.
+    ts_key = os.environ.get("TAILSCALE_AUTH_KEY", "")
+    ts_tags = os.environ.get("TAILSCALE_TAGS", "tag:sorter")
+    if ts_key:
+        ts_env = sorteros_etc / "tailscale.env"
+        ts_env.write_text(f"TAILSCALE_AUTH_KEY={ts_key}\nTAILSCALE_TAGS={ts_tags}\n")
+        ts_env.chmod(0o600)
+        log("baked tailscale auth key into /etc/sorteros/tailscale.env")
+    else:
+        log("WARN: TAILSCALE_AUTH_KEY not set; tailscale-up stage will be skipped")
+
     # Without this overlay the AP6275P wifi chip is invisible to the kernel.
     env_txt = ctx.mnt / "boot" / "orangepiEnv.txt"
     if env_txt.exists():
@@ -399,6 +413,15 @@ def main() -> None:
     args = ap.parse_args()
 
     require_root()
+
+    # Load .env from the build dir (gitignored — contains Tailscale auth key).
+    env_file = SCRIPT_DIR / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                os.environ.setdefault(k.strip(), v.strip())
 
     with open(args.config, "rb") as f:
         config = tomllib.load(f)
