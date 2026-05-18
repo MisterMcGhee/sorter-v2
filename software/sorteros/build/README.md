@@ -1,55 +1,63 @@
-# SorterOS image builder
+# v3 builder
 
-Builds a flashable SorterOS image from the Orange Pi 5 Ubuntu Jammy
-**server** base image plus a provisioner that installs the sorter stack.
+Python image builder. Runs locally on the M2 Mac inside a colima Linux VM
+(arm64 native — no qemu emulation, no Hive).
 
-Reproducible. No dev-Pi snapshot. Runs in a chroot on any Linux host
-(we test on Hive). Cross-arch: server base is aarch64, build host is
-x86_64 → uses `qemu-aarch64-static` for binfmt emulation.
+## One-time setup on the Mac
 
-## Layout
-
-```
-build.sh           - orchestrator; copy base → grow → mount → chroot → provision → unmount → name
-provision.sh       - runs INSIDE the chroot (aarch64); apt installs + sorter setup
-chroot-helpers.sh  - sourced by build.sh; mount/umount/cleanup primitives
+```bash
+brew install colima docker
+colima start --arch aarch64 --cpu 4 --memory 8 --mount-type virtiofs \
+    --mount $HOME/Documents/GitHub/sorter-v2-03:w
 ```
 
-## Inputs
+`colima` gives you a real Linux VM with `/dev/loop*`, `mount`, `chroot`,
+all of it. The repo is bind-mounted so the build sees source files
+directly.
 
-- **Base image**: `Orangepi5_1.2.2_ubuntu_jammy_server_linux6.1.99.img`
-  - On the local Mac: in `~/Downloads/` (untracked)
-  - On Hive (build host): `/basically/sorteros/base/...` (kept here so
-    successive builds don't re-upload)
+## Running a build
 
-## Outputs
+```bash
+# Inside the colima VM (colima ssh):
+cd ~/sorter-v2-03/software/sorteros/v3/build
+sudo /opt/homebrew/opt/python@3.11/libexec/bin/python build.py
+```
 
-- `/basically/sorteros/out/sorteros-<short-sha>-<YYYY-MM-DD>.img`
-- `/basically/sorteros/out/sorteros-<short-sha>-<YYYY-MM-DD>.img.zst`
-  (compressed for distribution)
+Or with phases for fast iteration:
 
-## What the build does NOT do (yet)
+```bash
+sudo python build.py --phase chroot   # re-run only the apt step
+sudo python build.py --phase overlay  # re-run only the overlay copy
+```
 
-- Cloud-init + FAT boot partition for RPi Imager customization
-  (deferred — see `sorter-v2-agent-notes/orange_pi/sorteros_image.md`)
-- Bake in a sorter-v2 release tarball (provisioner currently clones
-  the repo at HEAD; pin a tag once the repo is released)
-- Sign / checksum / attach to a GitHub Release
+Output: `out/sorteros-v3-<date>.img` in the repo dir.
 
-## Building on Hive (manual run for now)
+## Target wall-time
 
-1. Upload (or have) the base image at `/basically/sorteros/base/`.
-2. SSH in: `ssh root@$SORTEROS_BUILD_HOST` (Hive — set
-   `SORTEROS_BUILD_HOST` from your private notes / `~/.ssh/config`).
-3. `bash /basically/sorteros/build/build.sh`
-4. Output lands in `/basically/sorteros/out/`.
-5. `scp` the `.img.zst` back to your laptop and flash with RPi Imager
-   ("Use custom").
+| phase | target | what it does |
+| --- | --- | --- |
+| `prep` | ~5 s | `cp` base image from `cache/` → `out/work.img` |
+| `mount` | ~5 s | `losetup -fP`, `e2fsck -fy`, `mount` p1 at `/mnt/sorteros-build` |
+| `overlay` | ~2 s | `rsync -aH` `overlay/` → rootfs; bake `/etc/sorteros/branch` |
+| `chroot` | ~60 s | bind `/dev /proc /sys /dev/pts`, run `chroot_apt.sh`, unbind |
+| `firstboot-config` | < 1 s | write `/etc/sorteros-config.toml` placeholder (4 KB, magic markers) |
+| `finalize` | ~5 s | `umount`, `losetup -d`, rename `work.img` → `sorteros-v3-<date>.img` |
+| **total** | **< 90 s** | (assumes base img is cached and arm64-native; under qemu add ~3 min) |
 
-## Do not touch the running Hive containers
+The base image is downloaded once and cached under `cache/`. Subsequent
+builds skip the download entirely.
 
-The build runs entirely under `/basically/sorteros/` and never enters
-`/basically/sorter/sorter-v2/software/hive/` or `/basically/traefik/`.
-No Docker calls. No reboots. apt installs on the host are limited to
-the build-time tools (`qemu-user-static`, `binfmt-support`,
-`zstd`); these have no impact on the Docker stack.
+## What is NOT in the image
+
+- `uv sync` — deferred to the firstboot daemon (~5 GB PyTorch wheels).
+- `pnpm install` — deferred to the firstboot daemon.
+- Repo clone of `sorter-v2` — deferred to the firstboot daemon.
+
+The point of deferral isn't speed-of-build (the chroot path is native
+arm64 anyway), it's image *size*. Keeping these out of the image takes
+the .img from ~8 GB → < 4 GB raw.
+
+## See also
+
+- `../README.md` — v3 overview
+- `sorter-v2-agent-notes/orange_pi/sorteros_v3.md` — full design doc

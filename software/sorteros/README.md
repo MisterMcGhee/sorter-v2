@@ -1,84 +1,50 @@
-# SorterOS image bundling
+# SorterOS v3
 
-Scripts for turning a working Orange Pi 5 install into a flashable SD-card
-image we can put on a different Pi. Internal testing only — see the
-hard-stop in `sorter-v2-agent-notes/orange_pi/update_strategy.md` before
-publishing anything.
+> Full design doc: `sorter-v2-agent-notes/orange_pi/sorteros_v3.md`.
+> Read it before touching anything here.
 
-## Pipeline
+## What's here
+
+- **`build/`** — Python builder. Runs locally on the M2 Mac via colima. No qemu, no Hive. Target wall-time < 3 min.
+- **`sorteros-setup/`** — Pure-browser .img customizer. SvelteKit + Tailwind, deployed to Vercel at <https://setup.basically.website>. User uploads an image, fills out a form (Wi-Fi, hostname, SSH keys), downloads a customized .img. No backend.
+
+> **AP captive portal** (`ap-site/`) is not included — deferred as a future feature. It wasn't working on first hardware boot; see agent notes for details.
+
+## First boot
+
+One `Type=simple` background daemon (`sorteros-firstboot.service`) that loops every 60s, runs idempotent stages, never blocks boot, never errors when offline. Heavy stages (uv sync, pnpm install) wait until internet is up. See the design doc for the stage list.
+
+## Layout
 
 ```
-[dev Pi, running] --(1)--> [dev Pi, cleaned but still running]
-                              |
-                              v
-                          (2) power down, pull eMMC
-                              |
-                              v
-                          [raw .img on workstation]
-                              |
-                              v
-                          (3) shrink + scrub
-                              |
-                              v
-                          [sorteros-<date>.img.zst]
-                              |
-                              v
-                          (4) flash to fresh SD
-                              |
-                              v
-                          [new Pi boots, first-boot script runs]
+sorteros/
+├── README.md                # this file
+├── build/                   # Python image builder
+│   ├── build.py
+│   ├── config.toml
+│   ├── chroot_apt.sh
+│   ├── overlay/             # files copied into the rootfs as-is
+│   └── README.md
+└── sorteros-setup/          # browser-side .img customizer (SvelteKit + Vercel)
+    ├── package.json
+    ├── svelte.config.js
+    ├── src/
+    │   ├── app.css
+    │   ├── lib/img-patch.ts
+    │   └── routes/{+layout,+page}.svelte
+    └── README.md            # deploys to setup.basically.website
 ```
 
-Steps:
+## Versioning
 
-1. **`prep-image.sh`** — runs on the dev Pi *while it's running*. Drops
-   caches, junk, and the swapfile so the image-to-be is small. Idempotent
-   and non-destructive to anything we care about (uv re-downloads, swap
-   regenerates).
-2. **Clone the eMMC** — must be done *offline* (power Pi down, read the
-   eMMC from another machine). `dd` of a live rootfs is inconsistent.
-   See `capture.md` for the procedure.
-3. **`scrub.sh`** — runs against the captured `.img` on a workstation
-   (loop-mounted). Removes secrets, host identity, ssh host keys,
-   tailscale state, journal logs, bash history. Then `pishrink.sh` to
-   minimize the partition.
-4. **Flash + first boot** — write the scrubbed `.img.zst` to a new SD
-   card. On first boot, `firstboot.service` (installed by `prep-image.sh`)
-   regenerates SSH host keys, recreates `/swapfile`, and waits for the
-   user to drop in a `software/.env` + `software/machine.toml`.
+Version lives in `build/config.toml` under `[output] version`. It flows into
+the output filename (`sorteros-v{version}-{date}.img`). Bump it before every
+build that will be flashed to hardware.
 
-## Target
+| Change type | Bump | Examples |
+|---|---|---|
+| New feature, new firstboot stage, new overlay file | **minor** (3.2 → 3.3) | adding `stage_clone_repo`, new AP site feature |
+| Bug fix, config tweak, comment-only change | **patch** (3.2 → 3.2.1) | fixing `sh()` error swallowing, marker split fix |
+| Incompatible firstboot protocol change, partition layout change | **major** (3.x → 4.0) | changing marker contract, switching base image |
 
-- **Card:** 32 GB SD (default). Should work down to 8 GB after shrink.
-- **Compressed image size:** projected 1.5–2 GB zstd.
-- **Used disk on flashed card before first boot:** ~5 GB.
-- **Used disk on flashed card after first boot:** ~13 GB (swapfile back,
-  user re-runs `uv sync` if a fresh venv is wanted).
-
-Current dev Pi (2026-05-17): 24 GB used / 29 GB. Recoverable: 10.8 GB of
-uv caches + 8 GB swapfile + 0.5 GB apt = ~19 GB.
-
-## Tailscale policy
-
-Tailscale is **installed by default** but **not started**. The flashed
-card boots into a state where `tailscale` is on the system but
-`tailscaled.service` is left enabled-but-unconfigured. The user can:
-
-- Just use the machine over LAN (default). The backend listens on
-  `0.0.0.0:8000` and the UI on `0.0.0.0:5173`; the user finds the Pi's
-  IP on their local network.
-- `sudo tailscale up` if they want remote access via the tailnet. Their
-  own account, not ours — the previous machine's node key is scrubbed.
-
-## Files
-
-- `prep-image.sh` — run on the Pi. Cleans caches, installs the
-  first-boot service. Safe to re-run.
-- `scrub.sh` — run on a workstation against a mounted image. Removes
-  secrets, identity, logs. Destructive — only run on a *captured image*,
-  never on a live Pi.
-- `firstboot.sh` + `sorteros-firstboot.service` — installed by
-  `prep-image.sh`, runs once on the new Pi.
-- `capture.md` — manual offline-clone procedure (`dd`, shrink, compress).
-- `scrub-paths.txt` — canonical list of paths the scrub removes. Keep
-  in sync with `scrub.sh`.
+Always bump before starting a build — never retroactively rename a build that was already flashed to hardware.

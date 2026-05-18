@@ -1,5 +1,0 @@
-.state.json
-.serve.log
-.pid
-.venv/
-uv.lock
