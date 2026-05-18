@@ -203,16 +203,27 @@ if [[ ! -s /etc/resolv.conf ]]; then
     echo "nameserver 8.8.8.8" >> /etc/resolv.conf
 fi
 
-log "apt update"
-apt-get update -y
+NODE_VER=$(node --version 2>/dev/null || echo "none")
+CLOUD_INIT_OK=$(dpkg-query -W -f='${Status}' cloud-init 2>/dev/null | grep -c "install ok installed" || true)
 
-log "upgrading to node 22 (pnpm@latest requires >=22.13)"
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-apt-get install "${APT_OPTS[@]}" nodejs
-npm install -g pnpm@latest
+if [[ "$NODE_VER" == v22* && "$CLOUD_INIT_OK" -ge 1 ]]; then
+    log "node 22 and cloud-init already present — skipping apt (fast path)"
+else
+    log "apt update"
+    apt-get update -y
 
-log "installing cloud-init"
-apt-get install "${APT_OPTS[@]}" --no-install-recommends cloud-init
+    if [[ "$NODE_VER" != v22* ]]; then
+        log "upgrading to node 22 (pnpm@latest requires >=22.13)"
+        curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+        apt-get install "${APT_OPTS[@]}" nodejs
+        npm install -g pnpm@latest
+    fi
+
+    if [[ "$CLOUD_INIT_OK" -lt 1 ]]; then
+        log "installing cloud-init"
+        apt-get install "${APT_OPTS[@]}" --no-install-recommends cloud-init
+    fi
+fi
 
 log "writing /etc/cloud/cloud.cfg.d/99-sorteros.cfg"
 mkdir -p /etc/cloud/cloud.cfg.d
