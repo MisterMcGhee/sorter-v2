@@ -301,7 +301,7 @@ def stage_pnpm_build() -> None:
     frontend = SOFTWARE_DIR / "sorter" / "frontend"
     if not (frontend / "node_modules").exists():
         raise RuntimeError("pnpm install not done yet")
-    if (frontend / "build").exists():
+    if (frontend / ".svelte-kit" / "output" / "client").exists():
         return
     sh(["pnpm", "build"], cwd=frontend)
 
@@ -310,7 +310,7 @@ def stage_install_services() -> None:
     systemd_src = SOFTWARE_DIR / "systemd"
     if not systemd_src.exists():
         raise RuntimeError("repo not cloned yet")
-    if not (SOFTWARE_DIR / "sorter" / "frontend" / "build").exists():
+    if not (SOFTWARE_DIR / "sorter" / "frontend" / ".svelte-kit" / "output" / "client").exists():
         raise RuntimeError("pnpm build not done yet")
 
     pnpm_bin = subprocess.check_output(["which", "pnpm"], text=True).strip()
@@ -321,7 +321,7 @@ def stage_install_services() -> None:
         "__PNPM_BIN__": pnpm_bin,
     }
 
-    for unit in ["lego-sorter-backend.service", "lego-sorter-ui.service"]:
+    for unit in ["sorter-backend.service", "sorter-ui.service"]:
         src = systemd_src / unit
         if not src.exists():
             raise RuntimeError(f"service template {unit} not found in repo")
@@ -333,7 +333,7 @@ def stage_install_services() -> None:
         dest.chmod(0o644)
 
     sh(["systemctl", "daemon-reload"])
-    sh(["systemctl", "enable", "--now", "lego-sorter-backend.service", "lego-sorter-ui.service"])
+    sh(["systemctl", "enable", "--now", "sorter-backend.service", "sorter-ui.service"])
     log.info("sorter services installed and started")
 
 
