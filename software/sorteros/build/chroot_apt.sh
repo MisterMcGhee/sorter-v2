@@ -29,12 +29,20 @@ log "installing core packages"
 apt-get install "${APT_OPTS[@]}" \
     network-manager \
     python3-pip \
-    python3-tomli
+    python3-tomli \
+    libgl1 libglib2.0-0 \
+    v4l-utils \
+    git-lfs
 
 # Tailscale install is deferred to firstboot (sorteros-firstboot.py
 # stage_install_tailscale): the base image's ext4 is sized for an 8 GB
 # SD card. After growfs the rootfs has room, and tailscale-install can
 # run idempotently on first boot when internet is available.
+
+log "installing uv"
+curl -fsSL https://astral.sh/uv/install.sh | env HOME=/root sh
+# Symlink into /usr/local/bin so all users can invoke it.
+ln -sf /root/.local/bin/uv /usr/local/bin/uv
 
 log "cleaning apt caches"
 apt-get clean
@@ -51,5 +59,10 @@ systemctl mask dnsmasq.service || true
 # Ensure /root/.ssh exists so root SSH key auth works out of the box.
 mkdir -p /root/.ssh
 chmod 700 /root/.ssh
+
+# plugdev group for udev Pico access (99-sorter-pico.rules baked in by overlay).
+# orangepi user must be a member so the backend can open /dev/ttyACM*.
+getent group plugdev >/dev/null || groupadd --system plugdev
+usermod -aG plugdev orangepi || true
 
 log "done"

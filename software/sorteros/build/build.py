@@ -230,11 +230,20 @@ def phase_overlay(ctx: BuildCtx) -> None:
         f"{ctx.overlay_dir}/", f"{ctx.mnt}/",
     ])
 
-    # Record the branch so the firstboot daemon knows what to clone.
+    # Record the branch and version so the firstboot daemon knows what to clone
+    # and so anyone who SSHes in can identify the image.
     sorteros_etc = ctx.mnt / "etc" / "sorteros"
     sorteros_etc.mkdir(parents=True, exist_ok=True)
+    version = ctx.config["output"]["version"]
     (sorteros_etc / "branch").write_text(ctx.branch + "\n")
+    (sorteros_etc / "version").write_text(version + "\n")
     log(f"branch baked into image: {ctx.branch}")
+    log(f"version baked into image: {version}")
+
+    # MOTD so `ssh root-pi` immediately shows the image version.
+    motd = ctx.mnt / "etc" / "motd"
+    motd.write_text(f"\nSorterOS  v{version}  ({ctx.branch})\n\n")
+    log(f"wrote /etc/motd")
 
     # Bake Tailscale auth key into /etc/sorteros/tailscale.env (mode 600).
     # Read from TAILSCALE_AUTH_KEY env var (populated from .env by main()).

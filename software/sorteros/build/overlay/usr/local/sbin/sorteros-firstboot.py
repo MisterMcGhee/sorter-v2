@@ -33,7 +33,8 @@ CONFIG_PATH = Path("/etc/sorteros-config.toml")
 # occurrences instead of the real placeholder in /etc/sorteros-config.toml.
 CFG_START_MARKER = "__SORTEROS_CFG" + "_START__"
 CFG_END_MARKER = "__SORTEROS_CFG" + "_END__"
-SOFTWARE_DIR = Path("/home/orangepi/sorter-v2/software")
+REPO_DIR = Path("/home/orangepi/sorter-v2")
+SOFTWARE_DIR = REPO_DIR / "software"
 POLL_INTERVAL = 60
 INTERNET_PROBE_HOSTS = ("deb.debian.org", "github.com")
 INTERNET_PROBE_TIMEOUT = 5
@@ -65,6 +66,11 @@ def sh(cmd: list[str], **kw) -> None:
         raise RuntimeError(f"{cmd[0]} exited {r.returncode}")
 
 
+def _hostname() -> str:
+    p = Path("/etc/hostname")
+    return p.read_text().strip() if p.exists() else "sorter"
+
+
 def stage_ssh_host_keys() -> None:
     if list(Path("/etc/ssh").glob("ssh_host_*_key")):
         return
@@ -73,18 +79,11 @@ def stage_ssh_host_keys() -> None:
 
 def stage_grow_rootfs() -> None:
     # TODO: detect rootfs partition + run growpart + resize2fs.
-    # On a freshly flashed card we want ext4 to fill the whole SD.
     pass
 
 
 def stage_apply_config_toml() -> None:
     """Read /etc/sorteros-config.toml and apply it.
-
-    The file is always present (build.py bakes it in as a padded
-    placeholder); sorteros-setup (the browser-side patcher at
-    setup.basically.website) overwrites the body in-place with real
-    values. If no patching happened the file parses to an empty dict
-    and we no-op.
 
     Keys honored — keep in sync with sorteros-setup/src/lib/img-patch.ts:
       hostname              → set system hostname
@@ -96,8 +95,6 @@ def stage_apply_config_toml() -> None:
         return
 
     raw = CONFIG_PATH.read_text("utf-8", errors="replace")
-    # Strip everything from the bare end marker onward — the patcher leaves
-    # __SORTEROS_CFG_END__ without a leading '#' so TOML would choke on it.
     if CFG_END_MARKER in raw:
         raw = raw[:raw.index(CFG_END_MARKER)]
     try:
@@ -106,25 +103,20 @@ def stage_apply_config_toml() -> None:
         log.warning("config toml unreadable: %s", e)
         return
 
-    # hostname — apply via hostnamectl + /etc/hostname.
     hostname = cfg.get("hostname")
     if isinstance(hostname, str) and hostname.strip():
         log.info("setting hostname: %s", hostname)
         sh(["hostnamectl", "set-hostname", hostname])
 
-    # [wifi] — translate to an NM keyfile so it persists across reboots.
     wifi = cfg.get("wifi") or {}
     ssid = wifi.get("ssid")
     psk = wifi.get("password", "")
     if isinstance(ssid, str) and ssid.strip():
         log.info("applying wifi config for ssid: %s", ssid)
         _write_nm_wifi(ssid, str(psk))
-        # If the AP is currently up, tear it down so the new connection
-        # can attach to wlan0.
         sh(["systemctl", "stop", "sorteros-ap.service"])
         sh(["nmcli", "connection", "up", ssid])
 
-    # [ssh] — append authorized_key to orangepi user.
     ssh_block = cfg.get("ssh") or {}
     key = ssh_block.get("authorized_key")
     if isinstance(key, str) and key.strip():
@@ -132,9 +124,6 @@ def stage_apply_config_toml() -> None:
 
 
 def _write_nm_wifi(ssid: str, psk: str) -> None:
-    """Write an NM keyfile for the given SSID + PSK and reload NM."""
-    # NM keyfile format. autoconnect=true so it picks the network up
-    # without manual intervention.
     body = (
         "[connection]\n"
         f"id={ssid}\n"
@@ -159,15 +148,12 @@ def _write_nm_wifi(ssid: str, psk: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(body)
     p.chmod(0o600)
-    # Make sure NM picks up the new file. Stamp so sorteros-ap stays down.
     Path("/var/lib/sorteros/wifi-configured").parent.mkdir(parents=True, exist_ok=True)
     Path("/var/lib/sorteros/wifi-configured").touch()
     sh(["nmcli", "connection", "reload"])
 
 
 def _append_authorized_key(key: str) -> None:
-    """Append the given ssh public key to orangepi's authorized_keys
-    (no duplicates)."""
     ssh_dir = Path("/home/orangepi/.ssh")
     ssh_dir.mkdir(parents=True, exist_ok=True)
     sh(["chown", "orangepi:orangepi", str(ssh_dir)])
@@ -184,30 +170,127 @@ def _append_authorized_key(key: str) -> None:
     auth.chmod(0o600)
 
 
-def stage_clone_repo() -> None:
-    if SOFTWARE_DIR.exists():
+def stage_setup_swap() -> None:
+    swapfile = Path("/swapfile")
+    if swapfile.exists():
         return
-    # TODO: git clone basicallysource/sorter-v2 → /home/orangepi/sorter-v2,
-    # chown to orangepi:orangepi, checkout the branch from /etc/sorteros/branch.
-    pass
+    sh(["fallocate", "-l", "8G", str(swapfile)])
+    swapfile.chmod(0o600)
+    sh(["mkswap", str(swapfile)])
+    sh(["swapon", str(swapfile)])
+    fstab = Path("/etc/fstab")
+    content = fstab.read_text()
+    if "/swapfile" not in content:
+        with fstab.open("a") as f:
+            f.write("/swapfile none swap sw,pri=-2 0 0\n")
+
+
+def stage_clone_repo() -> None:
+    if REPO_DIR.exists():
+        return
+    branch_file = Path("/etc/sorteros/branch")
+    branch = branch_file.read_text().strip() if branch_file.exists() else "main"
+    sh(["git", "clone", "--branch", branch, "--depth", "1",
+        "https://github.com/basicallysource/sorter-v2", str(REPO_DIR)])
+    sh(["chown", "-R", "orangepi:orangepi", str(REPO_DIR)])
+
+
+def stage_git_lfs_pull() -> None:
+    if not REPO_DIR.exists():
+        raise RuntimeError("repo not cloned yet")
+    sh(["git", "-C", str(REPO_DIR), "lfs", "install"])
+    sh(["git", "-C", str(REPO_DIR), "lfs", "pull"])
+    sh(["chown", "-R", "orangepi:orangepi", str(REPO_DIR)])
+
+
+def stage_write_env() -> None:
+    env_path = SOFTWARE_DIR / ".env"
+    if env_path.exists():
+        return
+    if not SOFTWARE_DIR.exists():
+        raise RuntimeError("repo not cloned yet")
+    hostname = _hostname()
+    env_path.write_text(
+        "export DEBUG_LEVEL=2\n"
+        f'export MACHINE_SPECIFIC_PARAMS_PATH="{SOFTWARE_DIR}/machine.example.toml"\n'
+        f'export SORTING_PROFILE_PATH="{SOFTWARE_DIR}/sorter/backend/sorting_profile.json"\n'
+        "export SORTER_API_HOST=0.0.0.0\n"
+        f'export SORTER_API_ALLOWED_ORIGINS="http://{hostname}:5173,http://localhost:5173"\n'
+    )
+    sh(["chown", "orangepi:orangepi", str(env_path)])
+
+
+def stage_write_frontend_env() -> None:
+    frontend_env = SOFTWARE_DIR / "sorter" / "frontend" / ".env"
+    if frontend_env.exists():
+        return
+    if not (SOFTWARE_DIR / "sorter" / "frontend").exists():
+        raise RuntimeError("repo not cloned yet")
+    hostname = _hostname()
+    frontend_env.write_text(
+        f"PUBLIC_BACKEND_BASE_URL=http://{hostname}:8000\n"
+        f"PUBLIC_BACKEND_WS_URL=ws://{hostname}:8000\n"
+        f"SORTER_ALLOWED_HOSTS={hostname}\n"
+    )
+    sh(["chown", "orangepi:orangepi", str(frontend_env)])
 
 
 def stage_uv_sync() -> None:
     backend = SOFTWARE_DIR / "sorter" / "backend"
     if not backend.exists():
-        return
+        raise RuntimeError("repo not cloned yet")
     if (backend / ".venv").exists():
         return
-    sh(["su", "-", "orangepi", "-c", f"cd {backend} && uv sync"])
+    sh(["su", "-", "orangepi", "-c", f"cd {backend} && uv sync --python 3.13"])
 
 
 def stage_pnpm_install() -> None:
     frontend = SOFTWARE_DIR / "sorter" / "frontend"
     if not frontend.exists():
-        return
+        raise RuntimeError("repo not cloned yet")
     if (frontend / "node_modules").exists():
         return
     sh(["su", "-", "orangepi", "-c", f"cd {frontend} && pnpm install --frozen-lockfile"])
+
+
+def stage_pnpm_build() -> None:
+    frontend = SOFTWARE_DIR / "sorter" / "frontend"
+    if not (frontend / "node_modules").exists():
+        raise RuntimeError("pnpm install not done yet")
+    if (frontend / "build").exists():
+        return
+    sh(["su", "-", "orangepi", "-c", f"cd {frontend} && pnpm build"])
+
+
+def stage_install_services() -> None:
+    systemd_src = SOFTWARE_DIR / "systemd"
+    if not systemd_src.exists():
+        raise RuntimeError("repo not cloned yet")
+    if not (SOFTWARE_DIR / "sorter" / "frontend" / "build").exists():
+        raise RuntimeError("pnpm build not done yet")
+
+    pnpm_bin = subprocess.check_output(["which", "pnpm"], text=True).strip()
+    replacements = {
+        "__USER__": "orangepi",
+        "__SOFTWARE_DIR__": str(SOFTWARE_DIR),
+        "__UV_BIN__": "/usr/local/bin/uv",
+        "__PNPM_BIN__": pnpm_bin,
+    }
+
+    for unit in ["sorter-backend.service", "sorter-ui.service"]:
+        src = systemd_src / unit
+        if not src.exists():
+            raise RuntimeError(f"service template {unit} not found in repo")
+        content = src.read_text()
+        for k, v in replacements.items():
+            content = content.replace(k, v)
+        dest = Path("/etc/systemd/system") / unit
+        dest.write_text(content)
+        dest.chmod(0o644)
+
+    sh(["systemctl", "daemon-reload"])
+    sh(["systemctl", "enable", "--now", "sorter-backend.service", "sorter-ui.service"])
+    log.info("sorter services installed and started")
 
 
 def _ensure_clock_synced() -> None:
@@ -225,8 +308,6 @@ def _ensure_clock_synced() -> None:
 
 
 def stage_install_tailscale() -> None:
-    """Install Tailscale via the upstream install script. Deferred from
-    image build because the base ext4 doesn't have space for it pre-growfs."""
     if Path("/usr/bin/tailscale").exists() or Path("/usr/sbin/tailscale").exists():
         return
     sh(["bash", "-c", "curl -fsSL https://tailscale.com/install.sh | sh"])
@@ -247,19 +328,24 @@ def stage_tailscale_up() -> None:
     if not key:
         return
     sh(["tailscale", "up", f"--authkey={key}", f"--advertise-tags={tags}", "--ssh"])
-    # Scrub the key from disk so it doesn't persist after first use.
     env.unlink()
 
 
 STAGES: list[Stage] = [
-    Stage("ssh-host-keys", needs_internet=False, run=stage_ssh_host_keys),
-    Stage("grow-rootfs", needs_internet=False, run=stage_grow_rootfs),
-    Stage("apply-config-toml", needs_internet=False, run=stage_apply_config_toml),
-    Stage("clone-repo", needs_internet=True, run=stage_clone_repo),
-    Stage("uv-sync", needs_internet=True, run=stage_uv_sync),
-    Stage("pnpm-install", needs_internet=True, run=stage_pnpm_install),
-    Stage("install-tailscale", needs_internet=True, run=stage_install_tailscale),
-    Stage("tailscale-up", needs_internet=True, run=stage_tailscale_up),
+    Stage("ssh-host-keys",       needs_internet=False, run=stage_ssh_host_keys),
+    Stage("grow-rootfs",         needs_internet=False, run=stage_grow_rootfs),
+    Stage("apply-config-toml",   needs_internet=False, run=stage_apply_config_toml),
+    Stage("setup-swap",          needs_internet=False, run=stage_setup_swap),
+    Stage("clone-repo",          needs_internet=True,  run=stage_clone_repo),
+    Stage("git-lfs-pull",        needs_internet=True,  run=stage_git_lfs_pull),
+    Stage("write-env",           needs_internet=False, run=stage_write_env),
+    Stage("write-frontend-env",  needs_internet=False, run=stage_write_frontend_env),
+    Stage("uv-sync",             needs_internet=True,  run=stage_uv_sync),
+    Stage("pnpm-install",        needs_internet=True,  run=stage_pnpm_install),
+    Stage("pnpm-build",          needs_internet=False, run=stage_pnpm_build),
+    Stage("install-services",    needs_internet=False, run=stage_install_services),
+    Stage("install-tailscale",   needs_internet=True,  run=stage_install_tailscale),
+    Stage("tailscale-up",        needs_internet=True,  run=stage_tailscale_up),
 ]
 
 
@@ -288,7 +374,6 @@ def main() -> int:
                 s.run()
                 stamp_path(s.name).touch()
             except Exception as e:
-                # Never fatal. Log and retry next iteration.
                 log.warning("stage %s failed: %s — will retry", s.name, e)
 
         time.sleep(POLL_INTERVAL)
