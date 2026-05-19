@@ -18,6 +18,7 @@
     let password = $state('');
     let remember_password = $state(false);
     let sshKey = $state('');
+    let tailscaleKey = $state('');
     let status = $state('');
     let statusKind: 'info' | 'success' | 'danger' = $state('info');
     let busy = $state(false);
@@ -81,7 +82,8 @@
         return {
             hostname,
             wifi: ssid ? { ssid, password } : undefined,
-            ssh_authorized_key: sshKey || undefined
+            ssh_authorized_key: sshKey || undefined,
+            tailscale_auth_key: tailscaleKey || undefined
         };
     }
 
@@ -327,6 +329,22 @@
             ></textarea>
         </div>
 
+        <div>
+            <label for="tskey" class="mb-2 block text-sm font-medium">Tailscale auth key</label>
+            <p class="text-text-muted mb-2 text-xs">
+                Optional. Joins your Tailscale network on first boot with tag <code>tag:sorter</code>,
+                enabling remote access without knowing the device's IP.
+            </p>
+            <input
+                id="tskey"
+                type="password"
+                bind:value={tailscaleKey}
+                autocomplete="off"
+                placeholder="tskey-auth-..."
+                class="setup-control font-mono text-sm"
+            />
+        </div>
+
         <div class="space-y-2">
             <button
                 onclick={handleDownloadPatch}
@@ -380,9 +398,6 @@
     </section>
 
     <footer class="text-text-muted mt-12 space-y-1 text-xs">
-        <p>
-            Leave the Wi-Fi SSID blank to make the sorter boot into AP mode. You can
-            join its hotspot from your phone and choose a network there.
-        </p>
+        <p>All fields except the image file are optional.</p>
     </footer>
 </main>

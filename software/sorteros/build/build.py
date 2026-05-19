@@ -264,19 +264,21 @@ def phase_overlay(ctx: BuildCtx) -> None:
     motd.write_text(f"\nSorterOS  v{version}  ({ctx.branch})\n\n")
     log(f"wrote /etc/motd")
 
-    # Bake Tailscale auth key into /etc/sorteros/tailscale.env (mode 600).
-    # Read from TAILSCALE_AUTH_KEY env var (populated from .env by main()).
-    # firstboot stage_tailscale_up reads this file, runs tailscale up, then
-    # scrubs it from disk so the key doesn't persist after first use.
-    ts_key = os.environ.get("TAILSCALE_AUTH_KEY", "")
+    # Tailscale auth key is intentionally NOT baked in at build time.
+    # It is supplied at setup time via the sorteros-setup browser customizer,
+    # written into /etc/sorteros-config.toml, and applied by firstboot
+    # stage_apply_config_toml → stage_tailscale_up.
+    #
+    # The key is kept in .env as TAILSCALE_AUTH_KEY for reference but build.py
+    # no longer reads it. To re-enable baking (e.g. for internal test images),
+    # rename it to SORTEROS_BAKE_TAILSCALE_AUTH_KEY and update the lookup below.
+    ts_key = os.environ.get("SORTEROS_BAKE_TAILSCALE_AUTH_KEY", "")
     ts_tags = os.environ.get("TAILSCALE_TAGS", "tag:sorter")
     if ts_key:
         ts_env = sorteros_etc / "tailscale.env"
         ts_env.write_text(f"TAILSCALE_AUTH_KEY={ts_key}\nTAILSCALE_TAGS={ts_tags}\n")
         ts_env.chmod(0o600)
         log("baked tailscale auth key into /etc/sorteros/tailscale.env")
-    else:
-        log("WARN: TAILSCALE_AUTH_KEY not set; tailscale-up stage will be skipped")
 
     # Without this overlay the AP6275P wifi chip is invisible to the kernel.
     env_txt = ctx.mnt / "boot" / "orangepiEnv.txt"

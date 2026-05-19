@@ -147,6 +147,16 @@ def stage_apply_config_toml() -> None:
     if isinstance(key, str) and key.strip():
         _append_authorized_key(key.strip())
 
+    ts_block = cfg.get("tailscale") or {}
+    ts_key = ts_block.get("auth_key")
+    ts_tags = ts_block.get("tags", "tag:sorter")
+    if isinstance(ts_key, str) and ts_key.strip():
+        ts_env = Path("/etc/sorteros/tailscale.env")
+        ts_env.parent.mkdir(parents=True, exist_ok=True)
+        ts_env.write_text(f"TAILSCALE_AUTH_KEY={ts_key.strip()}\nTAILSCALE_TAGS={ts_tags}\n")
+        ts_env.chmod(0o600)
+        log.info("tailscale auth key written from config")
+
 
 def _write_nm_wifi(ssid: str, psk: str) -> None:
     body = (

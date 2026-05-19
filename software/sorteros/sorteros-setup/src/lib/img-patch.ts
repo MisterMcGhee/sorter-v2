@@ -17,6 +17,7 @@ export interface SorterosConfig {
     hostname?: string;
     wifi?: { ssid: string; password: string };
     ssh_authorized_key?: string;
+    tailscale_auth_key?: string;
 }
 
 function indexOfBytes(haystack: Uint8Array, needle: Uint8Array, from = 0): number {
@@ -197,6 +198,11 @@ function buildToml(cfg: SorterosConfig): string {
     if (cfg.ssh_authorized_key) {
         lines.push('', '[ssh]');
         lines.push(`authorized_key = ${JSON.stringify(cfg.ssh_authorized_key)}`);
+    }
+    if (cfg.tailscale_auth_key) {
+        lines.push('', '[tailscale]');
+        lines.push(`auth_key = ${JSON.stringify(cfg.tailscale_auth_key)}`);
+        lines.push('tags = "tag:sorter"');
     }
     return lines.join('\n') + '\n';
 }
