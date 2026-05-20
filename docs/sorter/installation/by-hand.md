@@ -2,11 +2,11 @@
 layout: default
 title: Install by hand
 type: how-to
-section: installation
+section: sorter
 slug: installation-by-hand
 kicker: Installation — Manual
 lede: The manual install sequence — for when the one-command installer does not yet support your platform, or when you want to know exactly what it does.
-permalink: /installation/by-hand/
+permalink: /sorter/installation/by-hand/
 audience: self-hosting operator
 applies_to: sorter 2.x
 last_verified: 2026-04-08

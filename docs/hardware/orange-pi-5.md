@@ -30,10 +30,10 @@ No other single-board computer at this price point sustains that inference throu
 
 ## Recommended configuration
 
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| Memory | 8 GB | 16 GB |
-| Storage | 32 GB SD card | 64 GB SD card (faster class preferred) |
+| Component | Requirement |
+|-----------|-------------|
+| Memory | 8 GB+ |
+| Storage | 32 GB+ SD card (faster class preferred) |
 
 The 4 GB variant is not supported — the backend, inference workers, and OS together exceed its available memory.
 
@@ -41,7 +41,7 @@ The 4 GB variant is not supported — the backend, inference workers, and OS tog
 
 Some Orange Pi 5 variants do not include built-in WiFi. If yours does not, you need one of:
 
-- A **USB WiFi adapter** with Linux driver support
+- A **Linux-compatible** USB WiFi adapter
 - An **M.2 WiFi module** (see below)
 
 ### M.2 WiFi modules — two different connectors
@@ -50,8 +50,8 @@ The Orange Pi family uses **two distinct M.2 connector formats** depending on th
 
 | Board | M.2 interface | Module |
 |-------|--------------|--------|
-| Orange Pi 5 (original) | PCIe M.2 E-KEY | AP6275P (Wi-Fi 6 + BT5.0) |
-| Orange Pi 5 Plus | Standard M.2 PCIe | R6 module (Wi-Fi 6 + BT5.2, 1201 Mbps) |
+| Orange Pi 5 (original) | Standard M.2 PCIe | AP6275P (Wi-Fi 6 + BT5.0) — [Amazon](https://www.amazon.com/dp/B0BZRNM6HR) |
+| Orange Pi 5 Plus | PCIe M.2 E-KEY | R6 module (Wi-Fi 6 + BT5.2, 1201 Mbps) — [Amazon](https://www.amazon.com/dp/B0CFY7SJRN) |
 
 If you order the wrong module for your board variant it will not physically seat. Double-check which board you have before purchasing.
 

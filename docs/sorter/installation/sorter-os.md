@@ -2,11 +2,11 @@
 layout: default
 title: Install SorterOS
 type: installation
-section: installation
+section: sorter
 slug: installation-sorter-os
 kicker: Installation — SorterOS
 lede: Flash SorterOS onto an SD card and configure it for first boot. The recommended way to run Sorter on an Orange Pi 5.
-permalink: /installation/sorter-os/
+permalink: /sorter/installation/sorter-os/
 audience: self-hosting operator
 applies_to: sorteros v3.x
 last_verified: 2026-05-19
@@ -61,13 +61,15 @@ Wait for Etcher to finish writing and verifying. Do not remove the card until it
 
 ## Step 4 — Boot
 
-Insert the SD card into the Orange Pi 5 and power it on. SorterOS completes first-boot setup automatically, then starts the Sorter backend and UI.
+Insert the SD card into the Orange Pi 5 and power it on. SorterOS completes first-boot setup automatically, then starts the Sorter backend and UI. This takes less than 5 minutes if everything is working.
 
-Once booted, the Sorter UI is reachable from any device on the same network:
+Once booted, the Sorter UI is reachable from any device on the same network at port `5173`, using the hostname you set in [SorterOS Setup](https://setup.basically.website/) — or `sorter` if you left it as the default:
 
 ```
-http://<pi-ip>:5173/
+http://sorter:5173/
 ```
+
+The Pi must be on the same network as the device you're browsing from.
 
 ## Troubleshooting
 
