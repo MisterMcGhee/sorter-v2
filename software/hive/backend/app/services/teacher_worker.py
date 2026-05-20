@@ -215,121 +215,214 @@ class TeacherWorker:
     # ------------------------------------------------------------------ per-item worker
 
     def _run_item(self, item_id: UUID) -> None:
-        """Executor-thread entry point. Each item gets its own SQLAlchemy session."""
+        """Executor-thread entry point.
+
+        Critical: the slow OpenRouter/Perceptron call MUST NOT happen while a DB session
+        is held — otherwise 6 worker threads × multi-second adapter latency exhausts the
+        SQLAlchemy connection pool and starves the FastAPI handlers. We pull what we need
+        in a short open-close transaction, release the connection, run the API call, then
+        reopen a fresh session to write the result back.
+        """
+        try:
+            ctx = self._load_item_context(item_id)
+            if ctx is None:
+                return
+
+            zone, adapter, api_key, image_bytes, sample_id, job_id, error = ctx
+            if error is not None:
+                self._record_terminal_status(item_id, job_id, **error)
+                return
+
+            # Throttle + run with retries on 429. NO database session is held here.
+            max_concurrent = getattr(adapter, "max_concurrent", 1)
+            min_interval = float(getattr(adapter, "min_interval_s", 1.0))
+            adapter_kind = adapter.adapter_kind
+            sem = self._semaphore_for(adapter_kind, max_concurrent)
+
+            with sem:
+                try:
+                    result = self._call_with_retry(
+                        adapter=adapter,
+                        image_bytes=image_bytes,
+                        zone=zone,
+                        api_key=api_key,
+                        adapter_kind=adapter_kind,
+                        min_interval=min_interval,
+                    )
+                except Exception as exc:
+                    logger.exception("Teacher item %s failed", item_id)
+                    self._record_terminal_status(
+                        item_id, job_id,
+                        status="error",
+                        error_message=str(exc)[:500],
+                        succeeded=False,
+                        count_as_failure=True,
+                    )
+                    return
+
+            self._write_result(item_id, job_id, sample_id, result)
+        except Exception:
+            logger.exception("Teacher item %s crashed", item_id)
+
+    def _load_item_context(self, item_id: UUID):
+        """Open a short-lived session to fetch everything the adapter call needs.
+
+        Returns ``(zone, adapter, api_key, image_bytes, sample_id, job_id, error_dict)``
+        or ``None`` if the item disappeared. ``error_dict`` is non-None when the item
+        can't be processed for a deterministic reason (missing zone, missing key, missing
+        image); the caller then writes the terminal status without making the API call.
+        """
         db: Session = SessionLocal()
         try:
             item = db.query(TeacherJobItem).filter(TeacherJobItem.id == item_id).first()
             if item is None:
-                return
+                return None
             job = db.query(TeacherJob).filter(TeacherJob.id == item.job_id).first()
             if job is None:
                 db.delete(item)
                 db.commit()
-                return
+                return None
             sample = db.query(Sample).filter(Sample.id == item.sample_id).first()
             owner = db.query(User).filter(User.id == job.owner_id).first()
+            job_id = job.id
+            sample_id = sample.id if sample else None
+
             if owner is None:
-                self._mark_item_error(db, item, job, "Job owner no longer exists")
-                return
-            self._process_item(db, item, job, sample, owner)
-        except Exception:
-            logger.exception("Teacher item %s crashed", item_id)
+                return (
+                    None, None, None, None, sample_id, job_id,
+                    {
+                        "status": "error", "error_message": "Job owner no longer exists",
+                        "succeeded": False, "count_as_failure": True,
+                    },
+                )
+            if sample is None:
+                return (
+                    None, None, None, None, sample_id, job_id,
+                    {
+                        "status": "error", "error_message": "Sample no longer exists",
+                        "succeeded": False, "count_as_failure": True,
+                    },
+                )
+
+            zone = zone_for_source_role(sample.source_role)
+            if zone is None:
+                return (
+                    None, None, None, None, sample_id, job_id,
+                    {
+                        "status": "skipped",
+                        "error_message": f"No teacher zone for source_role={sample.source_role!r}",
+                        "succeeded": False,
+                    },
+                )
+
+            model_id = normalize_openrouter_model(job.openrouter_model)
+            adapter = get_adapter(model_id)
+            if adapter is None:
+                return (
+                    None, None, None, None, sample_id, job_id,
+                    {
+                        "status": "error",
+                        "error_message": f"Unknown model {job.openrouter_model!r}",
+                        "succeeded": False, "count_as_failure": True,
+                    },
+                )
+
+            secret_kind = getattr(adapter, "secret_kind", "openrouter")
+            if secret_kind == "perceptron":
+                api_key = decrypt_secret(owner.perceptron_api_key_encrypted)
+                missing_msg = "Job owner has no Perceptron API key configured."
+            else:
+                api_key = decrypt_secret(owner.openrouter_api_key_encrypted)
+                missing_msg = "Job owner has no OpenRouter API key configured."
+            if not api_key:
+                return (
+                    None, None, None, None, sample_id, job_id,
+                    {
+                        "status": "error", "error_message": missing_msg,
+                        "succeeded": False, "count_as_failure": True,
+                    },
+                )
+
+            try:
+                image_bytes = get_backend().read_bytes(sample.image_path)
+            except FileNotFoundError:
+                return (
+                    None, None, None, None, sample_id, job_id,
+                    {
+                        "status": "error", "error_message": "Sample image is missing",
+                        "succeeded": False, "count_as_failure": True,
+                    },
+                )
+
+            return zone, adapter, api_key, image_bytes, sample_id, job_id, None
         finally:
             db.close()
 
-    def _process_item(
-        self,
-        db: Session,
-        item: TeacherJobItem,
-        job: TeacherJob,
-        sample: Sample | None,
-        owner: User,
-    ) -> None:
-        if sample is None:
-            self._mark_item_error(db, item, job, "Sample no longer exists")
-            return
-
-        zone = zone_for_source_role(sample.source_role)
-        if zone is None:
-            self._mark_item_status(
-                db, item, job,
-                status="skipped",
-                error_message=f"No teacher zone for source_role={sample.source_role!r}",
-                succeeded=False,
-            )
-            return
-
-        model_id = normalize_openrouter_model(job.openrouter_model)
-        adapter = get_adapter(model_id)
-        if adapter is None:
-            self._mark_item_error(db, item, job, f"Unknown model {job.openrouter_model!r}")
-            return
-
-        secret_kind = getattr(adapter, "secret_kind", "openrouter")
-        if secret_kind == "perceptron":
-            api_key = decrypt_secret(owner.perceptron_api_key_encrypted)
-            missing_msg = "Job owner has no Perceptron API key configured."
-        else:
-            api_key = decrypt_secret(owner.openrouter_api_key_encrypted)
-            missing_msg = "Job owner has no OpenRouter API key configured."
-        if not api_key:
-            self._mark_item_error(db, item, job, missing_msg)
-            return
-
+    def _write_result(self, item_id: UUID, job_id: UUID, sample_id: UUID, result: dict) -> None:
+        """Persist a successful adapter result in a fresh, short-lived transaction."""
+        db: Session = SessionLocal()
         try:
-            image_bytes = get_backend().read_bytes(sample.image_path)
-        except FileNotFoundError:
-            self._mark_item_error(db, item, job, "Sample image is missing")
-            return
-
-        # Throttle + run with retries on 429.
-        max_concurrent = getattr(adapter, "max_concurrent", 1)
-        min_interval = float(getattr(adapter, "min_interval_s", 1.0))
-        adapter_kind = adapter.adapter_kind
-        sem = self._semaphore_for(adapter_kind, max_concurrent)
-
-        with sem:
-            try:
-                result = self._call_with_retry(
-                    adapter=adapter,
-                    image_bytes=image_bytes,
-                    zone=zone,
-                    api_key=api_key,
-                    adapter_kind=adapter_kind,
-                    min_interval=min_interval,
-                )
-            except Exception as exc:
-                logger.exception("Teacher item %s failed", item.id)
-                self._mark_item_error(db, item, job, str(exc)[:500])
+            item = db.query(TeacherJobItem).filter(TeacherJobItem.id == item_id).first()
+            job = db.query(TeacherJob).filter(TeacherJob.id == job_id).first()
+            sample = db.query(Sample).filter(Sample.id == sample_id).first()
+            if item is None or job is None or sample is None:
                 return
 
-        # Apply result + bump aggregates in one commit.
-        apply_teacher_result_to_sample(
-            sample, result, source="hive_teacher_worker", job_id=str(job.id),
-        )
-        db.add(sample)
+            apply_teacher_result_to_sample(
+                sample, result, source="hive_teacher_worker", job_id=str(job.id),
+            )
+            db.add(sample)
 
-        item.status = "done"
-        item.error_message = None
-        item.detection_count = int(result["count"])
-        item.detection_score = f"{float(result['score']):.4f}"
-        item.cost_usd = result.get("cost_usd")
-        item.tokens_input = result.get("prompt_tokens")
-        item.tokens_output = result.get("completion_tokens")
-        item.processed_at = datetime.now(timezone.utc)
+            item.status = "done"
+            item.error_message = None
+            item.detection_count = int(result["count"])
+            item.detection_score = f"{float(result['score']):.4f}"
+            item.cost_usd = result.get("cost_usd")
+            item.tokens_input = result.get("prompt_tokens")
+            item.tokens_output = result.get("completion_tokens")
+            item.processed_at = datetime.now(timezone.utc)
 
-        job.processed += 1
-        job.succeeded += 1
-        if isinstance(item.cost_usd, (int, float)):
-            job.cost_usd = float(job.cost_usd or 0.0) + float(item.cost_usd)
-        if isinstance(item.tokens_input, int):
-            job.tokens_input = int(job.tokens_input or 0) + int(item.tokens_input)
-        if isinstance(item.tokens_output, int):
-            job.tokens_output = int(job.tokens_output or 0) + int(item.tokens_output)
-        db.add(item)
-        db.add(job)
-        db.commit()
-        self._maybe_finalize_job(db, job.id)
+            job.processed += 1
+            job.succeeded += 1
+            if isinstance(item.cost_usd, (int, float)):
+                job.cost_usd = float(job.cost_usd or 0.0) + float(item.cost_usd)
+            if isinstance(item.tokens_input, int):
+                job.tokens_input = int(job.tokens_input or 0) + int(item.tokens_input)
+            if isinstance(item.tokens_output, int):
+                job.tokens_output = int(job.tokens_output or 0) + int(item.tokens_output)
+            db.add(item)
+            db.add(job)
+            db.commit()
+            self._maybe_finalize_job(db, job.id)
+        finally:
+            db.close()
+
+    def _record_terminal_status(
+        self,
+        item_id: UUID,
+        job_id: UUID,
+        *,
+        status: str,
+        error_message: str | None,
+        succeeded: bool,
+        count_as_failure: bool = False,
+    ) -> None:
+        """Write a terminal item status (error/skipped) without holding the connection."""
+        db: Session = SessionLocal()
+        try:
+            item = db.query(TeacherJobItem).filter(TeacherJobItem.id == item_id).first()
+            job = db.query(TeacherJob).filter(TeacherJob.id == job_id).first()
+            if item is None or job is None:
+                return
+            self._mark_item_status(
+                db, item, job,
+                status=status,
+                error_message=error_message,
+                succeeded=succeeded,
+                count_as_failure=count_as_failure,
+            )
+        finally:
+            db.close()
 
     def _call_with_retry(
         self,
