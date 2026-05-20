@@ -23,7 +23,9 @@ class UserResponse(BaseModel):
     avatar_url: str | None = None
     has_password: bool
     openrouter_configured: bool = False
+    perceptron_configured: bool = False
     preferred_ai_model: str | None = None
+    preferred_teacher_model: str | None = None
     role: str
     is_active: bool
     created_at: datetime
@@ -42,7 +44,10 @@ class UpdateProfileRequest(BaseModel):
     new_password: str | None = None
     openrouter_api_key: str | None = None
     clear_openrouter_api_key: bool = False
+    perceptron_api_key: str | None = None
+    clear_perceptron_api_key: bool = False
     preferred_ai_model: str | None = None
+    preferred_teacher_model: str | None = None
 
 
 class AdminUpdateUserRequest(BaseModel):

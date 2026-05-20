@@ -14,14 +14,23 @@ export interface User {
 	avatar_url: string | null;
 	has_password: boolean;
 	openrouter_configured: boolean;
+	perceptron_configured: boolean;
 	preferred_ai_model: string | null;
+	preferred_teacher_model: string | null;
 	role: 'member' | 'reviewer' | 'admin';
 	is_active: boolean;
 	created_at: string;
 }
 
+export interface MachineOwnerSummary {
+	id: string;
+	display_name: string | null;
+	avatar_url: string | null;
+}
+
 export interface Machine {
 	id: string;
+	owner_id?: string;
 	name: string;
 	description: string | null;
 	token_prefix: string;
@@ -30,6 +39,7 @@ export interface Machine {
 	last_seen_at: string | null;
 	is_active: boolean;
 	created_at: string;
+	owner?: MachineOwnerSummary | null;
 }
 
 export interface MachineWithToken extends Machine {
@@ -70,9 +80,16 @@ export interface Sample {
 	resolved_at: string | null;
 }
 
+export interface SampleMachineSummary {
+	id: string;
+	name: string;
+	owner: MachineOwnerSummary | null;
+}
+
 export interface SampleDetail extends Sample {
 	has_full_frame: boolean;
 	has_overlay: boolean;
+	machine: SampleMachineSummary | null;
 }
 
 export interface SavedSampleAnnotationBody {
@@ -154,12 +171,16 @@ export interface SampleDiversitySourceRole {
 	unknown: number;
 	avg_score: number | null;
 	coverage: number;
+	coverage_base: number;
 	coverage_trend: number[];
 	eta_seconds: number | null;
 	last_uploaded_at: string | null;
 	buckets: SampleDiversityBuckets;
 	bucket_fills: SampleDiversityBucketFills;
 	bucket_targets: SampleDiversityBucketTargets;
+	machine_count: number;
+	machine_target: number;
+	machine_factor: number;
 }
 
 export interface SampleDiversityGroup {
@@ -168,12 +189,16 @@ export interface SampleDiversityGroup {
 	unknown: number;
 	avg_score: number | null;
 	coverage: number;
+	coverage_base: number;
 	coverage_trend: number[];
 	eta_seconds: number | null;
 	last_uploaded_at: string | null;
 	buckets: SampleDiversityBuckets;
 	bucket_fills: SampleDiversityBucketFills;
 	bucket_targets: SampleDiversityBucketTargets;
+	machine_count: number;
+	machine_target: number;
+	machine_factor: number;
 	by_source_role: SampleDiversitySourceRole[];
 }
 
@@ -181,6 +206,7 @@ export interface SampleDiversityResponse {
 	generated_at: string;
 	total: number;
 	default_target_per_bucket: number;
+	machine_target: number;
 	bucket_keys: string[];
 	groups: SampleDiversityGroup[];
 }
@@ -587,8 +613,9 @@ export const api = {
 	},
 
 	// Machines
-	getMachines() {
-		return request<Machine[]>('GET', '/api/machines');
+	getMachines(params: { scope?: 'mine' | 'all' | string } = {}) {
+		const qs = params.scope ? `?scope=${params.scope}` : '';
+		return request<Machine[]>('GET', `/api/machines${qs}`);
 	},
 	getMachineStats() {
 		return request<Record<string, MachineStats>>('GET', '/api/machines/stats');
@@ -618,6 +645,8 @@ export const api = {
 		source_role?: string;
 		capture_reason?: string;
 		review_status?: string;
+		max_age_hours?: number | string;
+		scope?: 'mine' | 'all' | string;
 	} = {}) {
 		const searchParams = new URLSearchParams();
 		for (const [key, val] of Object.entries(params)) {
@@ -628,12 +657,16 @@ export const api = {
 		const qs = searchParams.toString();
 		return request<PaginatedSamples>('GET', `/api/samples${qs ? '?' + qs : ''}`);
 	},
-	getSampleFilterOptions() {
-		return request<SampleFilterOptions>('GET', '/api/samples/filter-options');
+	getSampleFilterOptions(params: { scope?: 'mine' | 'all' | string } = {}) {
+		const qs = params.scope ? `?scope=${params.scope}` : '';
+		return request<SampleFilterOptions>('GET', `/api/samples/filter-options${qs}`);
 	},
-	getSampleDiversity(captureReason?: string) {
-		const qs = captureReason ? `?capture_reason=${encodeURIComponent(captureReason)}` : '';
-		return request<SampleDiversityResponse>('GET', `/api/samples/diversity${qs}`);
+	getSampleDiversity(captureReason?: string, params: { scope?: 'mine' | 'all' | string } = {}) {
+		const sp = new URLSearchParams();
+		if (captureReason) sp.set('capture_reason', captureReason);
+		if (params.scope) sp.set('scope', params.scope);
+		const qs = sp.toString();
+		return request<SampleDiversityResponse>('GET', `/api/samples/diversity${qs ? '?' + qs : ''}`);
 	},
 	getSample(id: string) {
 		return request<SampleDetail>('GET', `/api/samples/${id}`);
@@ -685,7 +718,10 @@ export const api = {
 		new_password?: string;
 		openrouter_api_key?: string | null;
 		clear_openrouter_api_key?: boolean;
+		perceptron_api_key?: string | null;
+		clear_perceptron_api_key?: boolean;
 		preferred_ai_model?: string | null;
+		preferred_teacher_model?: string | null;
 	}) {
 		return request<User>('PATCH', '/api/auth/me', data);
 	},
@@ -904,8 +940,9 @@ export const api = {
 	},
 
 	// Stats
-	getOverview() {
-		return request<StatsOverview>('GET', '/api/stats/overview');
+	getOverview(params: { scope?: 'mine' | 'all' | string } = {}) {
+		const qs = params.scope ? `?scope=${params.scope}` : '';
+		return request<StatsOverview>('GET', `/api/stats/overview${qs}`);
 	},
 
 	// API keys (personal access tokens)
@@ -956,6 +993,48 @@ export const api = {
 	},
 	deleteModel(id: string) {
 		return request<void>('DELETE', `/api/models/${id}`);
+	},
+
+	// Teacher (admin-only re-detection jobs)
+	createTeacherJob(filter: TeacherJobFilter, openrouter_model?: string) {
+		return request<TeacherJobSummary>('POST', '/api/admin/teacher/jobs', {
+			filter,
+			openrouter_model: openrouter_model ?? null
+		});
+	},
+	listTeacherJobs() {
+		return request<TeacherJobSummary[]>('GET', '/api/admin/teacher/jobs');
+	},
+	getTeacherJob(id: string) {
+		return request<TeacherJobDetail>('GET', `/api/admin/teacher/jobs/${id}`);
+	},
+	cancelTeacherJob(id: string) {
+		return request<TeacherJobSummary>('POST', `/api/admin/teacher/jobs/${id}/cancel`);
+	},
+	rerunSampleTeacher(sampleId: string, openrouter_model?: string) {
+		return request<SampleDetail>('POST', `/api/admin/teacher/samples/${sampleId}/rerun`, {
+			openrouter_model: openrouter_model ?? null
+		});
+	},
+	listTeacherModels() {
+		return request<TeacherModelInfo[]>('GET', '/api/admin/teacher/models');
+	},
+	getSampleTeacherPrompt(sampleId: string, openrouter_model: string) {
+		const qs = new URLSearchParams({ openrouter_model }).toString();
+		return request<{ model_id: string; adapter_kind: string; zone: string; prompt: string; is_default: boolean }>(
+			'GET',
+			`/api/admin/teacher/samples/${sampleId}/prompt?${qs}`
+		);
+	},
+	previewSampleTeacher(sampleId: string, openrouter_model: string, override_prompt?: string | null) {
+		return request<TeacherPreviewResponse>(
+			'POST',
+			`/api/admin/teacher/samples/${sampleId}/preview`,
+			{
+				openrouter_model,
+				override_prompt: override_prompt ?? null
+			}
+		);
 	}
 };
 
@@ -1010,4 +1089,81 @@ export interface PaginatedDetectionModels {
 	page: number;
 	page_size: number;
 	pages: number;
+}
+
+export interface TeacherJobFilter {
+	scope?: string;
+	machine_id?: string;
+	upload_session_id?: string;
+	source_role?: string;
+	capture_reason?: string;
+	review_status?: string;
+	max_age_hours?: number;
+}
+
+export interface TeacherJobSummary {
+	id: string;
+	owner_id: string;
+	status: 'pending' | 'running' | 'done' | 'cancelled';
+	openrouter_model: string;
+	total: number;
+	processed: number;
+	succeeded: number;
+	failed: number;
+	last_error: string | null;
+	cost_usd: number;
+	cost_usd_estimated_total: number | null;
+	tokens_input: number;
+	tokens_output: number;
+	created_at: string;
+	started_at: string | null;
+	finished_at: string | null;
+	filter: TeacherJobFilter | null;
+}
+
+export interface TeacherJobItemSummary {
+	id: string;
+	sample_id: string;
+	status: 'queued' | 'running' | 'done' | 'error' | 'skipped';
+	error_message: string | null;
+	detection_count: number | null;
+	processed_at: string | null;
+}
+
+export interface TeacherJobDetail extends TeacherJobSummary {
+	items: TeacherJobItemSummary[];
+	status_counts: Record<string, number>;
+	items_truncated: boolean;
+}
+
+export interface TeacherModelInfo {
+	model_id: string;
+	display_name: string;
+	adapter_kind: string;
+	notes: string;
+}
+
+export interface TeacherPreviewDetection {
+	kind: string;
+	description: string;
+	bbox: [number, number, number, number];
+	confidence: number;
+}
+
+export interface TeacherPreviewResponse {
+	model: string;
+	adapter_kind: string;
+	algorithm: string;
+	image_width: number;
+	image_height: number;
+	bboxes: [number, number, number, number][];
+	score: number;
+	count: number;
+	detections: TeacherPreviewDetection[];
+	cost_usd: number | null;
+	prompt_tokens: number | null;
+	completion_tokens: number | null;
+	elapsed_ms: number;
+	raw_text: string | null;
+	raw_annotations: Record<string, unknown>[] | null;
 }

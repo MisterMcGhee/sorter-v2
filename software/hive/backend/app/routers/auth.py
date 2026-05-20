@@ -264,9 +264,20 @@ def update_profile(
         normalized_key = data.openrouter_api_key.strip()
         current_user.openrouter_api_key_encrypted = encrypt_secret(normalized_key) if normalized_key else None
 
+    if data.clear_perceptron_api_key:
+        current_user.perceptron_api_key_encrypted = None
+
+    if data.perceptron_api_key is not None:
+        normalized_key = data.perceptron_api_key.strip()
+        current_user.perceptron_api_key_encrypted = encrypt_secret(normalized_key) if normalized_key else None
+
     if data.preferred_ai_model is not None:
         normalized_model = data.preferred_ai_model.strip()
         current_user.preferred_ai_model = normalized_model or None
+
+    if data.preferred_teacher_model is not None:
+        normalized_teacher = data.preferred_teacher_model.strip()
+        current_user.preferred_teacher_model = normalized_teacher or None
 
     if data.new_password is not None:
         if len(data.new_password) < 8:

@@ -26,6 +26,7 @@ SUPPORTED_OPENROUTER_MODELS = (
     DEFAULT_OPENROUTER_MODEL,
     "google/gemini-3.1-flash-lite-preview",
     "google/gemini-3.1-pro-preview",
+    "google/gemini-3.5-flash",
 )
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # Gemini-3 flash typically returns in 3-6s; pro can spike past 15s on dense
@@ -73,7 +74,12 @@ ZONE_PROMPTS: dict[str, tuple[str, str]] = {
     "classification_channel": (
         "The image comes from the machine's classification C-channel / C4 "
         "turntable. A top-down camera watches a rotating turntable and its "
-        "transfer/drop area while parts move toward classification and ejection.",
+        "transfer/drop area while parts move toward classification and ejection. "
+        "The C4 turntable is the round disc in the center of the frame, surrounded "
+        "by a bright white outer rim/ring. The feeder C-channel terminates at the "
+        "upper-left corner of the frame and drops parts ONTO the C4 disc — pieces "
+        "still queued inside that feeder channel can be visible at the very edge "
+        "of the frame, but they are NOT in the C4 work zone and must be ignored.",
         "Ignore the turntable surface, fixed dark center/opening, exit chute, "
         "outlet slot, rails, screws, lips, fixed black wedges/openings, LED "
         "glare, specular reflections, and shadows. In this camera view there "
@@ -85,7 +91,14 @@ ZONE_PROMPTS: dict[str, tuple[str, str]] = {
         "ignore those divider walls, their raised edges, and their linear "
         "shadows even when they look like long grey objects. These are machine "
         "geometry, not pieces. Only label loose physical items sitting on, "
-        "beside, or moving over that geometry.",
+        "beside, or moving over that geometry. "
+        "Critically: ONLY detect pieces that sit on the C4 rotor disc itself "
+        "(inside the round white outer ring). Any piece that is wholly or even "
+        "partially outside that disc — pieces still parked in the feeder C-channel "
+        "that's visible in the upper-left corner, pieces resting on the white rim, "
+        "pieces hanging off the edge — must be skipped entirely. A piece whose "
+        "bounding box would touch or cross the bright white rim/ring is OUT and "
+        "must not be returned. Err on the side of skipping anything near the rim.",
     ),
     "c_channel": (
         "The image comes from one of the machine's feed channels. A top-down "
@@ -98,7 +111,79 @@ ZONE_PROMPTS: dict[str, tuple[str, str]] = {
 }
 
 
+_CLASSIFICATION_CHANNEL_PROMPT = (
+    'You are detecting loose physical objects on a C4 classification turntable from a '
+    'top-down {width}x{height} camera image.\n\n'
+    'Task:\n'
+    'Return one tight bounding box for each loose physical item that is fully inside the '
+    'active C4 rotor disc. Detect LEGO/compatible plastic parts and foreign objects such '
+    'as screws, coins, stones, tape, hair, wrappers, fragments, tools, or unknown debris.\n\n'
+    'Active detection zone:\n'
+    '- The C4 rotor disc is the round disc in the center, bounded by the bright white '
+    'outer rim/ring.\n'
+    '- Detect ONLY objects whose entire bounding box lies inside the rotor disc, not '
+    'touching or crossing the bright white rim.\n'
+    '- Skip anything on the rim, crossing the rim, hanging off the edge, or outside the disc.\n'
+    '- Skip parts still queued in the feeder C-channel at the upper-left edge of the frame, '
+    'even if visible.\n'
+    '- Err on the side of skipping objects near the rim.\n'
+    '- Pixels outside the active crop may be solid white from a polygon mask; treat this '
+    'as out-of-frame, not background and not an object.\n\n'
+    'Ignore fixed machine geometry:\n'
+    'Do NOT detect the turntable surface, dark center/opening, outlet slot, exit chute, '
+    'rails, screws, lips, fixed black wedges/openings, LED glare, specular reflections, '
+    'shadows, or any fixed machine feature.\n\n'
+    'C4-specific ignore rules:\n'
+    '- Ignore the fixed lower-right exit opening/notch/cut-out, including its rim, dark '
+    'interior, straight edges, and shadows.\n'
+    '- Ignore the four or five evenly spaced radial divider walls/fins running from the '
+    'dark center toward the outer rim.\n'
+    '- Ignore the raised edges and long straight shadows of those divider walls/fins, even '
+    'if they look like long grey objects.\n\n'
+    'Detection rules:\n'
+    '- Detect every distinct loose physical item exactly once.\n'
+    '- Prefer splitting over grouping: if touching, overlapping, or stacked items are '
+    'visually separable by silhouette, edge, color/material, studs, holes, or visible '
+    'boundaries, return one box per item.\n'
+    '- If a cluster is fused or visually inseparable, return one box around the cluster.\n'
+    '- Include small, dark, shiny, transparent, translucent, low-contrast, partly occluded, '
+    'or edge-cropped items if they are clearly physical objects inside the disc.\n'
+    '- Ignore dust, scratches, stains, shadows, glare, and artifacts.\n'
+    '- Ignore detections with object-confidence below 0.5.\n'
+    '- Ignore objects whose bounding box is smaller than about 1% of image area unless they '
+    'are clearly real physical objects.\n'
+    '- Bounding boxes must be tight around the visible object extent, including glare that '
+    'belongs to the object itself.\n\n'
+    'Classification:\n'
+    '- kind = "lego" only if the item is confidently a LEGO/compatible plastic part.\n'
+    '- kind = "foreign" for screws, coins, stones, wrappers, debris, unknown objects, or '
+    'anything uncertain.\n'
+    '- confidence measures whether the item is a real object, not whether the class label '
+    'is certain.\n\n'
+    'Output JSON only:\n'
+    '{{\n'
+    '  "detections": [\n'
+    '    {{\n'
+    '      "kind": "lego|foreign",\n'
+    '      "description": "<short label>",\n'
+    '      "bbox": [y_min, x_min, y_max, x_max],\n'
+    '      "confidence": 0.0\n'
+    '    }}\n'
+    '  ]\n'
+    '}}\n\n'
+    'bbox:\n'
+    '- Normalized 0-1000 coordinates.\n'
+    '- Order: [y_min, x_min, y_max, x_max].\n\n'
+    'If no valid objects are visible, return:\n'
+    '{{"detections":[]}}'
+)
+
+
 def _gemini_prompt(width: int, height: int, zone: str = "classification_chamber") -> str:
+    # Compact, focused prompt for the C4 classification_channel zone. Keep in lock-step
+    # with the Hive copy in software/hive/backend/app/services/teacher_detector.py.
+    if zone == "classification_channel":
+        return _CLASSIFICATION_CHANNEL_PROMPT.format(width=width, height=height)
     context, ignore_rules = ZONE_PROMPTS.get(zone, ZONE_PROMPTS["classification_chamber"])
     return (
         f"{context}\n\n"

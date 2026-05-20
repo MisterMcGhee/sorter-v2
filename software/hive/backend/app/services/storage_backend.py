@@ -25,6 +25,9 @@ class StorageBackend(ABC):
     def exists(self, key: str) -> bool: ...
 
     @abstractmethod
+    def read_bytes(self, key: str) -> bytes: ...
+
+    @abstractmethod
     def serve(
         self,
         key: str,
@@ -65,6 +68,13 @@ class LocalStorageBackend(StorageBackend):
 
     def exists(self, key: str) -> bool:
         return self._full(key).exists()
+
+    def read_bytes(self, key: str) -> bytes:
+        full = self._full(key).resolve()
+        base = self.base.resolve()
+        if not str(full).startswith(str(base)):
+            raise FileNotFoundError(key)
+        return full.read_bytes()
 
     def serve(
         self,
@@ -144,6 +154,13 @@ class S3StorageBackend(StorageBackend):
             return True
         except Exception:
             return False
+
+    def read_bytes(self, key: str) -> bytes:
+        try:
+            obj = self.client.get_object(Bucket=self.bucket, Key=key)
+        except self.client.exceptions.NoSuchKey as exc:
+            raise FileNotFoundError(key) from exc
+        return obj["Body"].read()
 
     def serve(
         self,
