@@ -24,8 +24,14 @@ class JsonSortingProfile(SortingProfile):
         self.reload()
 
     def _loadData(self) -> None:
-        with open(self._sorting_profile_path, "r") as f:
-            data = json.load(f)
+        try:
+            with open(self._sorting_profile_path, "r") as f:
+                content = f.read()
+            if not content.strip():
+                return
+            data = json.loads(content)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return
         if "part_to_category" not in data:
             raise ValueError("sorting profile json missing part_to_category")
         self._loadRuntimeSortingProfile(data)
