@@ -626,8 +626,9 @@
 				</ul>
 			</div>
 
-			<!-- Machine -->
-			{#if machines.length > 0}
+			<!-- Machine — admin-only for now: members shouldn't be able to filter/browse by
+				 individual rigs (exposes other users' rig names + owners when scope=all). -->
+			{#if auth.user?.role === 'admin' && machines.length > 0}
 				<div>
 					<h3 class="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">Machine</h3>
 					<ul class="space-y-0.5">
