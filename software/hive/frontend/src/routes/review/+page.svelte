@@ -154,10 +154,41 @@
 	// Admin-only teacher rerun panel. Lets the reviewer try a different model on the
 	// currently displayed sample without leaving the queue — useful when boxes look bad
 	// and you want to A/B a fresh detection inline instead of skipping to /compare.
+	const REVIEW_TEACHER_MODEL_STORAGE_KEY = 'hive.review.teacherModel';
 	let teacherModels = $state<TeacherModelInfo[]>([]);
 	let teacherModelChoice = $state('');
 	let teacherRerunning = $state(false);
 	let teacherRerunError = $state<string | null>(null);
+	// Set once after the dropdown is populated so the localStorage-sync effect doesn't
+	// fire during initial prefill (which would overwrite a stale key with itself anyway,
+	// but lets us skip a noop write).
+	let teacherChoiceInitialized = $state(false);
+
+	function readStoredTeacherModel(): string | null {
+		if (typeof window === 'undefined') return null;
+		try {
+			return window.localStorage.getItem(REVIEW_TEACHER_MODEL_STORAGE_KEY);
+		} catch {
+			return null;
+		}
+	}
+
+	function writeStoredTeacherModel(value: string) {
+		if (typeof window === 'undefined' || !value) return;
+		try {
+			window.localStorage.setItem(REVIEW_TEACHER_MODEL_STORAGE_KEY, value);
+		} catch {
+			/* private mode / quota — silently drop */
+		}
+	}
+
+	// Persist the dropdown choice so the next visit reopens on the same model. Default
+	// resolution: stored value > user.preferred_teacher_model > first registered.
+	$effect(() => {
+		if (!teacherChoiceInitialized) return;
+		if (!teacherModelChoice) return;
+		writeStoredTeacherModel(teacherModelChoice);
+	});
 
 	onMount(() => {
 		void loadNext();
@@ -166,14 +197,16 @@
 				.listTeacherModels()
 				.then((m) => {
 					teacherModels = m;
-					// Prefill with the user's saved preference, otherwise the first registered
-					// model (Gemini 3 Flash today).
+					const stored = readStoredTeacherModel();
 					const preferred = auth.user?.preferred_teacher_model;
-					if (preferred && m.some((mod) => mod.model_id === preferred)) {
+					if (stored && m.some((mod) => mod.model_id === stored)) {
+						teacherModelChoice = stored;
+					} else if (preferred && m.some((mod) => mod.model_id === preferred)) {
 						teacherModelChoice = preferred;
 					} else if (m.length > 0) {
 						teacherModelChoice = m[0].model_id;
 					}
+					teacherChoiceInitialized = true;
 				})
 				.catch(() => {
 					/* ignore — panel just stays empty */
