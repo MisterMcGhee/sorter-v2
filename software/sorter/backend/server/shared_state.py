@@ -33,6 +33,8 @@ aruco_manager: Optional[ArucoConfigManager] = None
 vision_manager: Optional[Any] = None
 camera_service: Optional[Any] = None
 pulse_locks: Dict[str, threading.Lock] = {}
+distribution_no_bin_passthrough_approvals: set[str] = set()
+distribution_no_bin_passthrough_lock = threading.RLock()
 camera_device_preview_overrides: Dict[str, Dict[str, int | float | bool]] = {}
 camera_calibration_tasks: Dict[str, Dict[str, Any]] = {}
 camera_calibration_tasks_lock = threading.Lock()
@@ -161,6 +163,25 @@ def setVisionManager(mgr: Any) -> None:
     from server.classification_training import getClassificationTrainingManager
     getClassificationTrainingManager().setVisionManager(mgr)
     auto_calibrate()
+
+
+def approveDistributionNoBinPassthrough(piece_uuid: str | None) -> bool:
+    if not isinstance(piece_uuid, str) or not piece_uuid.strip():
+        return False
+    with distribution_no_bin_passthrough_lock:
+        distribution_no_bin_passthrough_approvals.add(piece_uuid.strip())
+    return True
+
+
+def consumeDistributionNoBinPassthrough(piece_uuid: str | None) -> bool:
+    if not isinstance(piece_uuid, str) or not piece_uuid.strip():
+        return False
+    key = piece_uuid.strip()
+    with distribution_no_bin_passthrough_lock:
+        if key not in distribution_no_bin_passthrough_approvals:
+            return False
+        distribution_no_bin_passthrough_approvals.discard(key)
+    return True
 
 
 # ---------------------------------------------------------------------------

@@ -1,8 +1,18 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { api, type PaginatedSamples, type Machine, type SampleFilterOptions, type StatsOverview } from '$lib/api';
+	import {
+		api,
+		type Machine,
+		type PaginatedSamples,
+		type SampleFilterOptions,
+		type StatsOverview,
+		type TeacherJobFilter,
+		type TeacherJobSummary
+	} from '$lib/api';
 	import { auth } from '$lib/auth.svelte';
+	import Modal from '$lib/components/Modal.svelte';
+	import { Button } from '$lib/components/primitives';
 	import SampleCard from '$lib/components/SampleCard.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 	import {
@@ -19,21 +29,33 @@
 
 	// Filters are derived from the URL so reload / share preserves them.
 	const listContext = $derived(readSampleListContext(page.url.searchParams));
+	// Default scope is "all" — the URL value is only honored when it is the explicit opt-in to
+	// "mine". Anything else (missing/empty/other) collapses to all, so a stray query param can't
+	// accidentally limit the view.
+	const filterScope = $derived(listContext.scope === 'mine' ? 'mine' : 'all');
 	const filterMachine = $derived(listContext.machine_id ?? '');
 	const filterStatus = $derived(listContext.review_status ?? '');
 	const filterSourceRole = $derived(listContext.source_role ?? '');
 	const filterCaptureReason = $derived(listContext.capture_reason ?? '');
+	const filterMaxAgeHours = $derived(listContext.max_age_hours ?? '');
 	const currentPage = $derived(listContext.page);
 	const pageSize = $derived(listContext.page_size);
+
+	const AGE_OPTIONS: { value: string; label: string }[] = [
+		{ value: '', label: 'All' },
+		{ value: '24', label: 'Last 24h' },
+		{ value: '168', label: 'Last 7 days' },
+		{ value: '720', label: 'Last 30 days' }
+	];
 
 	const filterContextQuery = $derived(sampleListContextQuery(page.url.searchParams));
 
 	const sourceRoleLabels: Record<string, string> = {
-		classification_channel: 'Classification Channel',
+		c_channel_1: 'C1',
+		c_channel_2: 'C2',
+		c_channel_3: 'C3',
+		classification_channel: 'C-Channel 4 (Classification)',
 		classification_chamber: 'Classification Chamber',
-		c_channel_1: 'C-Channel 1',
-		c_channel_2: 'C-Channel 2',
-		c_channel_3: 'C-Channel 3',
 		carousel: 'Carousel',
 		piece_crop: 'Piece Crop',
 		top: 'Top Camera',
@@ -48,17 +70,22 @@
 		unreviewed: 'bg-border'
 	};
 
-	const hasActiveFilters = $derived(filterMachine || filterStatus || filterSourceRole || filterCaptureReason);
+	const hasActiveFilters = $derived(
+		filterMachine || filterStatus || filterSourceRole || filterCaptureReason || filterMaxAgeHours
+	);
 
 	$effect(() => {
+		void filterScope;
 		void loadFilters();
 	});
 
 	$effect(() => {
+		void filterScope;
 		void filterMachine;
 		void filterStatus;
 		void filterSourceRole;
 		void filterCaptureReason;
+		void filterMaxAgeHours;
 		void currentPage;
 		void pageSize;
 		loadSamples();
@@ -85,10 +112,11 @@
 
 	async function loadFilters() {
 		try {
+			const scope = filterScope;
 			const [nextMachines, nextOptions, nextStats] = await Promise.all([
-				api.getMachines(),
-				api.getSampleFilterOptions(),
-				api.getOverview()
+				api.getMachines({ scope }),
+				api.getSampleFilterOptions({ scope }),
+				api.getOverview({ scope })
 			]);
 			machines = nextMachines;
 			filterOptions = nextOptions;
@@ -98,16 +126,38 @@
 		}
 	}
 
+	async function restoreActiveTeacherJob() {
+		if (auth.user?.role !== 'admin') return;
+		try {
+			const jobs = await api.listTeacherJobs();
+			const active = jobs.find((j) => j.status === 'pending' || j.status === 'running');
+			if (active) {
+				teacherJob = active;
+				startTeacherPolling();
+			}
+		} catch {
+			// ignore — restoring the banner is best-effort
+		}
+	}
+
+	$effect(() => {
+		// Reattach the banner on mount so reloading the page doesn't make a running job
+		// invisible. Polling kicks back in once we find one.
+		void restoreActiveTeacherJob();
+	});
+
 	async function loadSamples() {
 		loading = true;
 		try {
 			data = await api.getSamples({
 				page: currentPage,
 				page_size: pageSize,
+				scope: filterScope,
 				machine_id: filterMachine || undefined,
 				review_status: filterStatus || undefined,
 				source_role: filterSourceRole || undefined,
-				capture_reason: filterCaptureReason || undefined
+				capture_reason: filterCaptureReason || undefined,
+				max_age_hours: filterMaxAgeHours || undefined
 			});
 		} catch {
 			data = null;
@@ -115,6 +165,36 @@
 			loading = false;
 		}
 	}
+
+	// Group machines under their owner when looking at all samples so the sidebar reads as a
+	// roster of contributors instead of an undifferentiated machine list.
+	type MachineGroup = { ownerKey: string; ownerLabel: string; machines: Machine[] };
+	const machineGroups = $derived.by<MachineGroup[]>(() => {
+		if (filterScope === 'mine') {
+			return [{ ownerKey: '__self', ownerLabel: 'My machines', machines }];
+		}
+		const buckets = new Map<string, MachineGroup>();
+		const myId = auth.user?.id ?? null;
+		for (const machine of machines) {
+			const ownerId = machine.owner?.id ?? machine.owner_id ?? 'unknown';
+			const isSelf = myId !== null && ownerId === myId;
+			const label = isSelf
+				? 'Me'
+				: machine.owner?.display_name?.trim() || 'Unknown user';
+			const key = isSelf ? '__self' : ownerId;
+			let bucket = buckets.get(key);
+			if (!bucket) {
+				bucket = { ownerKey: key, ownerLabel: label, machines: [] };
+				buckets.set(key, bucket);
+			}
+			bucket.machines.push(machine);
+		}
+		return Array.from(buckets.values()).sort((a, b) => {
+			if (a.ownerKey === '__self') return -1;
+			if (b.ownerKey === '__self') return 1;
+			return a.ownerLabel.localeCompare(b.ownerLabel);
+		});
+	});
 
 	function prettifyToken(value: string): string {
 		return value
@@ -138,10 +218,6 @@
 		}, 0);
 	}
 
-	function captureReasonLabel(value: string): string {
-		return prettifyToken(value);
-	}
-
 	function goToPage(target: number) {
 		pushFilterUrl((sp) => {
 			if (target <= 1) sp.delete('page');
@@ -162,6 +238,19 @@
 		setFilterValue('review_status', next);
 	}
 
+	function setScope(next: 'mine' | 'all') {
+		if (next === filterScope) return;
+		// Switching scope changes the visible machine pool — drop the machine filter so we
+		// don't end up showing zero results because the previously selected machine isn't in
+		// the new scope.
+		pushFilterUrl((sp) => {
+			if (next === 'mine') sp.set('scope', 'mine');
+			else sp.delete('scope');
+			sp.delete('machine_id');
+			sp.delete('page');
+		});
+	}
+
 	function updateMachineFilter(value: string) {
 		setFilterValue('machine_id', value);
 	}
@@ -170,19 +259,131 @@
 		setFilterValue('source_role', value);
 	}
 
-	function updateCaptureReasonFilter(value: string) {
-		setFilterValue('capture_reason', value);
+	function updateAgeFilter(value: string) {
+		setFilterValue('max_age_hours', value);
 	}
 
 	function clearFilters() {
+		// 'scope' is a viewing context, not a per-search filter — keep it across "Clear all".
 		pushFilterUrl((sp) => {
 			sp.delete('machine_id');
 			sp.delete('review_status');
 			sp.delete('source_role');
 			sp.delete('capture_reason');
+			sp.delete('max_age_hours');
 			sp.delete('page');
 		});
 	}
+
+	// --- Teacher rerun (admin only) ------------------------------------------------
+	// Source roles the Hive teacher has prompt zones for. Must mirror SOURCE_ROLE_TO_ZONE
+	// in app/services/teacher_detector.py — anything else is filtered out server-side.
+	const TEACHER_SUPPORTED_ROLES = new Set([
+		'classification_chamber',
+		'carousel',
+		'classification_channel',
+		'c_channel',
+		'c_channel_1',
+		'c_channel_2',
+		'c_channel_3',
+		'c_channel_full'
+	]);
+
+	let teacherModalOpen = $state(false);
+	let teacherSubmitting = $state(false);
+	let teacherJob = $state<TeacherJobSummary | null>(null);
+	let teacherError = $state<string | null>(null);
+	let teacherPollTimer: ReturnType<typeof setInterval> | null = null;
+
+	const currentTeacherFilter = $derived<TeacherJobFilter>({
+		scope: filterScope,
+		machine_id: filterMachine || undefined,
+		review_status: filterStatus || undefined,
+		source_role: filterSourceRole || undefined,
+		capture_reason: filterCaptureReason || undefined,
+		// Age filter must travel with the job filter — otherwise the modal counts a 24h
+		// slice but the job picks up the full table.
+		max_age_hours: filterMaxAgeHours ? Number(filterMaxAgeHours) : undefined
+	});
+
+	const teacherEligibleCount = $derived.by(() => {
+		if (!data) return null;
+		// Approximate using what we have in the current page when no source_role filter is
+		// applied; if a source_role filter narrows the set, the server count == the visible
+		// total so we just return stats.total_samples shaped accordingly.
+		if (filterSourceRole) {
+			return TEACHER_SUPPORTED_ROLES.has(filterSourceRole) ? data.total : 0;
+		}
+		// Otherwise we don't know without a roundtrip — present the page-wide total and let
+		// the server reject unsupported roles silently.
+		return data.total;
+	});
+
+	async function openTeacherModal() {
+		teacherError = null;
+		teacherModalOpen = true;
+	}
+
+	async function submitTeacherJob() {
+		teacherSubmitting = true;
+		teacherError = null;
+		try {
+			const job = await api.createTeacherJob(currentTeacherFilter);
+			teacherJob = job;
+			teacherModalOpen = false;
+			startTeacherPolling();
+		} catch (err) {
+			const message =
+				err && typeof err === 'object' && 'error' in err
+					? String((err as { error: unknown }).error)
+					: 'Failed to start teacher job';
+			teacherError = message;
+		} finally {
+			teacherSubmitting = false;
+		}
+	}
+
+	function startTeacherPolling() {
+		stopTeacherPolling();
+		teacherPollTimer = setInterval(async () => {
+			if (!teacherJob) return;
+			try {
+				teacherJob = await api.getTeacherJob(teacherJob.id);
+				if (teacherJob.status === 'done' || teacherJob.status === 'cancelled') {
+					stopTeacherPolling();
+					// Refresh the samples list now that detections may have been overwritten.
+					await loadSamples();
+				}
+			} catch {
+				// transient errors are fine — keep polling
+			}
+		}, 3000);
+	}
+
+	function stopTeacherPolling() {
+		if (teacherPollTimer !== null) {
+			clearInterval(teacherPollTimer);
+			teacherPollTimer = null;
+		}
+	}
+
+	async function cancelTeacherJob() {
+		if (!teacherJob) return;
+		try {
+			teacherJob = await api.cancelTeacherJob(teacherJob.id);
+		} catch {
+			// ignore — UI keeps showing latest known state
+		}
+	}
+
+	function dismissTeacherJob() {
+		stopTeacherPolling();
+		teacherJob = null;
+	}
+
+	$effect(() => {
+		return () => stopTeacherPolling();
+	});
 </script>
 
 <svelte:head>
@@ -206,19 +407,137 @@
 			</svg>
 			Diversity
 		</a>
-		{#if auth.isReviewer}
+		{#if auth.user?.role === 'admin'}
 			<a
-				href="/review"
+				href="/admin/teacher-jobs"
+				class="inline-flex items-center gap-2 border border-border bg-white px-4 py-2 text-sm font-medium text-text hover:bg-bg"
+				title="See all running and past Gemini teacher jobs."
+			>
+				<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 0 1 0 3.75H5.625a1.875 1.875 0 0 1 0-3.75Z" />
+				</svg>
+				Jobs
+			</a>
+			<button
+				type="button"
+				onclick={openTeacherModal}
+				class="inline-flex items-center gap-2 border border-border bg-white px-4 py-2 text-sm font-medium text-text hover:bg-bg"
+				title="Re-run the Gemini teacher across samples matching the current filter. Overwrites detection_bboxes and resets review status."
+			>
+				<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" />
+				</svg>
+				Re-run teacher
+			</button>
+		{/if}
+		{#if auth.isReviewer}
+			{@const reviewHref = (() => {
+				// Forward the same sidebar filters to the review queue so the reviewer drains
+				// only the slice they have selected (e.g. "C-Channel 4, last 24h"). Empty
+				// values are omitted so a plain click with no filter behaves as before.
+				const sp = new URLSearchParams();
+				if (filterScope === 'mine') sp.set('scope', 'mine');
+				if (filterMachine) sp.set('machine_id', filterMachine);
+				if (filterSourceRole) sp.set('source_role', filterSourceRole);
+				if (filterCaptureReason) sp.set('capture_reason', filterCaptureReason);
+				if (filterMaxAgeHours) sp.set('max_age_hours', filterMaxAgeHours);
+				// review_status filter doesn't make sense — the queue only serves unreviewed
+				// + in_review samples anyway.
+				const qs = sp.toString();
+				return qs ? `/review?${qs}` : '/review';
+			})()}
+			<a
+				href={reviewHref}
 				class="inline-flex items-center gap-2 bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-hover"
+				title={hasActiveFilters ? 'Review only the samples matching the current filter' : 'Open the full review queue'}
 			>
 				<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
 					<path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
 				</svg>
-				Review Samples
+				Review {hasActiveFilters ? 'filtered' : 'Samples'}
 			</a>
 		{/if}
 	</div>
 </div>
+
+{#if teacherJob}
+	{@const job = teacherJob}
+	{@const pct = job.total > 0 ? Math.round((job.processed / job.total) * 100) : 0}
+	<div class="mb-4 border border-border bg-white">
+		<div class="flex items-center justify-between gap-3 border-b border-border px-4 py-2.5">
+			<div class="flex items-center gap-2 text-xs">
+				<span class="font-semibold text-text">Teacher job</span>
+				<span class="text-text-muted">{job.openrouter_model}</span>
+				<span class="tabular-nums text-text">{job.processed}/{job.total}</span>
+				<span class="text-text-muted">
+					({job.succeeded} ok{job.failed > 0 ? ` · ${job.failed} failed` : ''})
+				</span>
+				<span
+					class="tabular-nums text-text-muted"
+					title="Real billed cost so far / projected total based on running average."
+				>
+					· {job.cost_usd === 0 ? '$0.00' : (Math.abs(job.cost_usd) < 0.01 ? `$${job.cost_usd.toFixed(4)}` : `$${job.cost_usd.toFixed(2)}`)}
+					{#if job.cost_usd_estimated_total != null && (job.status === 'pending' || job.status === 'running')}
+						{@const est = job.cost_usd_estimated_total}
+						/ est. {est === 0 ? '$0.00' : (Math.abs(est) < 0.01 ? `$${est.toFixed(4)}` : `$${est.toFixed(2)}`)}
+					{/if}
+				</span>
+				<span class="text-text-muted">· {job.status}</span>
+			</div>
+			<div class="flex items-center gap-3">
+				<a href={`/admin/teacher-jobs/${job.id}`} class="text-xs text-primary hover:underline">
+					Open details →
+				</a>
+				<a href="/admin/teacher-jobs" class="text-xs text-text-muted hover:text-primary">
+					All jobs
+				</a>
+				{#if job.status === 'pending' || job.status === 'running'}
+					<button type="button" onclick={cancelTeacherJob} class="text-xs text-text-muted hover:text-primary">
+						Cancel
+					</button>
+				{:else}
+					<button type="button" onclick={dismissTeacherJob} class="text-xs text-text-muted hover:text-text">
+						Dismiss
+					</button>
+				{/if}
+			</div>
+		</div>
+		<div class="h-1.5 bg-bg">
+			<div
+				class="h-full transition-[width] duration-300 {job.status === 'cancelled' ? 'bg-border' : 'bg-primary'}"
+				style="width: {pct}%"
+			></div>
+		</div>
+		{#if job.last_error}
+			<div class="px-4 py-2 text-[11px] text-warning">Last error: {job.last_error}</div>
+		{/if}
+	</div>
+{/if}
+
+<Modal open={teacherModalOpen} title="Re-run Gemini teacher" onclose={() => { teacherModalOpen = false; }}>
+	<div class="space-y-4 text-sm">
+		<p class="text-text">
+			Run the Gemini detector across <span class="font-semibold">{teacherEligibleCount ?? '…'}</span>
+			sample{teacherEligibleCount === 1 ? '' : 's'} matching the current filter.
+			Unsupported source roles (no prompt zone) are skipped.
+		</p>
+		<ul class="space-y-1 text-xs text-text-muted">
+			<li>• Overwrites <code>detection_bboxes</code>, <code>detection_count</code> and <code>detection_score</code>.</li>
+			<li>• Resets <code>review_status</code> to <em>unreviewed</em> so the new boxes go through review again.</li>
+			<li>• Uses the OpenRouter API key from your profile.</li>
+			<li>• Rate-limited to ~1 sample / second to respect Gemini's per-key quota.</li>
+		</ul>
+		{#if teacherError}
+			<div class="border border-warning-strong bg-warning-bg px-3 py-2 text-xs text-warning-strong">{teacherError}</div>
+		{/if}
+		<div class="flex justify-end gap-2">
+			<Button variant="secondary" onclick={() => { teacherModalOpen = false; }}>Cancel</Button>
+			<Button variant="primary" loading={teacherSubmitting} onclick={submitTeacherJob}>
+				Start job
+			</Button>
+		</div>
+	</div>
+</Modal>
 
 <!-- Stats bar -->
 {#if stats && stats.total_samples > 0}
@@ -276,6 +595,29 @@
 				</button>
 			{/if}
 
+			<!-- Scope -->
+			<div>
+				<h3 class="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">Scope</h3>
+				<ul class="space-y-0.5">
+					<li>
+						<button
+							onclick={() => setScope('all')}
+							class="w-full px-2 py-1 text-left text-xs {filterScope === 'all' ? 'bg-primary-light font-medium text-primary' : 'text-text hover:bg-bg'}"
+						>
+							All samples
+						</button>
+					</li>
+					<li>
+						<button
+							onclick={() => setScope('mine')}
+							class="w-full px-2 py-1 text-left text-xs {filterScope === 'mine' ? 'bg-primary-light font-medium text-primary' : 'text-text hover:bg-bg'}"
+						>
+							My samples
+						</button>
+					</li>
+				</ul>
+			</div>
+
 			<!-- Status -->
 			<div>
 				<h3 class="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">Status</h3>
@@ -300,8 +642,9 @@
 				</ul>
 			</div>
 
-			<!-- Machine -->
-			{#if machines.length > 0}
+			<!-- Machine — admin-only for now: members shouldn't be able to filter/browse by
+				 individual rigs (exposes other users' rig names + owners when scope=all). -->
+			{#if auth.user?.role === 'admin' && machines.length > 0}
 				<div>
 					<h3 class="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">Machine</h3>
 					<ul class="space-y-0.5">
@@ -313,15 +656,23 @@
 								All
 							</button>
 						</li>
-						{#each machines as machine (machine.id)}
-							<li>
-								<button
-									onclick={() => updateMachineFilter(String(machine.id))}
-									class="w-full truncate px-2 py-1 text-left text-xs {filterMachine === String(machine.id) ? 'bg-primary-light font-medium text-primary' : 'text-text hover:bg-bg'}"
-								>
-									{machine.name}
-								</button>
-							</li>
+						{#each machineGroups as group (group.ownerKey)}
+							{#if filterScope === 'all'}
+								<li class="px-2 pt-2 text-[10px] uppercase tracking-wider text-text-muted">
+									{group.ownerLabel}
+								</li>
+							{/if}
+							{#each group.machines as machine (machine.id)}
+								<li>
+									<button
+										onclick={() => updateMachineFilter(String(machine.id))}
+										class="w-full truncate px-2 py-1 text-left text-xs {filterMachine === String(machine.id) ? 'bg-primary-light font-medium text-primary' : 'text-text hover:bg-bg'}"
+										title={machine.owner?.display_name ? `${machine.owner.display_name} / ${machine.name}` : machine.name}
+									>
+										{machine.name}
+									</button>
+								</li>
+							{/each}
 						{/each}
 					</ul>
 				</div>
@@ -356,32 +707,22 @@
 				</div>
 			{/if}
 
-			<!-- Capture Reason -->
-			{#if filterOptions.capture_reasons.length > 0}
-				<div>
-					<h3 class="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">Capture Reason</h3>
-					<ul class="space-y-0.5">
+			<!-- Age (upload time) -->
+			<div>
+				<h3 class="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">Age</h3>
+				<ul class="space-y-0.5">
+					{#each AGE_OPTIONS as opt (opt.value)}
 						<li>
 							<button
-								onclick={() => updateCaptureReasonFilter('')}
-								class="w-full px-2 py-1 text-left text-xs {filterCaptureReason === '' ? 'bg-primary-light font-medium text-primary' : 'text-text hover:bg-bg'}"
+								onclick={() => updateAgeFilter(opt.value)}
+								class="w-full px-2 py-1 text-left text-xs {filterMaxAgeHours === opt.value ? 'bg-primary-light font-medium text-primary' : 'text-text hover:bg-bg'}"
 							>
-								All
+								{opt.label}
 							</button>
 						</li>
-						{#each filterOptions.capture_reasons as captureReason (captureReason)}
-							<li>
-								<button
-									onclick={() => updateCaptureReasonFilter(captureReason)}
-									class="w-full px-2 py-1 text-left text-xs {filterCaptureReason === captureReason ? 'bg-primary-light font-medium text-primary' : 'text-text hover:bg-bg'}"
-								>
-									{captureReasonLabel(captureReason)}
-								</button>
-							</li>
-						{/each}
-					</ul>
-				</div>
-			{/if}
+					{/each}
+				</ul>
+			</div>
 		</div>
 	</aside>
 

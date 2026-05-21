@@ -91,6 +91,7 @@ def publish_channel_exit_stuck_incident(
     overlap_threshold: float,
     stall_ms: int,
     downstream_blocked: bool,
+    center_crossed: bool = False,
 ) -> bool:
     if _incident_handling_off(CHANNEL_EXIT_STUCK_INCIDENT_KIND):
         return False
@@ -125,9 +126,10 @@ def publish_channel_exit_stuck_incident(
             "triggered_at": time.time(),
             "overlap_ratio": float(overlap_ratio),
             "overlap_threshold": float(overlap_threshold),
+            "center_crossed": bool(center_crossed),
             "stall_ms": int(stall_ms),
             "downstream_blocked": bool(downstream_blocked),
-            "rule": "bbox_exit_overlap_ge_four_fifths_for_stall",
+            "rule": "bbox_exit_overlap_ge_four_fifths_or_center_crossed_for_stall",
             "amplitude_output_deg": EXIT_RELEASE_DEFAULT_OUTPUT_DEG,
             "cycles": EXIT_RELEASE_DEFAULT_CYCLES,
             "microsteps_per_second": EXIT_RELEASE_DEFAULT_SPEED_MICROSTEPS_PER_SECOND,

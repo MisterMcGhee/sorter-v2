@@ -241,16 +241,20 @@ class Coordinator:
         runtime_stats.clearActiveIncident(kind=str(active.get("kind") or "exit_stuck"))
         return True
 
-    def _channel_exit_overlap(self, channel: str) -> float | None:
+    def _channel_exit_state(self, channel: str) -> tuple[float, bool] | None:
         try:
             detections = self.vision.getFeederHeatmapDetections()
             analysis = analyzeFeederChannels(self.gc, detections)
         except Exception as exc:
             self.logger.warning(f"Coordinator: could not verify {channel} exit release: {exc}")
             return None
-        key = "ch2_exit_overlap_max" if channel == "c2" else "ch3_exit_overlap_max"
+        overlap_key = "ch2_exit_overlap_max" if channel == "c2" else "ch3_exit_overlap_max"
+        center_key = "ch2_exit_center_crossed" if channel == "c2" else "ch3_exit_center_crossed"
         try:
-            return float(getattr(analysis, key, 0.0) or 0.0)
+            return (
+                float(getattr(analysis, overlap_key, 0.0) or 0.0),
+                bool(getattr(analysis, center_key, False)),
+            )
         except Exception:
             return None
 
@@ -339,11 +343,18 @@ class Coordinator:
                 return
 
             time.sleep(0.35)
-            overlap = self._channel_exit_overlap(channel)
-            if overlap is not None and overlap < EXIT_WIGGLE_OVERLAP_THRESHOLD:
+            exit_state = self._channel_exit_state(channel)
+            overlap = exit_state[0] if exit_state is not None else None
+            center_crossed = exit_state[1] if exit_state is not None else False
+            if (
+                exit_state is not None
+                and overlap < EXIT_WIGGLE_OVERLAP_THRESHOLD
+                and not center_crossed
+            ):
                 self.logger.info(
                     f"Coordinator: {channel} exit-stuck auto release solved after "
-                    f"attempt {attempt}/{max_attempts} (overlap {overlap:.2f})"
+                    f"attempt {attempt}/{max_attempts} "
+                    f"(overlap {overlap:.2f}, center_crossed={center_crossed})"
                 )
                 self._clear_channel_exit_incident_if_current(incident)
                 return
@@ -359,6 +370,7 @@ class Coordinator:
                     last_test_ok=True,
                     last_test_strokes_completed=strokes_completed,
                     exit_overlap_after_release=overlap,
+                    exit_center_crossed_after_release=center_crossed,
                 )
                 continue
 
@@ -373,6 +385,7 @@ class Coordinator:
                 last_test_ok=True,
                 last_test_strokes_completed=strokes_completed,
                 exit_overlap_after_release=overlap,
+                exit_center_crossed_after_release=center_crossed,
                 operator_message="Automatic exit release tried 3 times and the piece still appears stuck. Please intervene manually.",
             )
 

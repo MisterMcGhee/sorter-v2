@@ -26,6 +26,9 @@
 		updated_at: string;
 		variant_runtimes: string[];
 		installed: boolean;
+		target_id?: string | null;
+		target_url?: string | null;
+		target_name?: string | null;
 	};
 	type ModelVariant = {
 		id: string;
@@ -83,7 +86,11 @@
 	const PAGE_SIZE = 20;
 
 	let targets = $state<HiveTarget[]>([]);
-	let selectedTargetId = $state<string | null>(null);
+	// selectedTargetId is no longer used for browsing — the Browse Hive view
+	// aggregates across every configured target and each row carries its own
+	// target_id. We still load `targets` to surface the "no Hive configured"
+	// empty state and use it as a fallback for resolving the display name of
+	// installed models (see targetName()).
 	let targetsLoading = $state(true);
 	let targetsError = $state<string | null>(null);
 	let targetsMissing = $state(false);
@@ -196,7 +203,6 @@
 			if (res.status === 400) {
 				targetsMissing = true;
 				targets = [];
-				selectedTargetId = null;
 				return;
 			}
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -204,31 +210,22 @@
 			targets = Array.isArray(data) ? data : [];
 			if (targets.length === 0) {
 				targetsMissing = true;
-				selectedTargetId = null;
-			} else if (!selectedTargetId || !targets.some((t) => t.id === selectedTargetId)) {
-				selectedTargetId = targets[0].id;
 			}
 		} catch (e: any) {
 			targetsError = e?.message ?? 'Failed to load Hive targets.';
 			targets = [];
-			selectedTargetId = null;
 		} finally {
 			targetsLoading = false;
 		}
 	}
 
 	async function loadModels() {
-		if (!selectedTargetId) {
-			models = [];
-			modelsTotal = 0;
-			modelsPages = 1;
-			return;
-		}
 		loadingModels = true;
 		modelsError = null;
 		try {
 			const params = new URLSearchParams();
-			params.set('target_id', selectedTargetId);
+			// No target_id → backend aggregates across every configured Hive
+			// and tags each row with target_id/target_url/target_name.
 			if (query.trim()) params.set('q', query.trim());
 			if (scopeFilter.trim()) params.set('scope', scopeFilter.trim());
 			if (runtimeFilter) params.set('runtime', runtimeFilter);
@@ -373,13 +370,13 @@
 		page = 1;
 	}
 
-	async function ensureDetail(modelId: string): Promise<ModelDetail | null> {
-		if (!selectedTargetId) return null;
+	async function ensureDetail(modelId: string, targetId: string | null | undefined): Promise<ModelDetail | null> {
+		if (!targetId) return null;
 		const cached = detailCache.get(modelId);
 		if (cached) return cached;
 		try {
 			const params = new URLSearchParams();
-			params.set('target_id', selectedTargetId);
+			params.set('target_id', targetId);
 			const res = await fetch(
 				`${backendHttpBaseUrl}/api/hive/models/${encodeURIComponent(modelId)}?${params.toString()}`
 			);
@@ -394,12 +391,13 @@
 	}
 
 	async function handleDownload(model: ModelSummary) {
-		if (!selectedTargetId) return;
+		const targetId = model.target_id;
+		if (!targetId) return;
 		actionError = null;
 		downloadingModelId = model.id;
 		try {
 			const params = new URLSearchParams();
-			params.set('target_id', selectedTargetId);
+			params.set('target_id', targetId);
 			params.set('all', 'true');
 			const res = await fetch(
 				`${backendHttpBaseUrl}/api/hive/models/${encodeURIComponent(model.id)}/download?${params.toString()}`,
@@ -539,7 +537,7 @@
 	}
 
 	$effect(() => {
-		if (tab === 'available' && selectedTargetId) {
+		if (tab === 'available') {
 			// Track dependencies so the effect re-runs when they change.
 			void query;
 			void scopeFilter;
@@ -601,6 +599,16 @@
 		return targets.find((t) => t.id === id)?.name ?? id;
 	}
 
+	function targetUrl(id: string | null | undefined): string | null {
+		if (!id) return null;
+		return targets.find((t) => t.id === id)?.url ?? null;
+	}
+
+	function hostFromUrl(url: string | null | undefined): string | null {
+		if (!url) return null;
+		return url.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+	}
+
 	function shortSha(sha: string | null | undefined): string {
 		if (!sha) return '—';
 		return `${sha.slice(0, 12)}…`;
@@ -658,24 +666,6 @@
 				</nav>
 
 				<div class="flex items-center gap-2 px-2 py-2">
-					{#if targets.length > 1}
-						<label class="text-xs uppercase tracking-wider text-text-muted" for="hive-target-select">
-							Target
-						</label>
-						<select
-							id="hive-target-select"
-							bind:value={selectedTargetId}
-							class="border border-border bg-surface px-2 py-1 text-sm text-text"
-						>
-							{#each targets as t (t.id)}
-								<option value={t.id}>{t.name}</option>
-							{/each}
-						</select>
-					{:else if targets.length === 1}
-						<span class="text-xs text-text-muted">
-							Target <span class="font-mono">{targets[0].name}</span>
-						</span>
-					{/if}
 					<Tooltip text="Refresh current view">
 						<Button
 							variant="ghost"
@@ -783,12 +773,25 @@
 					<ul class="flex flex-col">
 						{#each models as model, idx (model.id)}
 							{@const jobActive = activeJobModelIds.has(model.id)}
+							{@const browseHref = model.target_url ? `${model.target_url.replace(/\/+$/, '')}/models/${model.id}` : null}
 							<li
 								class={`flex flex-wrap items-center justify-between gap-3 border border-border bg-surface px-4 py-3 ${idx > 0 ? '-mt-px' : ''}`}
 							>
 								<div class="min-w-0 flex-1">
 									<div class="flex flex-wrap items-center gap-2">
-										<span class="font-mono text-sm font-medium text-text">{model.name}</span>
+										{#if browseHref}
+											<a
+												href={browseHref}
+												target="_blank"
+												rel="noopener noreferrer"
+												class="font-mono text-sm font-medium text-text hover:text-primary hover:underline"
+												title={`Open in source Hive: ${browseHref}`}
+											>
+												{model.name}
+											</a>
+										{:else}
+											<span class="font-mono text-sm font-medium text-text">{model.name}</span>
+										{/if}
 										{#if model.installed}
 											<span class="inline-flex items-center gap-1 bg-text-muted/20 px-2 py-0.5 text-xs font-semibold uppercase tracking-wider text-text">
 												<CheckCircle2 size={10} />
@@ -815,12 +818,18 @@
 												published {formatRelativeAge(model.published_at) ?? formatDate(model.published_at)}
 											</span>
 										</Tooltip>
+										{#if model.target_url}
+											<span aria-hidden="true">·</span>
+											<span class="font-mono text-text-muted/80" title={`Source Hive: ${model.target_url}`}>
+												{model.target_url.replace(/^https?:\/\//, '')}
+											</span>
+										{/if}
 									</div>
 								</div>
 								<Button
 									variant={model.installed ? 'secondary' : 'primary'}
 									size="sm"
-									disabled={jobActive || downloadingModelId === model.id || !selectedTargetId}
+									disabled={jobActive || downloadingModelId === model.id || !model.target_id}
 									loading={downloadingModelId === model.id || jobActive}
 									onclick={() => void handleDownload(model)}
 								>
@@ -911,15 +920,29 @@
 							{@const ageIso = entry.trained_at ?? entry.downloaded_at}
 							{@const ageRelative = formatRelativeAge(ageIso)}
 							{@const isCompatible = entry.compatible !== false}
+							{@const hiveBase = targetUrl(entry.target_id)}
+							{@const detailHref = !entry.bundled && hiveBase ? `${hiveBase.replace(/\/+$/, '')}/models/${entry.model_id}` : null}
 							<li
 								class={`border ${idx > 0 ? '-mt-px' : ''} ${isActive ? 'border-success bg-success/[0.06]' : !isCompatible ? 'border-border bg-bg opacity-70' : 'border-border bg-surface'}`}
 							>
 								<div class="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
 									<div class="min-w-0 flex-1">
 										<div class="flex flex-wrap items-center gap-2">
-											<span class="font-mono text-sm font-medium text-text">
-												{entry.name}
-											</span>
+											{#if detailHref}
+												<a
+													href={detailHref}
+													target="_blank"
+													rel="noopener noreferrer"
+													class="font-mono text-sm font-medium text-text hover:text-primary hover:underline"
+													title={`Open in source Hive: ${detailHref}`}
+												>
+													{entry.name}
+												</a>
+											{:else}
+												<span class="font-mono text-sm font-medium text-text">
+													{entry.name}
+												</span>
+											{/if}
 											{#if entry.bundled}
 												<span class="inline-flex items-center bg-text-muted/20 px-2 py-0.5 text-xs font-semibold uppercase tracking-wider text-text">
 													Bundled
@@ -947,6 +970,15 @@
 														{ageRelative}
 													</span>
 												</Tooltip>
+											{/if}
+											{#if entry.bundled}
+												<span aria-hidden="true">·</span>
+												<span>bundled</span>
+											{:else if hostFromUrl(targetUrl(entry.target_id)) }
+												<span aria-hidden="true">·</span>
+												<span class="font-mono text-text-muted/80" title={`From Hive: ${targetUrl(entry.target_id)}`}>
+													{hostFromUrl(targetUrl(entry.target_id))}
+												</span>
 											{/if}
 										</div>
 									</div>
@@ -1028,8 +1060,10 @@
 													: `${formatDate(entry.downloaded_at)} (${formatRelativeAge(entry.downloaded_at) ?? '—'})`}
 											</dd>
 											{#if !entry.bundled}
-												<dt class="text-text-muted">Target</dt>
-												<dd class="text-text">{targetName(entry.target_id ?? '')}</dd>
+												<dt class="text-text-muted">Hive</dt>
+												<dd class="break-all font-mono text-text">
+													{targetUrl(entry.target_id) ?? targetName(entry.target_id ?? '')}
+												</dd>
 											{/if}
 											<dt class="text-text-muted">Algorithm ID</dt>
 											<dd class="break-all font-mono text-text">{algorithmId}</dd>

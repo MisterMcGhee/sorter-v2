@@ -337,6 +337,28 @@
 		}
 	}
 
+	let teacherRerunning = $state(false);
+	let teacherRerunError = $state<string | null>(null);
+
+	async function handleTeacherRerun() {
+		if (!sample || teacherRerunning) return;
+		teacherRerunning = true;
+		teacherRerunError = null;
+		try {
+			sample = await api.rerunSampleTeacher(sample.id);
+			// The teacher resets review state, so existing review history is no longer
+			// accurate for these boxes — drop it so the panel reflects the fresh slate.
+			reviews = [];
+		} catch (err) {
+			teacherRerunError =
+				err && typeof err === 'object' && 'error' in err
+					? String((err as { error: unknown }).error)
+					: 'Teacher rerun failed';
+		} finally {
+			teacherRerunning = false;
+		}
+	}
+
 	function handleClassificationSaved(payload: SampleClassificationPayload | null) {
 		if (!sample) return;
 		const nextExtra = { ...(sample.extra_metadata ?? {}) };
@@ -447,8 +469,35 @@
 			{#if sample.review_count > 0}
 				<span class="text-xs text-text-muted">{sample.review_count} review{sample.review_count !== 1 ? 's' : ''}</span>
 			{/if}
+			{#if auth.isAdmin}
+				<div class="ml-1 flex items-center gap-1.5">
+					<a
+						href={`/samples/${sample.id}/compare`}
+						class="inline-flex items-center gap-1 border border-border bg-white px-3 py-1 text-xs font-medium text-text hover:bg-bg"
+						title="Run every supported teacher model on this sample and compare bounding boxes side-by-side."
+					>
+						Compare models
+					</a>
+					<Button
+						variant="secondary"
+						size="sm"
+						loading={teacherRerunning}
+						onclick={handleTeacherRerun}
+					>
+						{teacherRerunning ? 'Running teacher…' : 'Re-run teacher'}
+					</Button>
+					<Button variant="danger" size="sm" onclick={() => { showDeleteModal = true; }}>
+						Delete
+					</Button>
+				</div>
+			{/if}
 		</div>
 	</div>
+	{#if teacherRerunError && auth.isAdmin}
+		<div class="-mt-3 mb-4 border border-warning-strong bg-warning-bg px-3 py-2 text-xs text-warning-strong">
+			{teacherRerunError}
+		</div>
+	{/if}
 
 	<div class="grid gap-5 lg:grid-cols-[1fr_340px]">
 		<!-- Left: Image area -->
@@ -626,17 +675,6 @@
 				{shortId}
 			/>
 
-			<!-- Actions (admin only, minimal) -->
-			{#if auth.isAdmin}
-				<div class="pt-1">
-					<button
-						onclick={() => { showDeleteModal = true; }}
-						class="w-full px-3 py-2 text-xs text-text-muted hover:text-primary hover:bg-primary-light transition-colors"
-					>
-						Delete sample
-					</button>
-				</div>
-			{/if}
 		</div>
 	</div>
 

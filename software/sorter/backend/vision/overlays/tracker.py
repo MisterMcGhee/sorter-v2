@@ -56,7 +56,7 @@ def _label_color_for(track) -> tuple[int, int, int]:
     # the downstream channel toward the carousel.
     if track.handoff_from is not None:
         return COLOR_HANDOFF
-    if track.coasting:
+    if track.coasting or not bool(getattr(track, "motion_confirmed", True)):
         return COLOR_COASTING
     return COLOR_ACTIVE
 
@@ -187,5 +187,6 @@ class TrackOverlay:
                 "velocity_px_per_s": [float(velocity[0]), float(velocity[1])],
                 "coasting": bool(getattr(track, "coasting", False)),
                 "handoff_from": getattr(track, "handoff_from", None),
+                "motion_confirmed": bool(getattr(track, "motion_confirmed", True)),
             })
         return items

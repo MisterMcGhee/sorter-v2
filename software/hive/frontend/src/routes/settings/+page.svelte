@@ -94,13 +94,61 @@
 	let aiSaved = $state(false);
 	let aiSaving = $state(false);
 
+	// Perceptron (admin-only teacher path that bypasses OpenRouter)
+	let perceptronApiKey = $state('');
+	let perceptronError = $state<string | null>(null);
+	let perceptronSaved = $state(false);
+	let perceptronSaving = $state(false);
+
+	// Teacher pipeline defaults — separate from the AI chat model so an admin can choose
+	// a vision model (Perceptron, Gemini, etc.) without breaking the chat assistant.
+	let teacherModels = $state<{ model_id: string; display_name: string; adapter_kind: string }[]>([]);
+	let preferredTeacherModel = $state(auth.user?.preferred_teacher_model ?? '');
+	let teacherSettingError = $state<string | null>(null);
+	let teacherSettingSaved = $state(false);
+	let teacherSettingSaving = $state(false);
+
+	$effect(() => {
+		if (auth.user?.role === 'admin') {
+			void api
+				.listTeacherModels()
+				.then((m) => {
+					teacherModels = m;
+				})
+				.catch(() => {
+					/* ignore — non-blocking */
+				});
+		}
+	});
+
+	async function handleSaveTeacherModel() {
+		teacherSettingError = null;
+		teacherSettingSaved = false;
+		teacherSettingSaving = true;
+		try {
+			const updated = await api.updateProfile({
+				preferred_teacher_model: preferredTeacherModel || null
+			});
+			if (auth.user) {
+				auth.user.preferred_teacher_model = updated.preferred_teacher_model;
+			}
+			teacherSettingSaved = true;
+			setTimeout(() => { teacherSettingSaved = false; }, 3000);
+		} catch (e: any) {
+			teacherSettingError = e.error || 'Failed to save teacher model';
+		} finally {
+			teacherSettingSaving = false;
+		}
+	}
+
 	const aiModelOptions = [
 		'anthropic/claude-haiku-4-5',
 		'anthropic/claude-sonnet-4.6',
 		'anthropic/claude-3.7-sonnet',
 		'openai/gpt-5.4',
 		'google/gemini-3.1-pro-preview',
-		'google/gemini-3-flash-preview'
+		'google/gemini-3-flash-preview',
+		'google/gemini-3.5-flash'
 	];
 
 	async function handleSaveName() {
@@ -194,6 +242,48 @@
 			aiError = e.error || 'Failed to clear OpenRouter key';
 		} finally {
 			aiSaving = false;
+		}
+	}
+
+	async function handleSavePerceptronKey() {
+		perceptronError = null;
+		perceptronSaved = false;
+		perceptronSaving = true;
+		try {
+			const updated = await api.updateProfile({
+				perceptron_api_key: perceptronApiKey.trim() || undefined
+			});
+			if (auth.user) {
+				auth.user.perceptron_configured = updated.perceptron_configured;
+			}
+			perceptronApiKey = '';
+			perceptronSaved = true;
+			setTimeout(() => { perceptronSaved = false; }, 3000);
+		} catch (e: any) {
+			perceptronError = e.error || 'Failed to save Perceptron key';
+		} finally {
+			perceptronSaving = false;
+		}
+	}
+
+	async function handleClearPerceptronKey() {
+		perceptronError = null;
+		perceptronSaved = false;
+		perceptronSaving = true;
+		try {
+			const updated = await api.updateProfile({
+				clear_perceptron_api_key: true
+			});
+			if (auth.user) {
+				auth.user.perceptron_configured = updated.perceptron_configured;
+			}
+			perceptronApiKey = '';
+			perceptronSaved = true;
+			setTimeout(() => { perceptronSaved = false; }, 3000);
+		} catch (e: any) {
+			perceptronError = e.error || 'Failed to clear Perceptron key';
+		} finally {
+			perceptronSaving = false;
 		}
 	}
 
@@ -430,6 +520,114 @@
 		</div>
 
 		{#if auth.user.role === 'admin'}
+			<!-- Perceptron native API key (teacher-only, admin scope) -->
+			<div class="border border-border bg-white p-6">
+				<h2 class="mb-4 font-semibold text-text">Perceptron Teacher</h2>
+				<p class="mb-4 text-sm text-text-muted">
+					Used for the Perceptron Mk1 teacher path, which calls Perceptron's native API
+					directly instead of going through OpenRouter. Get a key at
+					<a href="https://docs.perceptron.inc" target="_blank" class="text-primary hover:underline">docs.perceptron.inc</a>.
+				</p>
+				<div class="mb-4 bg-bg p-3 text-sm text-text-muted">
+					Perceptron key:
+					<span class="font-medium text-text">
+						{auth.user.perceptron_configured ? 'configured' : 'not configured'}
+					</span>
+				</div>
+				<form
+					class="space-y-4"
+					onsubmit={(e) => { e.preventDefault(); handleSavePerceptronKey(); }}
+				>
+					<div>
+						<label for="perceptron-key" class="block text-sm text-text-muted">Perceptron API Key</label>
+						<input
+							id="perceptron-key"
+							type="password"
+							bind:value={perceptronApiKey}
+							placeholder={auth.user.perceptron_configured ? 'Leave blank to keep current key' : 'pk_...'}
+							class="mt-1 w-full border border-border px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+						/>
+						<p class="mt-1 text-xs text-text-muted">
+							Stored encrypted. Only used when running Perceptron Mk1 from the teacher compare/re-run flows.
+						</p>
+					</div>
+
+					{#if perceptronError}
+						<div class="bg-primary/8 p-3 text-sm text-primary">{perceptronError}</div>
+					{/if}
+					{#if perceptronSaved}
+						<div class="bg-success/10 p-3 text-sm text-success">Perceptron key saved.</div>
+					{/if}
+
+					<div class="flex flex-wrap gap-2">
+						<button
+							type="submit"
+							disabled={perceptronSaving}
+							class="bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
+						>
+							{perceptronSaving ? 'Saving...' : 'Save Perceptron Key'}
+						</button>
+						{#if auth.user.perceptron_configured}
+							<button
+								type="button"
+								onclick={handleClearPerceptronKey}
+								disabled={perceptronSaving}
+								class="border border-border px-4 py-2 text-sm font-medium text-text hover:bg-bg disabled:opacity-50"
+							>
+								Remove Key
+							</button>
+						{/if}
+					</div>
+				</form>
+			</div>
+
+			<!-- Default Teacher Model — separate from the AI Assistant chat model -->
+			<div class="border border-border bg-white p-6">
+				<h2 class="mb-4 font-semibold text-text">Default Teacher Model</h2>
+				<p class="mb-4 text-sm text-text-muted">
+					Used for re-running the Gemini/Perceptron/etc. teacher across samples. Separate
+					from the AI Assistant model above because vision detection and chat assistance use
+					different model families.
+				</p>
+				<form
+					class="space-y-4"
+					onsubmit={(e) => { e.preventDefault(); handleSaveTeacherModel(); }}
+				>
+					<div>
+						<label for="teacher-model" class="block text-sm text-text-muted">Default Teacher Model</label>
+						<select
+							id="teacher-model"
+							bind:value={preferredTeacherModel}
+							class="mt-1 w-full border border-border px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+						>
+							<option value="">— Use system default (Gemini 3 Flash) —</option>
+							{#each teacherModels as m (m.model_id)}
+								<option value={m.model_id}>{m.display_name} · [{m.adapter_kind}]</option>
+							{/each}
+						</select>
+						<p class="mt-1 text-xs text-text-muted">
+							Applies when you click "Re-run teacher" on a sample, start a backfill job, or
+							hit Run on the compare page without picking a model.
+						</p>
+					</div>
+
+					{#if teacherSettingError}
+						<div class="bg-primary/8 p-3 text-sm text-primary">{teacherSettingError}</div>
+					{/if}
+					{#if teacherSettingSaved}
+						<div class="bg-success/10 p-3 text-sm text-success">Default teacher model saved.</div>
+					{/if}
+
+					<button
+						type="submit"
+						disabled={teacherSettingSaving}
+						class="bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
+					>
+						{teacherSettingSaving ? 'Saving...' : 'Save Default Teacher Model'}
+					</button>
+				</form>
+			</div>
+
 			<!-- API keys -->
 			<div class="border border-border bg-surface p-6">
 				<h2 class="mb-1 font-semibold text-text">Personal Access Tokens</h2>

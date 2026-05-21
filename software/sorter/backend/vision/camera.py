@@ -18,6 +18,8 @@ from irl.config import (
 )
 from .types import CameraFrame
 
+CAPTURE_MODE_SETTLE_S = 2.0
+CAPTURE_EXPECTED_FRAME_FALLBACK_S = 10.0
 AUTO_CAMERA_CONTROL_KEYS = ("auto_exposure", "auto_white_balance", "autofocus")
 
 if platform.system() == "Darwin":
@@ -848,6 +850,8 @@ class CaptureThread:
         read_failures = 0
         next_open_attempt_at = 0.0
         previous_source: int | str | None = None
+        expected_frame_settle_until = 0.0
+        last_expected_frame_at = 0.0
         # Some UVC cameras (especially on Linux with MJPG) reset device controls
         # (e.g. auto_exposure) when streaming starts on the first cap.read().
         # Re-apply after the first successful read so the settings actually stick.
@@ -862,16 +866,22 @@ class CaptureThread:
                 open_failures = 0
                 read_failures = 0
                 next_open_attempt_at = 0.0
+                expected_frame_settle_until = 0.0
+                last_expected_frame_at = 0.0
+                post_stream_settings = None
+                post_stream_source = None
 
             if self._reopen_event.is_set():
                 self._reopen_event.clear()
                 if cap is not None:
                     cap.release()
                     cap = None
-                    self._cap = None
+                self._cap = None
                 open_failures = 0
                 read_failures = 0
                 next_open_attempt_at = 0.0
+                expected_frame_settle_until = 0.0
+                last_expected_frame_at = 0.0
                 post_stream_settings = None
                 post_stream_source = None
 
@@ -916,6 +926,12 @@ class CaptureThread:
                     open_failures = 0
                     read_failures = 0
                     next_open_attempt_at = 0.0
+                    expected_frame_settle_until = (
+                        time.time() + CAPTURE_MODE_SETTLE_S
+                        if not is_url and width > 0 and height > 0
+                        else 0.0
+                    )
+                    last_expected_frame_at = 0.0
 
                     if not is_url:
                         if isinstance(fourcc, str) and len(fourcc) >= 4:
@@ -952,6 +968,19 @@ class CaptureThread:
                 ret, frame = cap.read()
             if ret:
                 read_failures = 0
+                if not is_url and width > 0 and height > 0:
+                    frame_h, frame_w = frame.shape[:2]
+                    if (int(frame_w), int(frame_h)) != (int(width), int(height)):
+                        now = time.time()
+                        has_recent_expected = (
+                            last_expected_frame_at > 0.0
+                            and (now - last_expected_frame_at)
+                            < CAPTURE_EXPECTED_FRAME_FALLBACK_S
+                        )
+                        if now < expected_frame_settle_until or has_recent_expected:
+                            continue
+                    else:
+                        last_expected_frame_at = time.time()
                 if post_stream_settings is not None and post_stream_source is not None:
                     with self._cap_lock:
                         if cap is not None:

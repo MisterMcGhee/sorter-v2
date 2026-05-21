@@ -2338,6 +2338,34 @@ class VisionManager:
             for item in extents
         ]
 
+    def feederRoleExitOccupied(self, role: str) -> bool:
+        """Return True when a live role track is still in that channel's exit.
+
+        Used by the C4 intake gate to avoid registering a carousel-side ghost
+        while the upstream C3 object is still visibly hanging over the outlet.
+        """
+        from subsystems.feeder.analysis import (
+            bboxCenterCrossedSectionMidpoint,
+            bboxSectionOverlapRatio,
+        )
+
+        channel = self._channelInfoForRole(role)
+        if channel is None or not channel.exit_sections:
+            return False
+        try:
+            detections = self._channelDetectionsFromTracks(role, self.getFeederTracks(role))
+        except Exception:
+            return False
+        for det in detections:
+            motion_confirmed = bool(getattr(det, "motion_confirmed", True))
+            if not motion_confirmed:
+                continue
+            if bboxSectionOverlapRatio(det.bbox, det.channel, det.channel.exit_sections) > 0.0:
+                return True
+            if bboxCenterCrossedSectionMidpoint(det.bbox, det.channel, det.channel.exit_sections):
+                return True
+        return False
+
     def getFeederTrackerLiveGlobalIds(self, role: str) -> set[int]:
         """Return the set of ``global_id``s currently alive on ``role``'s tracker.
 
@@ -2600,6 +2628,7 @@ class VisionManager:
                         else None
                     ),
                     source_role=role,
+                    motion_confirmed=bool(getattr(track, "motion_confirmed", True)),
                 )
             )
         return detections

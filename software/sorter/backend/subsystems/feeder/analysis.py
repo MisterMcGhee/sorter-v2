@@ -515,6 +515,42 @@ def _sectionForPoint(px: float, py: float, channel: PolygonChannel) -> int:
     return int(relative / CHANNEL_SECTION_DEG)
 
 
+def _orderedCircularSections(sections: set[int]) -> list[int]:
+    if not sections:
+        return []
+    section_count = int(round(360.0 / CHANNEL_SECTION_DEG))
+    normalized = sorted({int(section) % section_count for section in sections})
+    if len(normalized) <= 1 or len(normalized) >= section_count:
+        return normalized
+
+    largest_gap_index = 0
+    largest_gap = -1
+    for index, section in enumerate(normalized):
+        next_section = normalized[(index + 1) % len(normalized)]
+        gap = (next_section - section) % section_count
+        if gap > largest_gap:
+            largest_gap = gap
+            largest_gap_index = index
+
+    start = normalized[(largest_gap_index + 1) % len(normalized)]
+    return sorted(normalized, key=lambda section: (section - start) % section_count)
+
+
+def bboxCenterCrossedSectionMidpoint(
+    bbox: Tuple[int, int, int, int],
+    channel: PolygonChannel,
+    sections: set[int],
+) -> bool:
+    """Return True once a bbox center reaches the latter half of a section arc."""
+    ordered_sections = _orderedCircularSections(sections)
+    if not ordered_sections:
+        return False
+    x1, y1, x2, y2 = bbox
+    center_section = _sectionForPoint((x1 + x2) / 2.0, (y1 + y2) / 2.0, channel)
+    midpoint_index = max(0, len(ordered_sections) // 2)
+    return center_section in set(ordered_sections[midpoint_index:])
+
+
 def bboxSectionOverlapRatio(
     bbox: Tuple[int, int, int, int],
     channel: PolygonChannel,
@@ -572,6 +608,8 @@ class FeederAnalysis:
         # inside the exit zone instead of falling through.
         self.ch2_exit_overlap_max: float = 0.0
         self.ch3_exit_overlap_max: float = 0.0
+        self.ch2_exit_center_crossed: bool = False
+        self.ch3_exit_center_crossed: bool = False
         self.ch2_dropzone_overlap_max: float = 0.0
         self.ch3_dropzone_overlap_max: float = 0.0
 
@@ -604,10 +642,17 @@ def analyzeFeederChannels(
                 result.ch3_dropzone_overlap_max = drop_overlap
             if not ignore_dropzone and sections & det.channel.dropzone_sections:
                 result.ch3_dropzone_occupied = True
-            overlap = _bboxExitOverlapRatio(det.bbox, det.channel)
+            motion_confirmed = bool(getattr(det, "motion_confirmed", True))
+            overlap = _bboxExitOverlapRatio(det.bbox, det.channel) if motion_confirmed else 0.0
             if overlap > result.ch3_exit_overlap_max:
                 result.ch3_exit_overlap_max = overlap
-            if overlap > 0.0:
+            if motion_confirmed and bboxCenterCrossedSectionMidpoint(
+                det.bbox,
+                det.channel,
+                det.channel.exit_sections,
+            ):
+                result.ch3_exit_center_crossed = True
+            if overlap > 0.0 or result.ch3_exit_center_crossed:
                 result.ch3_action = ChannelAction.PULSE_PRECISE
             elif result.ch3_action == ChannelAction.IDLE:
                 result.ch3_action = ChannelAction.PULSE_NORMAL
@@ -617,10 +662,17 @@ def analyzeFeederChannels(
                 result.ch2_dropzone_overlap_max = drop_overlap
             if not ignore_dropzone and sections & det.channel.dropzone_sections:
                 result.ch2_dropzone_occupied = True
-            overlap = _bboxExitOverlapRatio(det.bbox, det.channel)
+            motion_confirmed = bool(getattr(det, "motion_confirmed", True))
+            overlap = _bboxExitOverlapRatio(det.bbox, det.channel) if motion_confirmed else 0.0
             if overlap > result.ch2_exit_overlap_max:
                 result.ch2_exit_overlap_max = overlap
-            if overlap > 0.0:
+            if motion_confirmed and bboxCenterCrossedSectionMidpoint(
+                det.bbox,
+                det.channel,
+                det.channel.exit_sections,
+            ):
+                result.ch2_exit_center_crossed = True
+            if overlap > 0.0 or result.ch2_exit_center_crossed:
                 result.ch2_action = ChannelAction.PULSE_PRECISE
             elif result.ch2_action == ChannelAction.IDLE:
                 result.ch2_action = ChannelAction.PULSE_NORMAL

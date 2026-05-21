@@ -73,6 +73,7 @@ def _make_c3_wiggle_ctx(
     now_mono: float,
     ch3_exit_overlap: float,
     ch3_held: bool,
+    ch3_exit_center_crossed: bool = False,
     ch3_stepper_busy: bool = False,
     pulse_sent: bool = False,
 ) -> FeederTickContext:
@@ -84,6 +85,8 @@ def _make_c3_wiggle_ctx(
             ch3_dropzone_occupied=False,
             ch2_exit_overlap_max=0.0,
             ch3_exit_overlap_max=ch3_exit_overlap,
+            ch2_exit_center_crossed=False,
+            ch3_exit_center_crossed=ch3_exit_center_crossed,
         ),
         ch2_action=ChannelAction.IDLE,
         ch3_action=ChannelAction.PULSE_PRECISE,
@@ -182,6 +185,33 @@ class C3StationTests(unittest.TestCase):
         )
 
         self.assertIsNone(stats.active_incident)
+        self.assertEqual([], stepper.moves)
+
+    def test_exit_incident_published_when_bbox_center_crossed_exit_midpoint(self) -> None:
+        stats = _RuntimeStats()
+        stepper = _Stepper()
+        station = _make_c3_station(stats, stepper)
+
+        station.run_exit_wiggle(
+            _make_c3_wiggle_ctx(
+                now_mono=0.0,
+                ch3_exit_overlap=0.35,
+                ch3_held=False,
+                ch3_exit_center_crossed=True,
+            )
+        )
+        station.run_exit_wiggle(
+            _make_c3_wiggle_ctx(
+                now_mono=1.1,
+                ch3_exit_overlap=0.35,
+                ch3_held=False,
+                ch3_exit_center_crossed=True,
+            )
+        )
+
+        self.assertEqual("exit_stuck", stats.active_incident["kind"])
+        self.assertTrue(stats.active_incident["center_crossed"])
+        self.assertLess(stats.active_incident["overlap_ratio"], EXIT_WIGGLE_OVERLAP_THRESHOLD)
         self.assertEqual([], stepper.moves)
 
     def test_exit_wiggle_skipped_before_stall_elapses(self) -> None:

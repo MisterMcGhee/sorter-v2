@@ -83,24 +83,25 @@ class C3Station(BaseStation):
     def run_exit_wiggle(self, ctx: FeederTickContext) -> None:
         """Publish a C3 exit-stuck incident instead of silently jogging.
 
-        Fires only when a bbox has been at least four-fifths inside C3's exit
-        zone for the configured stall duration while C3 is held by the
-        downstream classification channel.
+        Fires when a bbox is deeply inside C3's exit zone, or a long bbox's
+        center has crossed the exit midpoint, for the configured stall
+        duration.
         """
         prof = self.gc.profiler
         now = ctx.now_mono
         overlap = float(getattr(ctx.analysis, "ch3_exit_overlap_max", 0.0))
+        center_crossed = bool(getattr(ctx.analysis, "ch3_exit_center_crossed", False))
 
         if ctx.sample_collection_mode:
             self._exit_overlap_since_mono = None
             return
 
         downstream_blocked = bool(ctx.ch3_held)
-        if not downstream_blocked:
+        if not downstream_blocked and not center_crossed:
             self._exit_overlap_since_mono = None
             return
 
-        if overlap >= self._exit_wiggle_overlap_threshold:
+        if overlap >= self._exit_wiggle_overlap_threshold or center_crossed:
             if self._exit_overlap_since_mono is None:
                 self._exit_overlap_since_mono = now
         else:
@@ -124,13 +125,15 @@ class C3Station(BaseStation):
             overlap_threshold=self._exit_wiggle_overlap_threshold,
             stall_ms=int(round(stall_s * 1000.0)),
             downstream_blocked=downstream_blocked,
+            center_crossed=center_crossed,
         )
         if published:
             prof.hit("feeder.ch3.exit_incident")
             self.gc.runtime_stats.observeBlockedReason("feeder", "ch3_exit_stuck")
             self.gc.logger.warning(
                 f"Feeder: C3 exit incident; bbox overlap={overlap:.2f}, "
-                f"stall={stall_s*1000.0:.0f} ms, downstream blocked"
+                f"center_crossed={center_crossed}, "
+                f"stall={stall_s*1000.0:.0f} ms, downstream_blocked={downstream_blocked}"
             )
         self._next_exit_wiggle_at = now + self._exit_wiggle_cooldown_ms / 1000.0
 

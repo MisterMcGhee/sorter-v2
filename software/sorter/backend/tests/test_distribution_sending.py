@@ -20,6 +20,7 @@ from __future__ import annotations
 import queue
 import time
 import unittest
+from unittest.mock import patch
 
 from defs.known_object import KnownObject
 from piece_transport import ClassificationChannelTransport
@@ -27,6 +28,8 @@ from runtime_stats import RuntimeStatsCollector
 from subsystems.bus import TickBus
 from subsystems.distribution.sending import (
     CHUTE_SETTLE_MS,
+    MISSING_DROP_PIECE_GRACE_MS,
+    PIECE_EXIT_INCIDENT_MS,
     SAMPLE_COLLECTION_CHUTE_SETTLE_MS,
     Sending,
 )
@@ -81,12 +84,18 @@ class _RunRecorder:
 class _FakeVision:
     def __init__(self, live_ids_by_role: dict[str, set[int]] | None = None) -> None:
         self._live = live_ids_by_role or {}
+        self.force_killed: list[int] = []
 
     def getFeederTrackerLiveGlobalIds(self, role: str) -> set[int]:
         return set(self._live.get(role, set()))
 
     def setLive(self, role: str, ids: set[int]) -> None:
         self._live[role] = set(ids)
+
+    def forceKillCarouselTrack(self, global_id: int) -> bool:
+        self.force_killed.append(int(global_id))
+        self._live.get("carousel", set()).discard(int(global_id))
+        return True
 
 
 class _GlobalConfig:
@@ -282,6 +291,109 @@ class SendingChuteReopenGateTests(unittest.TestCase):
         next_state = sending.step()
         self.assertEqual(DistributionState.IDLE, next_state)
         self.assertTrue(shared.get_distribution_ready())
+
+    def test_missing_drop_piece_reopens_after_grace(self) -> None:
+        transport = ClassificationChannelTransport()
+        shared = self._mkSharedWithTransport(transport)
+        gc = _GlobalConfig()
+        event_queue: queue.Queue = queue.Queue()
+        sending = _mkSending(
+            vision=_FakeVision(),
+            cooldown_s=0.0,
+            shared=shared,
+            event_queue=event_queue,
+            gc=gc,
+        )
+
+        self.assertIsNone(sending.step())
+        sending.start_time = (
+            time.time() - (MISSING_DROP_PIECE_GRACE_MS / 1000.0) - 0.01
+        )
+
+        next_state = sending.step()
+        self.assertEqual(DistributionState.IDLE, next_state)
+        self.assertTrue(shared.get_distribution_ready())
+
+    def test_live_track_timeout_publishes_incident_until_cleared(self) -> None:
+        transport = self._mkTransportWithDrop(tracked_global_id=77)
+        shared = self._mkSharedWithTransport(transport)
+        gc = _GlobalConfig()
+        event_queue: queue.Queue = queue.Queue()
+        vision = _FakeVision(live_ids_by_role={"carousel": {77}})
+        sending = _mkSending(
+            vision=vision,
+            cooldown_s=0.0,
+            shared=shared,
+            event_queue=event_queue,
+            gc=gc,
+        )
+
+        def publish_incident(gc_arg, *, piece, reason: str) -> bool:
+            gc_arg.runtime_stats.setActiveIncident(
+                {
+                    "kind": "classification_track_lost",
+                    "piece_uuid": piece.uuid,
+                    "reason": reason,
+                }
+            )
+            return True
+
+        self.assertIsNone(sending.step())
+        sending.start_time = (
+            time.time()
+            - (max(CHUTE_SETTLE_MS, PIECE_EXIT_INCIDENT_MS) / 1000.0)
+            - 0.01
+        )
+        with patch(
+            "subsystems.distribution.sending.publish_classification_track_lost_incident",
+            side_effect=publish_incident,
+        ):
+            self.assertIsNone(sending.step())
+
+        self.assertFalse(shared.get_distribution_ready())
+        active = gc.runtime_stats.activeIncident()
+        self.assertIsNotNone(active)
+        assert active is not None
+        self.assertEqual("classification_track_lost", active["kind"])
+
+        gc.runtime_stats.clearActiveIncident(
+            kind="classification_track_lost",
+            piece_uuid=transport._exit_piece.uuid,  # noqa: SLF001
+        )
+        next_state = sending.step()
+        self.assertEqual(DistributionState.IDLE, next_state)
+        self.assertTrue(shared.get_distribution_ready())
+        self.assertEqual([77], vision.force_killed)
+
+    def test_live_track_timeout_reopens_when_incident_disabled(self) -> None:
+        transport = self._mkTransportWithDrop(tracked_global_id=88)
+        shared = self._mkSharedWithTransport(transport)
+        gc = _GlobalConfig()
+        event_queue: queue.Queue = queue.Queue()
+        vision = _FakeVision(live_ids_by_role={"carousel": {88}})
+        sending = _mkSending(
+            vision=vision,
+            cooldown_s=0.0,
+            shared=shared,
+            event_queue=event_queue,
+            gc=gc,
+        )
+
+        self.assertIsNone(sending.step())
+        sending.start_time = (
+            time.time()
+            - (max(CHUTE_SETTLE_MS, PIECE_EXIT_INCIDENT_MS) / 1000.0)
+            - 0.01
+        )
+        with patch(
+            "subsystems.distribution.sending.publish_classification_track_lost_incident",
+            return_value=False,
+        ):
+            next_state = sending.step()
+
+        self.assertEqual(DistributionState.IDLE, next_state)
+        self.assertTrue(shared.get_distribution_ready())
+        self.assertEqual([88], vision.force_killed)
 
 
 if __name__ == "__main__":

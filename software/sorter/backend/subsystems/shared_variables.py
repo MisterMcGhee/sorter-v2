@@ -38,6 +38,7 @@ class SharedVariables:
         # so the pipeline doesn't stall on ghost detections in C4. Toggled
         # via the /api/sample-collection-mode endpoint.
         self._sample_collection_mode: bool = False
+        self._ignored_classification_dropzone_track_ids: set[int] = set()
 
     @property
     def classification_ready(self) -> bool:
@@ -204,6 +205,23 @@ class SharedVariables:
             if motion is not None:
                 return bool(motion.in_progress)
         return self._chute_move_in_progress
+
+    def set_classification_dropzone_track_ignored(
+        self,
+        global_id: int,
+        ignored: bool,
+    ) -> None:
+        track_id = int(global_id)
+        if ignored:
+            self._ignored_classification_dropzone_track_ids.add(track_id)
+        else:
+            self._ignored_classification_dropzone_track_ids.discard(track_id)
+
+    def ignored_classification_dropzone_track_ids(self) -> set[int]:
+        return set(self._ignored_classification_dropzone_track_ids)
+
+    def is_classification_dropzone_track_ignored(self, global_id: int) -> bool:
+        return int(global_id) in self._ignored_classification_dropzone_track_ids
 
     def _publish_station_gate(
         self,

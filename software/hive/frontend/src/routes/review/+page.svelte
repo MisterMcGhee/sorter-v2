@@ -1,11 +1,13 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { page } from '$app/state';
 	import {
 		api,
 		type SampleClassificationPayload,
 		type SampleDetail,
 		type SampleReview,
-		type SavedSampleAnnotation
+		type SavedSampleAnnotation,
+		type TeacherModelInfo
 	} from '$lib/api';
 	import { auth } from '$lib/auth.svelte';
 	import Badge from '$lib/components/Badge.svelte';
@@ -149,9 +151,91 @@
 		imageNaturalHeight = 0;
 	});
 
+	// Admin-only teacher rerun panel. Lets the reviewer try a different model on the
+	// currently displayed sample without leaving the queue — useful when boxes look bad
+	// and you want to A/B a fresh detection inline instead of skipping to /compare.
+	const REVIEW_TEACHER_MODEL_STORAGE_KEY = 'hive.review.teacherModel';
+	let teacherModels = $state<TeacherModelInfo[]>([]);
+	let teacherModelChoice = $state('');
+	let teacherRerunning = $state(false);
+	let teacherRerunError = $state<string | null>(null);
+	// Set once after the dropdown is populated so the localStorage-sync effect doesn't
+	// fire during initial prefill (which would overwrite a stale key with itself anyway,
+	// but lets us skip a noop write).
+	let teacherChoiceInitialized = $state(false);
+
+	function readStoredTeacherModel(): string | null {
+		if (typeof window === 'undefined') return null;
+		try {
+			return window.localStorage.getItem(REVIEW_TEACHER_MODEL_STORAGE_KEY);
+		} catch {
+			return null;
+		}
+	}
+
+	function writeStoredTeacherModel(value: string) {
+		if (typeof window === 'undefined' || !value) return;
+		try {
+			window.localStorage.setItem(REVIEW_TEACHER_MODEL_STORAGE_KEY, value);
+		} catch {
+			/* private mode / quota — silently drop */
+		}
+	}
+
+	// Persist the dropdown choice so the next visit reopens on the same model. Default
+	// resolution: stored value > user.preferred_teacher_model > first registered.
+	$effect(() => {
+		if (!teacherChoiceInitialized) return;
+		if (!teacherModelChoice) return;
+		writeStoredTeacherModel(teacherModelChoice);
+	});
+
 	onMount(() => {
 		void loadNext();
+		if (auth.isAdmin) {
+			void api
+				.listTeacherModels()
+				.then((m) => {
+					teacherModels = m;
+					const stored = readStoredTeacherModel();
+					const preferred = auth.user?.preferred_teacher_model;
+					if (stored && m.some((mod) => mod.model_id === stored)) {
+						teacherModelChoice = stored;
+					} else if (preferred && m.some((mod) => mod.model_id === preferred)) {
+						teacherModelChoice = preferred;
+					} else if (m.length > 0) {
+						teacherModelChoice = m[0].model_id;
+					}
+					teacherChoiceInitialized = true;
+				})
+				.catch(() => {
+					/* ignore — panel just stays empty */
+				});
+		}
 	});
+
+	async function handleTeacherRerunInReview() {
+		if (!sample || teacherRerunning || !teacherModelChoice) return;
+		teacherRerunning = true;
+		teacherRerunError = null;
+		try {
+			const updated = await api.rerunSampleTeacher(sample.id, teacherModelChoice);
+			sample = updated;
+			// Detection was overwritten and review_status reset on the backend, so the local
+			// review history no longer applies to these boxes — clear so the action pad
+			// shows a fresh slate.
+			reviews = [];
+			currentDecision = null;
+			lastLoadedReviewKey = null;
+		} catch (e: unknown) {
+			teacherRerunError =
+				e && typeof e === 'object' && 'error' in e
+					? String((e as { error: unknown }).error)
+					: 'Teacher rerun failed';
+		} finally {
+			teacherRerunning = false;
+		}
+	}
 
 	async function loadSample(sampleId: string) {
 		loading = true;
@@ -178,12 +262,27 @@
 		}
 	}
 
+	// Carry the samples-list sidebar filter through the review session so the queue only
+	// serves the slice the reviewer chose (e.g. "C-Channel 4, last 24h"). The params live
+	// in the URL — a refresh keeps the filter, navigating directly to /review without
+	// query string opens the full queue as before.
+	const queueFilters = $derived.by(() => {
+		const sp = page.url.searchParams;
+		const params: Record<string, string> = {};
+		for (const key of ['scope', 'machine_id', 'source_role', 'capture_reason', 'max_age_hours']) {
+			const value = sp.get(key);
+			if (value) params[key] = value;
+		}
+		return params;
+	});
+	const activeFilterChips = $derived(Object.entries(queueFilters));
+
 	async function loadNext() {
 		loading = true;
 		error = null;
 		feedback = null;
 		try {
-			const next = await api.getNextReview();
+			const next = await api.getNextReview(queueFilters);
 			if (!next) {
 				sample = null;
 				reviews = [];
@@ -391,6 +490,17 @@
 		<p class="mt-1 text-sm text-text-muted">
 			Arrow up accepts, arrow down rejects, arrow right skips, arrow left goes back, and <kbd class="border border-border bg-bg px-1.5 py-0.5 text-[11px] font-semibold text-text">D</kbd> toggles annotation.
 		</p>
+		{#if activeFilterChips.length > 0}
+			<div class="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+				<span class="text-text-muted">Scoped to:</span>
+				{#each activeFilterChips as [key, value] (key)}
+					<span class="border border-border bg-bg px-1.5 py-0.5 text-text-muted">
+						{key}=<span class="text-text">{value}</span>
+					</span>
+				{/each}
+				<a href="/review" class="text-primary hover:underline">Clear</a>
+			</div>
+		{/if}
 	</div>
 </div>
 
@@ -568,6 +678,57 @@
 				onSkip={skip}
 				onBack={() => void goBack()}
 			/>
+
+			{#if auth.isAdmin}
+				<div class="border border-border bg-white p-3">
+					<div class="mb-2 flex items-center justify-between">
+						<h3 class="text-xs font-semibold uppercase tracking-wider text-text-muted">Re-run teacher</h3>
+						<a
+							href={`/samples/${sample.id}/compare`}
+							class="text-[11px] text-text-muted hover:text-primary"
+							title="Compare all models side-by-side"
+						>
+							Compare →
+						</a>
+					</div>
+					<div class="flex gap-2">
+						<select
+							bind:value={teacherModelChoice}
+							disabled={teacherRerunning || teacherModels.length === 0}
+							class="min-w-0 flex-1 border border-border bg-white px-2 py-1.5 text-xs text-text focus:border-primary focus:outline-none"
+						>
+							{#if teacherModels.length === 0}
+								<option value="">(no models)</option>
+							{:else}
+								{#each teacherModels as m (m.model_id)}
+									<option value={m.model_id}>{m.display_name}</option>
+								{/each}
+							{/if}
+						</select>
+						<button
+							type="button"
+							onclick={() => void handleTeacherRerunInReview()}
+							disabled={teacherRerunning || !teacherModelChoice}
+							class="inline-flex items-center gap-1.5 border border-border bg-white px-3 py-1.5 text-xs font-medium text-text hover:bg-bg disabled:opacity-50 disabled:cursor-not-allowed"
+						>
+							{#if teacherRerunning}
+								<span class="inline-block h-3 w-3 animate-spin border-2 border-current border-t-transparent rounded-full"></span>
+								Running…
+							{:else}
+								Run
+							{/if}
+						</button>
+					</div>
+					<p class="mt-2 text-[10px] text-text-muted">
+						Overwrites detection_bboxes on this sample and resets review status to unreviewed.
+					</p>
+					{#if teacherRerunError}
+						<div class="mt-2 border border-warning-strong bg-warning-bg px-2 py-1.5 text-[11px] text-warning-strong">
+							{teacherRerunError}
+						</div>
+					{/if}
+				</div>
+			{/if}
 
 			<ReviewHeuristics />
 

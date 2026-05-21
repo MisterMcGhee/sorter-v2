@@ -8,9 +8,15 @@ from irl.config import IRLInterface
 from global_config import GlobalConfig
 from utils.event import knownObjectToEvent
 from defs.known_object import PieceStage
+from subsystems.classification_channel.incidents import (
+    CLASSIFICATION_TRACK_LOST_INCIDENT_KIND,
+    publish_classification_track_lost_incident,
+)
 
 CHUTE_SETTLE_MS = 1500
 SAMPLE_COLLECTION_CHUTE_SETTLE_MS = 400
+MISSING_DROP_PIECE_GRACE_MS = 1500
+PIECE_EXIT_INCIDENT_MS = 8000
 
 
 class Sending(BaseState):
@@ -33,6 +39,7 @@ class Sending(BaseState):
         self.start_time: float = 0.0
         self._occupancy_state: str | None = None
         self._committed: bool = False
+        self._exit_wait_incident_piece_uuid: str | None = None
 
     def _setOccupancyState(self, state_name: str) -> None:
         if self._occupancy_state == state_name:
@@ -46,16 +53,33 @@ class Sending(BaseState):
         )
 
     def step(self) -> Optional[DistributionState]:
+        now = time.time()
         if self.piece is None and not self._committed:
+            if self.start_time <= 0.0:
+                self.start_time = now
             transport = self.shared.transport
             self.piece = (
                 transport.getPieceForDistributionDrop()
                 if transport is not None
                 else None
             )
-            self.start_time = time.time()
+            if self.piece is None:
+                elapsed_ms = (now - self.start_time) * 1000
+                self._setOccupancyState("sending.wait_drop_piece")
+                if elapsed_ms >= MISSING_DROP_PIECE_GRACE_MS:
+                    self.logger.warning(
+                        "Sending: no distribution-drop piece available after "
+                        f"{elapsed_ms:.0f}ms; reopening distribution gate"
+                    )
+                    self.gc.runtime_stats.observeBlockedReason(
+                        "distribution",
+                        "sending_missing_drop_piece",
+                    )
+                    self.shared.set_distribution_gate(True, reason=None)
+                    return DistributionState.IDLE
+                return None
 
-        elapsed_ms = (time.time() - self.start_time) * 1000
+        elapsed_ms = (now - self.start_time) * 1000
         settle_ms = self._settleMs()
         self._setOccupancyState("sending.wait_chute_settle")
         if elapsed_ms < settle_ms:
@@ -125,6 +149,8 @@ class Sending(BaseState):
                 if isinstance(live, (set, frozenset)) and int(track_id) in live:
                     # Piece still visible on the carousel tracker — hold
                     # the gate closed regardless of cooldown.
+                    if self._pieceExitWaitTimedOut():
+                        return self._handlePieceExitTimeout(int(track_id))
                     return False
 
         elapsed_since_drop = time.time() - self.start_time
@@ -132,6 +158,88 @@ class Sending(BaseState):
         if elapsed_since_drop < required_s:
             return False
         return True
+
+    def _pieceExitWaitTimedOut(self) -> bool:
+        elapsed_ms = (time.time() - self.start_time) * 1000
+        return elapsed_ms >= max(
+            PIECE_EXIT_INCIDENT_MS,
+            self._settleMs() + int(self._cooldown_s * 1000.0),
+        )
+
+    def _handlePieceExitTimeout(self, track_id: int) -> bool:
+        piece = self.piece
+        piece_uuid = str(getattr(piece, "uuid", "") or "")
+        active = self._activeIncident()
+        if self._exit_wait_incident_piece_uuid == piece_uuid:
+            if (
+                isinstance(active, dict)
+                and active.get("kind") == CLASSIFICATION_TRACK_LOST_INCIDENT_KIND
+                and active.get("piece_uuid") == piece_uuid
+            ):
+                self._setOccupancyState("sending.wait_piece_exit_incident")
+                self.gc.runtime_stats.observeBlockedReason(
+                    "distribution",
+                    "sending_piece_exit_incident",
+                )
+                return False
+
+            self.logger.warning(
+                "Sending: C4 exit-wait incident for piece %s was cleared; "
+                "reopening distribution gate"
+                % (piece_uuid[:8] or "unknown")
+            )
+            self._forceKillLiveTrack(track_id)
+            return True
+
+        elapsed_ms = (time.time() - self.start_time) * 1000
+        reason = f"distribution_drop_track_still_live_after_{int(elapsed_ms)}ms"
+        published = False
+        if piece is not None:
+            published = publish_classification_track_lost_incident(
+                self.gc,
+                piece=piece,
+                reason=reason,
+            )
+        if published:
+            self._exit_wait_incident_piece_uuid = piece_uuid
+            self._setOccupancyState("sending.wait_piece_exit_incident")
+            self.logger.warning(
+                "Sending: piece %s still visible on C4 tracker after %.0fms; "
+                "waiting for operator incident"
+                % (piece_uuid[:8] or "unknown", elapsed_ms)
+            )
+            return False
+
+        self.logger.warning(
+            "Sending: piece %s still visible on C4 tracker after %.0fms, "
+            "but track-lost incidents are disabled/unavailable; reopening gate"
+            % (piece_uuid[:8] or "unknown", elapsed_ms)
+        )
+        self.gc.runtime_stats.observeBlockedReason(
+            "distribution",
+            "sending_piece_exit_timeout_reopened",
+        )
+        self._forceKillLiveTrack(track_id)
+        return True
+
+    def _activeIncident(self) -> dict | None:
+        runtime_stats = getattr(self.gc, "runtime_stats", None)
+        if runtime_stats is None or not hasattr(runtime_stats, "activeIncident"):
+            return None
+        try:
+            active = runtime_stats.activeIncident()
+        except Exception:
+            return None
+        return active if isinstance(active, dict) else None
+
+    def _forceKillLiveTrack(self, track_id: int) -> None:
+        vision = self.vision
+        if vision is None or not hasattr(vision, "forceKillCarouselTrack"):
+            return
+        try:
+            vision.forceKillCarouselTrack(int(track_id))
+        except Exception:
+            pass
 
     def _settleMs(self) -> int:
         if bool(getattr(self.shared, "sample_collection_mode", False)):
@@ -143,3 +251,4 @@ class Sending(BaseState):
         self.piece = None
         self.start_time = 0.0
         self._committed = False
+        self._exit_wait_incident_piece_uuid = None

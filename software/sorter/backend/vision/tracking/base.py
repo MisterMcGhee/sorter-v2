@@ -22,6 +22,7 @@ class TrackedPiece:
     coasting: bool
     score: float | None
     handoff_from: str | None = None
+    motion_confirmed: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -37,6 +38,7 @@ class TrackedPiece:
             "coasting": self.coasting,
             "score": self.score,
             "handoff_from": self.handoff_from,
+            "motion_confirmed": self.motion_confirmed,
         }
 
 

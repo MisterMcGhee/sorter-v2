@@ -77,6 +77,11 @@ def pull(hive_url: str, zone: str, source_role: str | None, status: str, token: 
     help="When using --target-size, also balance by number of pieces in the frame.",
 )
 @click.option(
+    "--balance-machine",
+    is_flag=True,
+    help="When using --target-size, also balance by source machine so one rig can't dominate the picks.",
+)
+@click.option(
     "--piece-count-bins",
     default=None,
     help="Comma-separated piece-count buckets for --balance-piece-count, e.g. 0,1,2,3,4,5,6,7,8,9-12,13+.",
@@ -86,6 +91,12 @@ def pull(hive_url: str, zone: str, source_role: str | None, status: str, token: 
     default=None,
     type=float,
     help="Only include positive samples with detection_score >= this value; empty samples are kept.",
+)
+@click.option(
+    "--max-empty-fraction",
+    default=None,
+    type=float,
+    help="When --keep-empty is set, cap empties so they are at most this fraction of the final dataset (e.g. 0.1 = 10%%). Empties are randomly subsampled; positives are kept (after diversity sampling).",
 )
 @click.option(
     "--raw-dir",
@@ -111,16 +122,25 @@ def build(
     balance_source_role: bool,
     strict_source_role_balance: bool,
     balance_piece_count: bool,
+    balance_machine: bool,
     piece_count_bins: str | None,
     min_detection_score: float | None,
+    max_empty_fraction: float | None,
     raw_dir: str | None,
     output_dir: str | None,
 ) -> None:
     """Build YOLO-format dataset from a pulled Hive dump."""
-    if strict_source_role_balance and not (balance_source_role or balance_piece_count):
+    if strict_source_role_balance and not (
+        balance_source_role or balance_piece_count or balance_machine
+    ):
         raise click.ClickException(
-            "--strict-balance requires --balance-source-role or --balance-piece-count"
+            "--strict-balance requires --balance-source-role, --balance-piece-count, or --balance-machine"
         )
+    if max_empty_fraction is not None:
+        if not keep_empty:
+            raise click.ClickException("--max-empty-fraction requires --keep-empty")
+        if not 0.0 <= max_empty_fraction < 1.0:
+            raise click.ClickException("--max-empty-fraction must be in [0.0, 1.0)")
 
     from training.datasets import build as build_mod
     from pathlib import Path
@@ -136,9 +156,11 @@ def build(
         embed_model=embed_model,
         balance_source_role=balance_source_role,
         balance_piece_count=balance_piece_count,
+        balance_machine=balance_machine,
         piece_count_bins=piece_count_bins or build_mod.DEFAULT_PIECE_COUNT_BINS,
         strict_source_role_balance=strict_source_role_balance,
         min_detection_score=min_detection_score,
+        max_empty_fraction=max_empty_fraction,
         raw_dir=Path(raw_dir) if raw_dir else None,
         output_dir=Path(output_dir) if output_dir else None,
     )
@@ -297,6 +319,29 @@ def auth_logout(hive_url: str) -> None:
         sys.exit(1)
 
 
+@main.command("compose-metadata")
+@click.option("--run-dir", required=True, type=click.Path(exists=True, file_okay=False))
+@click.option("--dataset-dir", required=True, type=click.Path(exists=True, file_okay=False))
+@click.option("--benchmark-json", default=None, type=click.Path(exists=True, dir_okay=False))
+@click.option("--model-key", default=None, help="Track-results key (e.g. A7); defaults to the first entry.")
+def compose_metadata(run_dir: str, dataset_dir: str, benchmark_json: str | None, model_key: str | None) -> None:
+    """Write the standard training_metadata block into <run-dir>/run.json."""
+    from pathlib import Path
+
+    from training.datasets import compose_metadata as cm
+
+    meta = cm.compose(
+        run_dir=Path(run_dir),
+        dataset_dir=Path(dataset_dir),
+        benchmark_json=Path(benchmark_json) if benchmark_json else None,
+        model_key=model_key,
+    )
+    click.echo(
+        f"composed training_metadata: target_size={meta['dataset']['selection']['target_size']} "
+        f"benchmarks={'yes' if meta.get('benchmarks') else 'no'}"
+    )
+
+
 @main.command("publish")
 @click.option("--run-dir", required=True, type=click.Path(exists=True))
 @click.option("--hailo-bundle", default=None, type=click.Path(exists=True))
@@ -310,8 +355,43 @@ def auth_logout(hive_url: str) -> None:
 @click.option("--description", default=None)
 @click.option("--family", default=None)
 @click.option("--public/--private", default=True)
+@click.option(
+    "--dataset-dir",
+    default=None,
+    type=click.Path(exists=True, file_okay=False),
+    help="If set, compose the standard training_metadata from this dataset's build.json before publishing.",
+)
+@click.option(
+    "--benchmark-json",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Optional onnxruntime benchmark JSON to include in the composed metadata.",
+)
+@click.option("--model-key", default=None, help="Track-results key (e.g. A7) when --dataset-dir is set.")
 def publish(**kwargs) -> None:
-    """Upload a finished run (ONNX + NCNN + optional HEF) to Hive."""
+    """Upload a finished run (ONNX + NCNN + optional HEF) to Hive.
+
+    Pass --dataset-dir to auto-compose the structured training_metadata that
+    the Hive model detail page expects (model.best_metrics, dataset.selection,
+    benchmarks). Without it the existing run.json training_metadata is sent
+    verbatim.
+    """
+    from pathlib import Path
+
+    dataset_dir = kwargs.pop("dataset_dir", None)
+    benchmark_json = kwargs.pop("benchmark_json", None)
+    model_key = kwargs.pop("model_key", None)
+
+    if dataset_dir:
+        from training.datasets import compose_metadata as cm
+
+        cm.compose(
+            run_dir=Path(kwargs["run_dir"]),
+            dataset_dir=Path(dataset_dir),
+            benchmark_json=Path(benchmark_json) if benchmark_json else None,
+            model_key=model_key,
+        )
+
     from training.hive import publish as publish_mod
 
     sys.exit(publish_mod.cli(kwargs))

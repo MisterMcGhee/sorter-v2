@@ -151,6 +151,16 @@
 										</svg>
 										Manage Users
 									</a>
+									<a
+										href="/admin/teacher-jobs"
+										class="flex items-center gap-2 px-4 py-2 text-sm text-[var(--color-text)] hover:bg-[var(--color-bg)]"
+										onclick={() => { dropdownOpen = false; }}
+									>
+										<svg class="h-4 w-4 text-[var(--color-text-muted)]" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+											<path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z" />
+										</svg>
+										Teacher Jobs
+									</a>
 								{/if}
 
 								<div class="border-t border-[var(--color-border)] my-1"></div>

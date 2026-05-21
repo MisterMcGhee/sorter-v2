@@ -19,7 +19,9 @@ class User(Base):
     avatar_url = Column(String, nullable=True)
     display_name = Column(String, nullable=True)
     openrouter_api_key_encrypted = Column(String, nullable=True)
+    perceptron_api_key_encrypted = Column(String, nullable=True)
     preferred_ai_model = Column(String, nullable=True)
+    preferred_teacher_model = Column(String, nullable=True)
     role = Column(String, nullable=False, default="member")
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
@@ -61,3 +63,7 @@ class User(Base):
     @property
     def openrouter_configured(self) -> bool:
         return bool(self.openrouter_api_key_encrypted)
+
+    @property
+    def perceptron_configured(self) -> bool:
+        return bool(self.perceptron_api_key_encrypted)

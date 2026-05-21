@@ -23,16 +23,21 @@
 	</div>
 
 	<div class="grid grid-cols-4 gap-1.5">
-		<button onclick={annotatorApi.undo} class="border border-border px-2 py-2 text-[11px] text-text-muted hover:bg-bg">Undo</button>
-		<button onclick={annotatorApi.redo} class="border border-border px-2 py-2 text-[11px] text-text-muted hover:bg-bg">Redo</button>
+		<!-- Indirect via arrow so each click resolves the *current* annotatorApi.* binding.
+			 The api fields are reassigned by SampleAnnotator's $effect on every remount
+			 (e.g. when the review queue swaps in a new sample), and the binding here is
+			 captured at render time — without the indirection the buttons keep calling
+			 the previous sample's closures (or the default no-op stubs). -->
+		<button onclick={() => annotatorApi.undo()} class="border border-border px-2 py-2 text-[11px] text-text-muted hover:bg-bg">Undo</button>
+		<button onclick={() => annotatorApi.redo()} class="border border-border px-2 py-2 text-[11px] text-text-muted hover:bg-bg">Redo</button>
 		<button
-			onclick={annotatorApi.deleteSelected}
+			onclick={() => annotatorApi.deleteSelected()}
 			disabled={annotatorApi.selectedCount === 0}
 			class="border border-primary/20 px-2 py-2 text-[11px] text-primary transition-colors hover:bg-primary-light disabled:cursor-not-allowed disabled:border-border disabled:text-border"
 		>
 			Delete
 		</button>
-		<button onclick={annotatorApi.clearAll} class="border border-warning/30 px-2 py-2 text-[11px] text-[#A16207] hover:bg-warning/[0.1]">Clear</button>
+		<button onclick={() => annotatorApi.clearAll()} class="border border-warning/30 px-2 py-2 text-[11px] text-[#A16207] hover:bg-warning/[0.1]">Clear</button>
 	</div>
 
 	<div class="mt-3 inline-flex border border-border bg-bg p-1">
@@ -70,7 +75,7 @@
 	<div class="mt-3 flex gap-2">
 		<button
 			type="button"
-			onclick={annotatorApi.revert}
+			onclick={() => annotatorApi.revert()}
 			class="flex-1 border border-border px-3 py-2 text-xs font-medium text-text-muted hover:bg-bg"
 		>
 			Revert
@@ -78,7 +83,7 @@
 		{#if annotatorApi.hasSeedBoxes}
 			<button
 				type="button"
-				onclick={annotatorApi.loadSorterBoxes}
+				onclick={() => annotatorApi.loadSorterBoxes()}
 				class="flex-1 border border-border px-3 py-2 text-xs font-medium text-text-muted hover:bg-bg"
 			>
 				Reset
@@ -94,7 +99,7 @@
 
 	<button
 		type="button"
-		onclick={annotatorApi.save}
+		onclick={() => annotatorApi.save()}
 		disabled={annotatorApi.saving || !annotatorApi.isDirty}
 		class="mt-3 flex w-full items-center justify-center px-3 py-2 text-xs font-medium text-white transition-colors disabled:cursor-not-allowed disabled:bg-primary/40 {annotatorApi.saving || !annotatorApi.isDirty ? 'bg-primary/40' : 'bg-primary hover:bg-primary-hover'}"
 	>

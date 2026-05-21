@@ -58,7 +58,7 @@
 		{
 			kind: 'channel_dropzone_stuck',
 			label: 'Dropzone Stuck',
-			scope: 'C2/C3',
+			scope: 'C2/C3/C4',
 			description: 'A piece is not moving as expected.',
 			off_label: 'Leave normal backpressure unchanged',
 			manual_label: 'Operator acknowledges ignore',
@@ -121,7 +121,7 @@
 			scope: 'Distribution',
 			description: 'No matching bin is available for the piece.',
 			off_label: 'Allow bottom-tray passthrough',
-			manual_label: 'Operator assigns capacity',
+			manual_label: 'Operator assigns capacity or approves passthrough',
 			automatic_label: 'Automatic no-bin passthrough',
 			automatic_supported: false
 		},

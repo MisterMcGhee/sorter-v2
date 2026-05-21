@@ -54,6 +54,26 @@
 	function variantAccent(variant: DetectionModelVariant): string {
 		return runtimeAccent[variant.runtime.toLowerCase()] ?? 'var(--color-text-muted)';
 	}
+
+	const runtimeDefaultExt: Record<string, string> = {
+		onnx: '.onnx',
+		ncnn: '.bin',
+		hailo: '.hef',
+		pytorch: '.pt'
+	};
+
+	function downloadFilename(variant: DetectionModelVariant): string {
+		// Mirror backend build_download_filename so the dropdown shows what the
+		// user will end up with on disk: {slug}_v{version}_{date}_{runtime}{ext}.
+		if (!model) return variant.file_name;
+		const lastDot = (variant.file_name || '').lastIndexOf('.');
+		let suffix = lastDot >= 0 ? variant.file_name.slice(lastDot) : '';
+		// `.tar.gz` and similar: keep the compound suffix when present.
+		if (variant.file_name?.endsWith('.tar.gz')) suffix = '.tar.gz';
+		if (!suffix) suffix = runtimeDefaultExt[variant.runtime.toLowerCase()] ?? '';
+		const date = model.published_at ? new Date(model.published_at).toISOString().slice(0, 10) : '';
+		return `${model.slug}_v${model.version}${date ? `_${date}` : ''}_${variant.runtime}${suffix}`;
+	}
 </script>
 
 <svelte:window onclick={() => { downloadsOpen = false; }} />
@@ -118,7 +138,6 @@
 							{#each model.variants as variant (variant.id)}
 								<a
 									href={downloadUrl(variant.id)}
-									download={variant.file_name}
 									class="relative flex items-center gap-3 border-b border-[var(--color-border)] px-3 py-2 last:border-b-0 hover:bg-[var(--color-bg)]"
 									onclick={() => { downloadsOpen = false; }}
 								>
@@ -128,7 +147,7 @@
 											<span class="font-mono text-xs uppercase tracking-wider" style={`color: ${variantAccent(variant)};`}>{variant.runtime}</span>
 											<span class="text-xs tabular-nums text-[var(--color-text-muted)]">{formatSize(variant.file_size)}</span>
 										</div>
-										<div class="mt-0.5 truncate font-mono text-xs text-[var(--color-text)]" title={variant.file_name}>{variant.file_name}</div>
+										<div class="mt-0.5 truncate font-mono text-xs text-[var(--color-text)]" title={downloadFilename(variant)}>{downloadFilename(variant)}</div>
 										<div class="mt-0.5 font-mono text-[10px] text-[var(--color-text-muted)]" title={variant.sha256}>sha256 {variant.sha256.slice(0, 16)}…</div>
 									</div>
 									<svg class="h-4 w-4 shrink-0 text-[var(--color-text-muted)]" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
