@@ -6,8 +6,7 @@
 		type SampleClassificationPayload,
 		type SampleDetail,
 		type SampleReview,
-		type SavedSampleAnnotation,
-		type TeacherModelInfo
+		type SavedSampleAnnotation
 	} from '$lib/api';
 	import { auth } from '$lib/auth.svelte';
 	import Badge from '$lib/components/Badge.svelte';
@@ -20,6 +19,7 @@
 	import ReviewActionPad from '$lib/components/review/ReviewActionPad.svelte';
 	import ReviewAnnotatorPanel from '$lib/components/review/ReviewAnnotatorPanel.svelte';
 	import ReviewHeuristics from '$lib/components/review/ReviewHeuristics.svelte';
+	import TeacherRerunButtons from '$lib/components/teacher/TeacherRerunButtons.svelte';
 	import SampleConditionCard from '$lib/components/sample/SampleConditionCard.svelte';
 	import { Alert } from '$lib/components/primitives';
 	import { extractLegacyReviewBboxes, extractPrimaryBboxes, mergeUniqueBboxes, parseBboxCollection, proposalColor } from '$lib/components/sample/bbox-helpers';
@@ -152,89 +152,22 @@
 	});
 
 	// Admin-only teacher rerun panel. Lets the reviewer try a different model on the
-	// currently displayed sample without leaving the queue — useful when boxes look bad
-	// and you want to A/B a fresh detection inline instead of skipping to /compare.
-	const REVIEW_TEACHER_MODEL_STORAGE_KEY = 'hive.review.teacherModel';
-	let teacherModels = $state<TeacherModelInfo[]>([]);
-	let teacherModelChoice = $state('');
-	let teacherRerunning = $state(false);
-	let teacherRerunError = $state<string | null>(null);
-	// Set once after the dropdown is populated so the localStorage-sync effect doesn't
-	// fire during initial prefill (which would overwrite a stale key with itself anyway,
-	// but lets us skip a noop write).
-	let teacherChoiceInitialized = $state(false);
-
-	function readStoredTeacherModel(): string | null {
-		if (typeof window === 'undefined') return null;
-		try {
-			return window.localStorage.getItem(REVIEW_TEACHER_MODEL_STORAGE_KEY);
-		} catch {
-			return null;
-		}
-	}
-
-	function writeStoredTeacherModel(value: string) {
-		if (typeof window === 'undefined' || !value) return;
-		try {
-			window.localStorage.setItem(REVIEW_TEACHER_MODEL_STORAGE_KEY, value);
-		} catch {
-			/* private mode / quota — silently drop */
-		}
-	}
-
-	// Persist the dropdown choice so the next visit reopens on the same model. Default
-	// resolution: stored value > user.preferred_teacher_model > first registered.
-	$effect(() => {
-		if (!teacherChoiceInitialized) return;
-		if (!teacherModelChoice) return;
-		writeStoredTeacherModel(teacherModelChoice);
-	});
-
+	// currently displayed sample without leaving the queue. UX is one button per model
+	// (see TeacherRerunButtons) — turned out faster than a dropdown + Run for the
+	// click-through review flow. Preferred-model still highlights the user's saved
+	// default so the eye lands there first.
 	onMount(() => {
 		void loadNext();
-		if (auth.isAdmin) {
-			void api
-				.listTeacherModels()
-				.then((m) => {
-					teacherModels = m;
-					const stored = readStoredTeacherModel();
-					const preferred = auth.user?.preferred_teacher_model;
-					if (stored && m.some((mod) => mod.model_id === stored)) {
-						teacherModelChoice = stored;
-					} else if (preferred && m.some((mod) => mod.model_id === preferred)) {
-						teacherModelChoice = preferred;
-					} else if (m.length > 0) {
-						teacherModelChoice = m[0].model_id;
-					}
-					teacherChoiceInitialized = true;
-				})
-				.catch(() => {
-					/* ignore — panel just stays empty */
-				});
-		}
 	});
 
-	async function handleTeacherRerunInReview() {
-		if (!sample || teacherRerunning || !teacherModelChoice) return;
-		teacherRerunning = true;
-		teacherRerunError = null;
-		try {
-			const updated = await api.rerunSampleTeacher(sample.id, teacherModelChoice);
-			sample = updated;
-			// Detection was overwritten and review_status reset on the backend, so the local
-			// review history no longer applies to these boxes — clear so the action pad
-			// shows a fresh slate.
-			reviews = [];
-			currentDecision = null;
-			lastLoadedReviewKey = null;
-		} catch (e: unknown) {
-			teacherRerunError =
-				e && typeof e === 'object' && 'error' in e
-					? String((e as { error: unknown }).error)
-					: 'Teacher rerun failed';
-		} finally {
-			teacherRerunning = false;
-		}
+	function handleTeacherRerunResult(updated: SampleDetail) {
+		sample = updated;
+		// Detection was overwritten and review_status reset on the backend, so the local
+		// review history no longer applies to these boxes — clear so the action pad
+		// shows a fresh slate.
+		reviews = [];
+		currentDecision = null;
+		lastLoadedReviewKey = null;
 	}
 
 	async function loadSample(sampleId: string) {
@@ -680,54 +613,12 @@
 			/>
 
 			{#if auth.isAdmin}
-				<div class="border border-border bg-white p-3">
-					<div class="mb-2 flex items-center justify-between">
-						<h3 class="text-xs font-semibold uppercase tracking-wider text-text-muted">Re-run teacher</h3>
-						<a
-							href={`/samples/${sample.id}/compare`}
-							class="text-[11px] text-text-muted hover:text-primary"
-							title="Compare all models side-by-side"
-						>
-							Compare →
-						</a>
-					</div>
-					<div class="flex gap-2">
-						<select
-							bind:value={teacherModelChoice}
-							disabled={teacherRerunning || teacherModels.length === 0}
-							class="min-w-0 flex-1 border border-border bg-white px-2 py-1.5 text-xs text-text focus:border-primary focus:outline-none"
-						>
-							{#if teacherModels.length === 0}
-								<option value="">(no models)</option>
-							{:else}
-								{#each teacherModels as m (m.model_id)}
-									<option value={m.model_id}>{m.display_name}</option>
-								{/each}
-							{/if}
-						</select>
-						<button
-							type="button"
-							onclick={() => void handleTeacherRerunInReview()}
-							disabled={teacherRerunning || !teacherModelChoice}
-							class="inline-flex items-center gap-1.5 border border-border bg-white px-3 py-1.5 text-xs font-medium text-text hover:bg-bg disabled:opacity-50 disabled:cursor-not-allowed"
-						>
-							{#if teacherRerunning}
-								<span class="inline-block h-3 w-3 animate-spin border-2 border-current border-t-transparent rounded-full"></span>
-								Running…
-							{:else}
-								Run
-							{/if}
-						</button>
-					</div>
-					<p class="mt-2 text-[10px] text-text-muted">
-						Overwrites detection_bboxes on this sample and resets review status to unreviewed.
-					</p>
-					{#if teacherRerunError}
-						<div class="mt-2 border border-warning-strong bg-warning-bg px-2 py-1.5 text-[11px] text-warning-strong">
-							{teacherRerunError}
-						</div>
-					{/if}
-				</div>
+				<TeacherRerunButtons
+					sampleId={sample.id}
+					onResult={handleTeacherRerunResult}
+					preferredModelId={auth.user?.preferred_teacher_model ?? null}
+					dense
+				/>
 			{/if}
 
 			<ReviewHeuristics />

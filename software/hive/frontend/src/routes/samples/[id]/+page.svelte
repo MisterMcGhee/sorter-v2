@@ -13,6 +13,7 @@
 	import Spinner from '$lib/components/Spinner.svelte';
 	import Modal from '$lib/components/Modal.svelte';
 	import SampleAnnotator, { type SeedBox } from '$lib/components/SampleAnnotator.svelte';
+	import TeacherRerunButtons from '$lib/components/teacher/TeacherRerunButtons.svelte';
 	import SampleClassificationCard from '$lib/components/SampleClassificationCard.svelte';
 	import { AnnotatorApi } from '$lib/components/annotator-api.svelte';
 	import { auth } from '$lib/auth.svelte';
@@ -337,26 +338,11 @@
 		}
 	}
 
-	let teacherRerunning = $state(false);
-	let teacherRerunError = $state<string | null>(null);
-
-	async function handleTeacherRerun() {
-		if (!sample || teacherRerunning) return;
-		teacherRerunning = true;
-		teacherRerunError = null;
-		try {
-			sample = await api.rerunSampleTeacher(sample.id);
-			// The teacher resets review state, so existing review history is no longer
-			// accurate for these boxes — drop it so the panel reflects the fresh slate.
-			reviews = [];
-		} catch (err) {
-			teacherRerunError =
-				err && typeof err === 'object' && 'error' in err
-					? String((err as { error: unknown }).error)
-					: 'Teacher rerun failed';
-		} finally {
-			teacherRerunning = false;
-		}
+	function handleTeacherRerunResult(updated: SampleDetail) {
+		sample = updated;
+		// The teacher reset review state on the backend — drop local history so the panel
+		// reflects the fresh slate.
+		reviews = [];
 	}
 
 	function handleClassificationSaved(payload: SampleClassificationPayload | null) {
@@ -478,14 +464,6 @@
 					>
 						Compare models
 					</a>
-					<Button
-						variant="secondary"
-						size="sm"
-						loading={teacherRerunning}
-						onclick={handleTeacherRerun}
-					>
-						{teacherRerunning ? 'Running teacher…' : 'Re-run teacher'}
-					</Button>
 					<Button variant="danger" size="sm" onclick={() => { showDeleteModal = true; }}>
 						Delete
 					</Button>
@@ -493,11 +471,6 @@
 			{/if}
 		</div>
 	</div>
-	{#if teacherRerunError && auth.isAdmin}
-		<div class="-mt-3 mb-4 border border-warning-strong bg-warning-bg px-3 py-2 text-xs text-warning-strong">
-			{teacherRerunError}
-		</div>
-	{/if}
 
 	<div class="grid gap-5 lg:grid-cols-[1fr_340px]">
 		<!-- Left: Image area -->
@@ -647,6 +620,14 @@
 						{/if}
 					</div>
 				</div>
+			{/if}
+
+			{#if auth.isAdmin}
+				<TeacherRerunButtons
+					sampleId={sample.id}
+					onResult={handleTeacherRerunResult}
+					preferredModelId={auth.user?.preferred_teacher_model ?? null}
+				/>
 			{/if}
 
 			<SampleClassificationCard
