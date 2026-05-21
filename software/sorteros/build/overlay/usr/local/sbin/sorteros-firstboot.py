@@ -157,17 +157,15 @@ def stage_apply_config_toml() -> None:
       [wifi].password       → wpa-psk for the above
       [ssh].authorized_key  → append to orangepi user's authorized_keys
     """
-    if not CONFIG_PATH.exists():
-        return
-
-    raw = CONFIG_PATH.read_text("utf-8", errors="replace")
-    if CFG_END_MARKER in raw:
-        raw = raw[:raw.index(CFG_END_MARKER)]
-    try:
-        cfg = tomllib.loads(raw)
-    except Exception as e:
-        log.warning("config toml unreadable: %s", e)
-        return
+    cfg: dict = {}
+    if CONFIG_PATH.exists():
+        raw = CONFIG_PATH.read_text("utf-8", errors="replace")
+        if CFG_END_MARKER in raw:
+            raw = raw[:raw.index(CFG_END_MARKER)]
+        try:
+            cfg = tomllib.loads(raw)
+        except Exception as e:
+            log.warning("config toml unreadable: %s", e)
 
     hostname = cfg.get("hostname")
     if isinstance(hostname, str) and hostname.strip():
@@ -360,7 +358,7 @@ def stage_install_services() -> None:
         "__PNPM_BIN__": pnpm_bin,
     }
 
-    for unit in ["sorter-backend.service", "sorter-ui.service"]:
+    for unit in ["sorter-backend.service", "sorter-ui.service", "sorter-backend-dev.service", "sorter-ui-dev.service"]:
         src = systemd_src / unit
         if not src.exists():
             raise RuntimeError(f"service template {unit} not found in repo")
@@ -372,8 +370,12 @@ def stage_install_services() -> None:
         dest.chmod(0o644)
 
     sh(["systemctl", "daemon-reload"])
-    sh(["systemctl", "enable", "--now", "sorter-backend.service", "sorter-ui.service"])
-    log.info("sorter services installed and started")
+    # Dev services enabled by default. At this project stage, hot reload and rapid
+    # iteration during setup/debugging are more valuable than production optimization.
+    # Switch to sorter-backend.service / sorter-ui.service later when the system
+    # stabilizes and we don't need frequent remote adjustments.
+    sh(["systemctl", "enable", "--now", "sorter-backend-dev.service", "sorter-ui-dev.service"])
+    log.info("sorter services installed and started (dev mode)")
 
 
 def _ensure_clock_synced() -> None:
