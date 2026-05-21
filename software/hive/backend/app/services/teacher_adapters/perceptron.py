@@ -81,31 +81,53 @@ def _decode_image_size(image_bytes: bytes) -> tuple[int, int]:
 def _zone_instruction(zone: str) -> str:
     """Bare detect-style instruction. Perceptron's grounded XML mode is driven by
     ``vision_config.annotation_format = "box"`` — the instruction text only specifies
-    *where to look*. Keep it close to the SDK example "Detect helmets" so the model
-    doesn't switch into descriptive-prose mode.
+    *where to look* and how to split composite assemblies.
+
+    Splitting hint matters: a "wheel" in everyday language is one object but in LEGO
+    terms it's two pieces (rubber tire + plastic hub), and clip/hook parts attached to
+    bricks count separately too. Without an explicit "one box per piece" cue Perceptron
+    groups composite items into a single bbox and undercounts.
     """
+    splitting = (
+        " Return one box per individual lego element — a wheel counts as two pieces "
+        "(tire + hub), and any clip, hook or small attached part also counts separately."
+    )
     if zone == "classification_channel":
-        # Single-line C4 hint. Constraints are listed comma-separated to avoid
-        # paragraph-style narrative that pushes the model toward prose.
         return (
-            "Detect lego pieces and foreign objects on the C4 rotor disc, "
+            "Detect each individual lego piece and foreign object on the C4 rotor disc, "
             "ignoring the bright white outer rim, parts on the rim, "
-            "and parts still in the upper-left feeder channel."
+            "and parts still in the upper-left feeder channel." + splitting
         )
     if zone == "c_channel":
-        return "Detect lego pieces and foreign objects inside the C-channel feed track."
+        return (
+            "Detect each individual lego piece and foreign object inside the C-channel "
+            "feed track." + splitting
+        )
     if zone == "classification_chamber":
-        return "Detect the lego piece on the small flat tray."
+        return "Detect each individual lego piece on the small flat tray." + splitting
     if zone == "carousel":
-        return "Detect lego pieces on the rotating turntable, ignoring the black center disc."
-    return "Detect lego pieces and foreign objects."
+        return (
+            "Detect each individual lego piece on the rotating turntable, ignoring the "
+            "black center disc." + splitting
+        )
+    return "Detect each individual lego piece and foreign object." + splitting
 
 
-# What the model should look for, sent as Perceptron's native ``classes`` parameter so
-# it stays focused on the part-detection task instead of drifting into scene description.
+# What the model should look for, sent as Perceptron's native ``classes`` parameter.
+# A granular class list discourages composite-item grouping: when the model sees
+# "lego tire" and "lego wheel hub" as separate targets it's more likely to box them
+# independently rather than collapse the whole assembly into one "lego piece" hit.
 _ZONE_CLASSES: dict[str, list[str]] = {
-    "classification_channel": ["lego piece", "foreign object"],
-    "c_channel": ["lego piece", "foreign object"],
+    "classification_channel": [
+        "lego brick", "lego plate", "lego tile", "lego slope",
+        "lego tire", "lego wheel hub", "lego clip", "lego hook",
+        "foreign object",
+    ],
+    "c_channel": [
+        "lego brick", "lego plate", "lego tile", "lego slope",
+        "lego tire", "lego wheel hub", "lego clip", "lego hook",
+        "foreign object",
+    ],
     "classification_chamber": ["lego piece", "foreign object"],
     "carousel": ["lego piece", "foreign object"],
 }
