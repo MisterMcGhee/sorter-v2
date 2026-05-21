@@ -1101,13 +1101,9 @@ def mkIRLConfig(machine_params: dict[str, object] | None = None) -> IRLConfig:
         classification_camera_bottom_index = cameras_section.get("classification_bottom")
         classification_camera_top_index = cameras_section.get("classification_top")
 
-        if feeder_camera_index is None and classification_camera_top_index is None:
-            raise RuntimeError(
-                "No camera setup found in TOML [cameras] section. "
-                "Assign cameras from the Settings → Cameras page in the UI, or edit "
-                "machine_params.toml directly."
-            )
-
+        # Missing cameras resolve to device_index -1 (absent) so the backend
+        # boots in standby with no [cameras] section — cameras get assigned
+        # later from the UI.
         if not isinstance(feeder_camera_index, int):
             feeder_camera_index = -1
         if not isinstance(classification_camera_bottom_index, int):
