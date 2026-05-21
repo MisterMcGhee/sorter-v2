@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import re
 import socket
 import subprocess
@@ -21,6 +22,24 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+LEGO_COLORS = [
+    "aqua", "azure", "black", "blue", "bright-green", "bright-pink",
+    "brown", "coral", "dark-azure", "dark-blue", "dark-brown", "dark-gray",
+    "dark-green", "dark-orange", "dark-pink", "dark-purple", "dark-red",
+    "dark-tan", "dark-turquoise", "gray", "green", "lavender", "light-aqua",
+    "light-blue", "light-gray", "light-pink", "light-purple", "light-yellow",
+    "lime", "magenta", "medium-azure", "medium-blue", "medium-green",
+    "medium-lavender", "medium-nougat", "nougat", "olive", "orange", "pink",
+    "purple", "red", "reddish-brown", "sand-blue", "sand-green", "tan",
+    "teal", "warm-gold", "white", "yellow",
+]
+
+LEGO_PIECES = [
+    "arch", "axle", "beam", "bracket", "brick", "clip", "cone", "cylinder",
+    "dome", "gear", "hinge", "panel", "pin", "plate", "rail", "slope",
+    "stud", "technic", "tile", "turntable", "wedge",
+]
 
 # tomllib is stdlib on Python 3.11+; Ubuntu Jammy ships 3.10 so we fall
 # back to the python3-tomli apt package (drop-in API-compatible).
@@ -71,6 +90,26 @@ def sh(cmd: list[str], **kw) -> None:
 def _hostname() -> str:
     p = Path("/etc/hostname")
     return p.read_text().strip() if p.exists() else "sorter"
+
+
+def _mac_suffix() -> str:
+    net = Path("/sys/class/net")
+    for iface in sorted(net.iterdir()):
+        if iface.name == "lo":
+            continue
+        addr_file = iface / "address"
+        if addr_file.exists():
+            mac = addr_file.read_text().strip().replace(":", "")
+            if mac and mac != "000000000000":
+                return mac[-6:].lower()
+    return format(random.randint(0, 0xFFFFFF), "06x")
+
+
+def _generate_machine_name() -> str:
+    color = random.choice(LEGO_COLORS)
+    piece = random.choice(LEGO_PIECES)
+    suffix = _mac_suffix()
+    return f"sorter-{color}-{piece}-{suffix}"
 
 
 def stage_ssh_host_keys() -> None:
@@ -371,7 +410,14 @@ def stage_tailscale_up() -> None:
     tags = kvs.get("TAILSCALE_TAGS", "tag:sorter")
     if not key:
         return
-    sh(["tailscale", "up", f"--authkey={key}", f"--advertise-tags={tags}", "--ssh"])
+    override_file = Path("/etc/sorteros/tailscale_hostname_override")
+    if override_file.exists() and (override := override_file.read_text().strip()):
+        ts_name = override
+        log.info("tailscale device name (override): %s", ts_name)
+    else:
+        ts_name = _generate_machine_name()
+        log.info("tailscale device name: %s", ts_name)
+    sh(["tailscale", "up", f"--authkey={key}", f"--advertise-tags={tags}", f"--hostname={ts_name}", "--ssh"])
     env.unlink()
 
 
