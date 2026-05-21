@@ -294,12 +294,22 @@ def stage_write_env() -> None:
     env_path.write_text(
         "export DEBUG_LEVEL=2\n"
         "export PYTHONUNBUFFERED=1\n"
-        f'export MACHINE_SPECIFIC_PARAMS_PATH="{SOFTWARE_DIR}/machine.example.toml"\n'
+        'export MACHINE_SPECIFIC_PARAMS_PATH="../machine.toml"\n'
         f'export SORTING_PROFILE_PATH="{SOFTWARE_DIR}/sorter/backend/sorting_profile.json"\n'
         "export SORTER_API_HOST=0.0.0.0\n"
         f'export SORTER_API_ALLOWED_ORIGINS="http://{hostname}:5173,http://localhost:5173"\n'
     )
     sh(["chown", "orangepi:orangepi", str(env_path)])
+
+
+def stage_write_machine_toml() -> None:
+    machine_toml = SOFTWARE_DIR / "sorter" / "machine.toml"
+    if machine_toml.exists():
+        return
+    if not (SOFTWARE_DIR / "sorter").exists():
+        raise RuntimeError("repo not cloned yet")
+    machine_toml.write_text("")
+    sh(["chown", "orangepi:orangepi", str(machine_toml)])
 
 
 def stage_write_frontend_env() -> None:
@@ -432,6 +442,7 @@ STAGES: list[Stage] = [
     Stage("clone-repo",          needs_internet=True,  run=stage_clone_repo),
     Stage("git-lfs-pull",        needs_internet=True,  run=stage_git_lfs_pull),
     Stage("write-env",           needs_internet=False, run=stage_write_env),
+    Stage("write-machine-toml",  needs_internet=False, run=stage_write_machine_toml),
     Stage("write-frontend-env",  needs_internet=False, run=stage_write_frontend_env),
     Stage("uv-sync",             needs_internet=True,  run=stage_uv_sync),
     Stage("pnpm-install",        needs_internet=True,  run=stage_pnpm_install),
