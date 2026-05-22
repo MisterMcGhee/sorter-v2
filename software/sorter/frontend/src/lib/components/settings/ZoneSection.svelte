@@ -1546,10 +1546,16 @@
 
 	function streamSrc(channel: Channel): string {
 		const role = CAMERA_FOR_CHANNEL[channel];
-		const annotated = !editingZone && previewAnnotated;
-		const dashboard = !editingZone && previewCropped;
-		const colorCorrect = editingZone ? true : previewColorCorrect;
-		const showRegions = !editingZone && previewCropped && previewZones;
+		// The feed URL is intentionally independent of `editingZone`: entering or
+		// leaving zone-edit mode must not change the stream, so the single MJPEG
+		// connection (and its `<img>`) survives the toggle. A fresh connection
+		// opened during a camera hiccup has no frame to show and goes black; a
+		// persistent one rides the hiccup on its last frame. `beginEditing()`
+		// forces crop off so the editor canvas always maps to the full frame.
+		const annotated = previewAnnotated;
+		const dashboard = previewCropped;
+		const colorCorrect = previewColorCorrect;
+		const showRegions = previewCropped && previewZones;
 		const params = new URLSearchParams({
 			annotated: annotated ? '1' : '0',
 			layer: annotated ? 'annotated' : 'raw',
@@ -1563,9 +1569,10 @@
 	function feedInstanceKey(channel: Channel): string {
 		const assignment = currentAssignment(channel);
 		const zonesMode = previewCropped ? (previewZones ? 'z' : 'nz') : 'local-zones';
-		const mode = editingZone
-			? 'edit-live-raw'
-			: `${previewAnnotated ? 'annot' : 'raw'}-${previewColorCorrect ? 'cc' : 'nocc'}-${previewCropped ? 'crop' : 'full'}-${zonesMode}`;
+		// No `editingZone` term here — the `{#key}` block must not remount the
+		// feed `<img>` when zone editing toggles. Remounting tears down a working
+		// MJPEG connection; see streamSrc() for why that causes the black screen.
+		const mode = `${previewAnnotated ? 'annot' : 'raw'}-${previewColorCorrect ? 'cc' : 'nocc'}-${previewCropped ? 'crop' : 'full'}-${zonesMode}`;
 		return `${currentRole(channel)}::${assignment === null ? 'none' : String(assignment)}::${mode}::${feedRevision}`;
 	}
 
@@ -2999,6 +3006,10 @@
 			setDetectionHighlights(currentRole(), null);
 		}
 		restoreSnapshot(persistedSnapshot);
+		// Editing always works on the full uncropped frame so the canvas overlay
+		// maps 1:1 to camera coordinates. Crop is normally off, so this is a
+		// no-op and the feed connection is untouched.
+		previewCropped = false;
 		editingZone = true;
 		activeSidebar = 'zone';
 		dragState = null;

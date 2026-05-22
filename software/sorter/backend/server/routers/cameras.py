@@ -3366,10 +3366,67 @@ def list_cameras() -> Dict[str, Any]:
         }
 
 
+def _device_capturing_index(index: int):
+    """Return the camera-service device already capturing ``index``, if any.
+
+    The picker streams cameras by device index. When that index is assigned to
+    a role, the camera service's capture thread already holds /dev/videoN open;
+    opening a second VideoCapture on it fights the live pipeline for frames and
+    spikes USB/CPU. Reusing the running capture thread avoids the duplicate open.
+    """
+    service = shared_state.camera_service
+    if service is None:
+        return None
+    seen: set[int] = set()
+    for device in service.devices.values():
+        if id(device) in seen:
+            continue
+        seen.add(id(device))
+        try:
+            if device.capture_thread.getCameraSource() == index:
+                return device
+        except Exception:
+            continue
+    return None
+
+
 @router.get("/api/cameras/stream/{index}")
 def camera_stream(index: int):
-    """MJPEG stream for a single camera by index (thumbnail)."""
-    def generate():
+    """MJPEG thumbnail stream for a single camera by index.
+
+    Served from the running capture thread when the index is already owned by a
+    role; only falls back to a direct device open when nothing else holds it.
+    """
+    def _encode_thumb(frame: np.ndarray) -> bytes:
+        thumb = cv2.resize(frame, (426, 240))
+        ok, buf = cv2.imencode(".jpg", thumb, [cv2.IMWRITE_JPEG_QUALITY, 60])
+        if not ok:
+            return b""
+        return (
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n"
+        )
+
+    shared_device = _device_capturing_index(index)
+
+    if shared_device is not None:
+        def generate_shared():
+            while True:
+                frame_obj = shared_device.latest_frame
+                if frame_obj is None or frame_obj.raw is None:
+                    time.sleep(0.05)
+                    continue
+                chunk = _encode_thumb(frame_obj.raw)
+                if chunk:
+                    yield chunk
+                time.sleep(0.1)
+
+        return StreamingResponse(
+            generate_shared(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+        )
+
+    def generate_direct():
         cap = _open_camera_for_probe(index)
         if not cap.isOpened():
             return
@@ -3378,17 +3435,14 @@ def camera_stream(index: int):
                 ret, frame = cap.read()
                 if not ret:
                     break
-                thumb = cv2.resize(frame, (426, 240))
-                _, buf = cv2.imencode(".jpg", thumb, [cv2.IMWRITE_JPEG_QUALITY, 60])
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n"
-                )
+                chunk = _encode_thumb(frame)
+                if chunk:
+                    yield chunk
         finally:
             cap.release()
 
     return StreamingResponse(
-        generate(),
+        generate_direct(),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
 
