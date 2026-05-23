@@ -404,25 +404,13 @@ class VisionManager:
                         feed.add_overlay(ChannelRegionOverlay(self._region_provider, poly_key))
                 feeder_algo = self.getFeederDetectionAlgorithm(role)
                 if self._isDynamicDetectionAlgorithm(feeder_algo):
-                    detection_cache: dict[str, object] = {"frame_ts": None, "result": None}
-
-                    def _ensure_detection(r=role, cache=detection_cache):
-                        capture = self.getCaptureThreadForRole(r)
-                        frame = capture.latest_frame if capture is not None else None
-                        frame_ts = frame.timestamp if frame is not None else None
-                        if cache["frame_ts"] != frame_ts:
-                            cache["frame_ts"] = frame_ts
-                            cache["result"] = self._getFeederDynamicDetection(
-                                r, force=False
-                            )
-                        return cache["result"]
-
-                    # TrackOverlay replaces DynamicDetectionOverlay. Triggering
-                    # _getFeederDynamicDetection on each render tick is what
-                    # keeps local model inference (throttled) + tracker cache warm;
-                    # the overlay itself reads the freshly-updated track list.
+                    # The auxiliary detection loop (_auxiliaryDetectionLoop) runs
+                    # _getFeederDynamicDetection at its own cadence in a dedicated
+                    # thread pool. The render path previously also triggered
+                    # inference per annotated-frame pull, which serialized ~60 ms
+                    # of YOLO work into the encode thread on every frame and
+                    # capped the annotated stream at ~1 fps. Read-only here.
                     def _tracks_for(r=role):
-                        _ensure_detection(r)
                         return self.getFeederTracks(r)
 
                     # Preview annotates the latest captured frame at full
