@@ -34,6 +34,12 @@ def _patchedDetectForward() -> None:
     import ultralytics.nn.modules.head as head_mod
 
     def _stripped(self, x):
+        # Apply box (cv2) and cls (cv3) convolutions per scale, returning
+        # [B, 4*reg_max+nc, H, W] per scale — DFL/anchor/sigmoid stripped.
+        # The raw neck features (what `return x` alone would give) are NOT
+        # decodable; we must keep cv2+cv3 so Pi-side DFL decode can work.
+        for i in range(self.nl):
+            x[i] = __import__("torch").cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
         return x
 
     head_mod.Detect.forward = _stripped
@@ -61,6 +67,13 @@ def _resolveModelSpec(model_id: str) -> dict:
     return YOLO_MODELS[key]
 
 
+def _applyRelu6() -> None:
+    import torch.nn as nn
+    import ultralytics.nn.modules.conv as conv_mod
+
+    conv_mod.Conv.default_act = nn.ReLU6()
+
+
 def _trainOne(
     spec: dict,
     data_yaml: Path,
@@ -70,12 +83,22 @@ def _trainOne(
     workers: int,
     cache: bool,
     head_stripped: bool,
+    activation: str = "silu",
 ) -> dict:
     from ultralytics import YOLO
 
     t0 = time.time()
-    print(f"[train] model={spec['model']} imgsz={spec['imgsz']} batch={spec['batch']} epochs={epochs}")
-    model = YOLO(spec["model"])
+    model_src = spec["model"]
+    if activation == "relu6":
+        # ReLU6 must be set before the model is instantiated. Use the .yaml
+        # architecture (no pretrained weights) so the activations are consistent
+        # from the very first forward pass; loading a SiLU-pretrained .pt and
+        # then changing the activation mid-flight wrecks the learned features.
+        _applyRelu6()
+        model_src = model_src.replace(".pt", ".yaml")
+        print(f"[relu6] Conv.default_act = ReLU6, training from scratch ({model_src})")
+    print(f"[train] model={model_src} imgsz={spec['imgsz']} batch={spec['batch']} epochs={epochs}")
+    model = YOLO(model_src)
     model.train(
         data=str(data_yaml),
         epochs=epochs,
@@ -116,6 +139,7 @@ def _trainOne(
 
     return {
         "model_id_spec": spec,
+        "activation": activation,
         "best_pt": str(best_pt),
         "best_onnx": str(onnx_path),
         "train_minutes": train_minutes,
@@ -137,6 +161,12 @@ def main() -> None:
         action="store_true",
         help="Disable the Detect.forward monkeypatch (export stock Ultralytics ONNX).",
     )
+    parser.add_argument(
+        "--activation",
+        choices=["silu", "relu6"],
+        default="silu",
+        help="Activation function. relu6 trains from scratch (no pretrained weights) with ReLU6.",
+    )
     parser.add_argument("--result-json", required=True, help="Where to dump result metadata")
     args = parser.parse_args()
 
@@ -152,6 +182,7 @@ def main() -> None:
         workers=args.workers,
         cache=args.cache,
         head_stripped=not args.no_head_strip,
+        activation=args.activation,
     )
 
     Path(args.result_json).parent.mkdir(parents=True, exist_ok=True)

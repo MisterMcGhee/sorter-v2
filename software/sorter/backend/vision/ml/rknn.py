@@ -31,6 +31,7 @@ from .base import (
     BaseProcessor,
     Detection,
     decode_yolo,
+    decode_yolo_head_stripped,
     letterbox,
 )
 
@@ -155,13 +156,20 @@ class RknnYoloProcessor(_RknnMixin, BaseProcessor):
         outputs = rknn.inference(inputs=[blob])
         if not outputs:
             return []
+        conf = float(conf_threshold) if conf_threshold is not None else self.conf_threshold
+        # Head-stripped models produce 3 separate [1, C, H, W] tensors per scale.
+        # Fused models produce a single [1, N, 5+] tensor.
+        if len(outputs) == 3 and np.asarray(outputs[0]).ndim == 4:
+            return decode_yolo_head_stripped(
+                outputs,
+                pre=pre,
+                imgsz=self.imgsz,
+                conf_threshold=conf,
+                iou_threshold=self.iou_threshold,
+            )
         return decode_yolo(
             outputs[0],
             pre=pre,
-            conf_threshold=(
-                float(conf_threshold)
-                if conf_threshold is not None
-                else self.conf_threshold
-            ),
+            conf_threshold=conf,
             iou_threshold=self.iou_threshold,
         )
