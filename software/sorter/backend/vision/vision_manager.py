@@ -425,14 +425,15 @@ class VisionManager:
                         _ensure_detection(r)
                         return self.getFeederTracks(r)
 
-                    # Pin the encode path to the frame the detector last saw,
-                    # so overlay bboxes sit on the piece position the detector
-                    # actually scored — not on a newer frame where the piece
-                    # has already moved.
-                    def _pinned_ts(r=role):
-                        cached = self._feeder_dynamic_detection_cache.get(r)
-                        return float(cached[0]) if cached is not None else None
-
+                    # Preview annotates the latest captured frame at full
+                    # capture fps. Track bboxes are the last completed
+                    # detection, frozen between detections (the tracker does not
+                    # extrapolate on read), so a box trails a fast piece by up
+                    # to one detection interval — accepted in exchange for
+                    # smooth high-fps video. The CameraFeed pinned-ts mechanism
+                    # is intentionally left uninstalled here; it stays available
+                    # for when detection runs at capture fps and boxes can be
+                    # glued to their exact frame.
                     for feed in feeds:
                         # The raw-YOLO purple boxes (DynamicDetectionOverlay)
                         # double-up with the tracker-derived TrackOverlay on the
@@ -440,7 +441,6 @@ class VisionManager:
                         # confusing for the operator. The TrackOverlay carries
                         # all the identity state we need (active/coasting,
                         # velocity arrow), so the raw YOLO layer is dropped.
-                        feed.set_pinned_ts_provider(_pinned_ts)
                         feed.add_overlay(
                             IgnoredRegionOverlay(
                                 lambda r=role: self.getFeederIgnoredDetectionOverlayData(r)
@@ -460,11 +460,10 @@ class VisionManager:
                     carousel_feed.add_overlay(ChannelRegionOverlay(self._region_provider, "carousel"))
                     carousel_algo = self.getCarouselDetectionAlgorithm()
                     if self._isDynamicDetectionAlgorithm(carousel_algo):
-                        def _carousel_pinned_ts():
-                            cached = self._carousel_dynamic_detection_cache
-                            return float(cached[0]) if cached is not None else None
-
-                        carousel_feed.set_pinned_ts_provider(_carousel_pinned_ts)
+                        # See the feeder feed above: preview annotates the
+                        # latest frame at capture fps with the last detection
+                        # frozen, rather than pinning the stream to the detection
+                        # frame (which throttled it to detection fps).
                         carousel_feed.add_overlay(DynamicDetectionOverlay(
                             lambda: self._getCarouselDynamicDetection(force=False)
                         ))
