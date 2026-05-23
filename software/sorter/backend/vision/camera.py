@@ -1,3 +1,4 @@
+import logging
 import subprocess
 import threading
 import time
@@ -6,6 +7,14 @@ from typing import Any, Optional
 import platform
 import cv2
 import numpy as np
+
+log = logging.getLogger(__name__)
+
+# One-shot flags so we log only the *first* time a non-identity picture/color
+# path runs in a given process. Lets ops grep journalctl for these strings —
+# their absence means we never paid the cost.
+_PICTURE_NONIDENTITY_LOGGED = False
+_COLOR_ACTIVE_LOGGED = False
 
 from irl.config import (
     CameraConfig,
@@ -497,12 +506,32 @@ def probe_camera_device_controls(
         cap.release()
 
 
+def _picture_settings_is_identity(settings: CameraPictureSettings | None) -> bool:
+    if settings is None:
+        return True
+    return (
+        int(getattr(settings, "rotation", 0) or 0) % 360 == 0
+        and not bool(getattr(settings, "flip_horizontal", False))
+        and not bool(getattr(settings, "flip_vertical", False))
+    )
+
+
 def apply_picture_settings(
     frame: np.ndarray,
     settings: CameraPictureSettings | None,
 ) -> np.ndarray:
-    if settings is None:
+    if _picture_settings_is_identity(settings):
         return frame
+
+    global _PICTURE_NONIDENTITY_LOGGED
+    if not _PICTURE_NONIDENTITY_LOGGED:
+        _PICTURE_NONIDENTITY_LOGGED = True
+        log.warning(
+            "apply_picture_settings: non-identity branch active (rotation=%s flip_h=%s flip_v=%s) — this allocates per frame",
+            getattr(settings, "rotation", None),
+            getattr(settings, "flip_horizontal", None),
+            getattr(settings, "flip_vertical", None),
+        )
 
     current = clampCameraPictureSettings(settings)
     adjusted = frame
@@ -527,8 +556,15 @@ def apply_camera_color_profile(
     frame: np.ndarray,
     profile: CameraColorProfile | None,
 ) -> np.ndarray:
-    if profile is None:
+    if profile is None or not getattr(profile, "enabled", False):
         return frame
+
+    global _COLOR_ACTIVE_LOGGED
+    if not _COLOR_ACTIVE_LOGGED:
+        _COLOR_ACTIVE_LOGGED = True
+        log.warning(
+            "apply_camera_color_profile: enabled branch active — full-frame LUT+tensordot+gamma will run per frame"
+        )
 
     current = clampCameraColorProfile(profile)
     if not current.enabled:
@@ -849,6 +885,20 @@ class CaptureThread:
         next_open_attempt_at = 0.0
         previous_source: int | str | None = None
         expected_frame_settle_until = 0.0
+        # One-shot startup log per camera so journalctl shows the
+        # picture/color identity state. If `picture=identity color=disabled`
+        # appears for every camera and the non-identity warnings never fire,
+        # we know the per-frame apply_* calls are no-ops the whole run.
+        _initial_pic = self._picture_settings
+        _initial_col = self._color_profile
+        log.warning(
+            "CaptureThread[%s] starting — picture=%s color=%s",
+            self.name,
+            "identity"
+            if _picture_settings_is_identity(_initial_pic)
+            else f"rotation={getattr(_initial_pic, 'rotation', '?')} flip_h={getattr(_initial_pic, 'flip_horizontal', '?')} flip_v={getattr(_initial_pic, 'flip_vertical', '?')}",
+            "enabled" if getattr(_initial_col, "enabled", False) else "disabled",
+        )
         last_expected_frame_at = 0.0
         # Some UVC cameras (especially on Linux with MJPG) reset device controls
         # (e.g. auto_exposure) when streaming starts on the first cap.read().
@@ -999,15 +1049,20 @@ class CaptureThread:
                     post_stream_settings = None
                     post_stream_source = None
                 picture_settings = self.getPictureSettings()
-                uncorrected_frame = apply_picture_settings(frame, picture_settings)
-                frame = apply_camera_color_profile(frame, self.getColorProfile())
-                frame = apply_picture_settings(frame, picture_settings)
+                color_profile = self.getColorProfile()
+                # Apply rotation/flip once; downstream consumers see the same
+                # geometry whether or not color correction is active.
+                geom_frame = apply_picture_settings(frame, picture_settings)
+                if getattr(color_profile, "enabled", False):
+                    corrected_frame = apply_camera_color_profile(geom_frame, color_profile)
+                else:
+                    corrected_frame = geom_frame
                 camera_frame = CameraFrame(
-                    raw=frame,
+                    raw=corrected_frame,
                     annotated=None,
                     results=[],
                     timestamp=time.time(),
-                    uncorrected_raw=uncorrected_frame,
+                    uncorrected_raw=geom_frame,
                 )
                 self.latest_frame = camera_frame
                 # deque.append is atomic under the GIL — no lock needed.
