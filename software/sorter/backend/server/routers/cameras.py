@@ -3919,6 +3919,7 @@ def camera_feed_by_role(
             prof = shared_state.gc_ref.profiler if shared_state.gc_ref is not None else None
 
             def generate_live():
+                last_frame_ts: float | None = None
                 while True:
                     frame_obj = feed.get_frame(
                         annotated=want_annotated,
@@ -3928,6 +3929,10 @@ def camera_feed_by_role(
                     if frame_obj is None:
                         time.sleep(0.05)
                         continue
+                    if last_frame_ts == frame_obj.timestamp:
+                        time.sleep(0.01)
+                        continue
+                    last_frame_ts = frame_obj.timestamp
                     frame = (
                         frame_obj.annotated
                         if want_annotated and frame_obj.annotated is not None
@@ -3949,7 +3954,6 @@ def camera_feed_by_role(
                     else:
                         chunk = encoder.encode_chunk(frame, quality=55)
                     yield chunk
-                    time.sleep(0.2)
 
             return StreamingResponse(
                 generate_live(),
