@@ -3916,6 +3916,8 @@ def camera_feed_by_role(
     if not direct and shared_state.camera_service is not None:
         feed = shared_state.camera_service.get_feed(role)
         if feed is not None:
+            prof = shared_state.gc_ref.profiler if shared_state.gc_ref is not None else None
+
             def generate_live():
                 while True:
                     frame_obj = feed.get_frame(
@@ -3939,7 +3941,14 @@ def camera_feed_by_role(
                             (PREVIEW_MAX_WIDTH, int(round(frame.shape[0] * scale))),
                             interpolation=cv2.INTER_AREA,
                         )
-                    yield encoder.encode_chunk(frame, quality=55)
+                    if prof is not None:
+                        prof.hit(f"encode.{role}.frames")
+                        prof.mark(f"encode.{role}.interval_ms")
+                        with prof.timer(f"encode.{role}.encode_ms"):
+                            chunk = encoder.encode_chunk(frame, quality=55)
+                    else:
+                        chunk = encoder.encode_chunk(frame, quality=55)
+                    yield chunk
                     time.sleep(0.2)
 
             return StreamingResponse(
