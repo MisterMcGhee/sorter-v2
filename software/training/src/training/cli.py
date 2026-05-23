@@ -110,6 +110,24 @@ def pull(hive_url: str, zone: str, source_role: str | None, status: str, token: 
     type=click.Path(file_okay=False, dir_okay=True),
     help="Override output dataset directory.",
 )
+@click.option(
+    "--exclude-algorithm-prefix",
+    "exclude_algorithm_prefixes",
+    multiple=True,
+    help="Drop samples whose detection_algorithm starts with this prefix (repeatable, e.g. 'bundled:' 'hive:').",
+)
+@click.option(
+    "--prioritize-machine",
+    "prioritize_machine_ids",
+    multiple=True,
+    help="Force-include ALL samples from this machine_id UUID; only the rest are subject to --target-size diversity sampling (repeatable).",
+)
+@click.option(
+    "--include-source-role",
+    "include_source_roles",
+    multiple=True,
+    help="Only include samples with this source_role (repeatable). Lets one shared --raw-dir feed multiple zone builds.",
+)
 def build(
     zone: str,
     name: str | None,
@@ -128,6 +146,9 @@ def build(
     max_empty_fraction: float | None,
     raw_dir: str | None,
     output_dir: str | None,
+    exclude_algorithm_prefixes: tuple[str, ...],
+    prioritize_machine_ids: tuple[str, ...],
+    include_source_roles: tuple[str, ...],
 ) -> None:
     """Build YOLO-format dataset from a pulled Hive dump."""
     if strict_source_role_balance and not (
@@ -163,6 +184,9 @@ def build(
         max_empty_fraction=max_empty_fraction,
         raw_dir=Path(raw_dir) if raw_dir else None,
         output_dir=Path(output_dir) if output_dir else None,
+        exclude_algorithm_prefixes=exclude_algorithm_prefixes,
+        prioritize_machine_ids=prioritize_machine_ids,
+        include_source_roles=include_source_roles,
     )
 
 
