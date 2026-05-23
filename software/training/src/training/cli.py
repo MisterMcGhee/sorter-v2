@@ -166,6 +166,89 @@ def build(
     )
 
 
+@main.group("lambda")
+def lambda_group() -> None:
+    """Lambda Labs GPU pipeline (manual provision, end-to-end run)."""
+
+
+@lambda_group.command("run")
+@click.option("--host", required=True, help="ssh target, e.g. ubuntu@157.151.159.81")
+@click.option("--zone", required=True, help="Hive zone (c_channel | classification_channel | ...)")
+@click.option("--dataset-name", required=True, help="Dataset subdir under datasets/<zone>/")
+@click.option("--bundle-name", required=True, help="Output bundle dir name (also remote runs subdir)")
+@click.option("--model-id", default="A3", help="YOLO model id (A1..A8, see scripts/lambda/train_export.py)")
+@click.option("--epochs", default=300, type=int)
+@click.option("--target-size", default=None, type=int, help="Diversity-sample to this many positives in `train build`")
+@click.option("--min-detection-score", default=0.98, type=float)
+@click.option("--calibration-count", default=150, type=int)
+@click.option("--target-platform", default="rk3588")
+@click.option("--quantization", type=click.Choice(["i8", "fp"]), default="i8")
+@click.option("--hive-url", default="https://hive.basically.website")
+@click.option("--output-root", default="/Volumes/T7/sorter-v2-vision-models", type=click.Path())
+@click.option("--no-head-strip", is_flag=True, help="Disable Detect.forward monkeypatch (stock ONNX).")
+@click.option("--skip-pull", is_flag=True, help="Skip `train pull` (assume samples already on box).")
+@click.option("--skip-build", is_flag=True, help="Skip `train build` (assume dataset already on box).")
+@click.option(
+    "--build-flag",
+    "build_flags",
+    multiple=True,
+    help="Extra flag forwarded to `train build` (repeat). Default: --balance-source-role.",
+)
+@click.option("--no-status-server", is_flag=True, help="Disable the localhost live-progress web page.")
+@click.option("--status-port", default=0, type=int, help="Pin the status server to a specific port (0 = auto).")
+def lambda_run(
+    host: str,
+    zone: str,
+    dataset_name: str,
+    bundle_name: str,
+    model_id: str,
+    epochs: int,
+    target_size: int | None,
+    min_detection_score: float,
+    calibration_count: int,
+    target_platform: str,
+    quantization: str,
+    hive_url: str,
+    output_root: str,
+    no_head_strip: bool,
+    skip_pull: bool,
+    skip_build: bool,
+    build_flags: tuple[str, ...],
+    no_status_server: bool,
+    status_port: int,
+) -> None:
+    """End-to-end r3 pipeline on a Lambda Labs host: pull → build → train → export → RKNN → bundle on T7."""
+    from pathlib import Path
+
+    from training.lambda_.run import LambdaRunConfig, runLambdaPipeline
+    from training.lambda_.status import PipelineStatus
+
+    cfg = LambdaRunConfig(
+        host=host,
+        zone=zone,
+        dataset_name=dataset_name,
+        bundle_name=bundle_name,
+        model_id=model_id,
+        epochs=epochs,
+        target_size=target_size,
+        min_detection_score=min_detection_score,
+        calibration_count=calibration_count,
+        target_platform=target_platform,
+        quantization=quantization,
+        hive_url=hive_url,
+        output_root=Path(output_root),
+        head_stripped=not no_head_strip,
+        skip_pull=skip_pull,
+        skip_build=skip_build,
+        extra_build_flags=list(build_flags) if build_flags else ["--balance-source-role"],
+    )
+    if no_status_server:
+        runLambdaPipeline(cfg)
+        return
+    with PipelineStatus(port=status_port, open_browser=True) as status:
+        runLambdaPipeline(cfg, status=status)
+
+
 @main.group("vastai")
 def vastai_group() -> None:
     """Vast.ai GPU session + training tracks."""
