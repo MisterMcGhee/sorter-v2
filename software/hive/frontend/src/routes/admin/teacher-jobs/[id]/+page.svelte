@@ -133,7 +133,14 @@
 	}
 
 	function sampleHref(sampleId: string): string {
-		return `/samples/${sampleId}`;
+		// Carry teacher_job context (and the current items filter/page) so the sample
+		// detail page can fetch its prev/next neighbours from this job's item list
+		// instead of the global samples roster. Arrow-keys then walk through the job.
+		const sp = new URLSearchParams();
+		sp.set('teacher_job', jobId);
+		if (itemsFilter !== 'all') sp.set('teacher_job_items_status', itemsFilter);
+		if (itemsPage > 1) sp.set('teacher_job_items_page', String(itemsPage));
+		return `/samples/${sampleId}?${sp.toString()}`;
 	}
 
 	function sampleThumbUrl(sampleId: string): string {

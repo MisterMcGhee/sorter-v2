@@ -75,7 +75,28 @@
 	// browsing context. Lets us walk to prev/next neighbours without losing filters.
 	const listContext = $derived(readSampleListContext(page.url.searchParams));
 	const listContextKey = $derived(sampleListContextKey(listContext));
-	const listBackHref = $derived(`/samples${sampleListContextQuery(page.url.searchParams)}`);
+
+	// Alternative navigation source: when the URL carries ?teacher_job=<id>, prev/next
+	// walks through that job's items (paginated 50/page) instead of the global samples
+	// roster. Lets the admin step through a backfill from inside the sample detail view.
+	const teacherJobId = $derived(page.url.searchParams.get('teacher_job'));
+	const teacherJobItemsStatus = $derived(
+		page.url.searchParams.get('teacher_job_items_status') ?? 'all'
+	);
+	const teacherJobNavKey = $derived(
+		teacherJobId ? `job:${teacherJobId}:${teacherJobItemsStatus}` : null
+	);
+
+	const listBackHref = $derived(
+		teacherJobId
+			? `/admin/teacher-jobs/${teacherJobId}`
+			: `/samples${sampleListContextQuery(page.url.searchParams)}`
+	);
+
+	// Single key that flushes the neighbor cache when the source changes (filter on
+	// samples list, OR switch to a different teacher job).
+	const navSourceKey = $derived(teacherJobNavKey ?? listContextKey);
+	const navPageSize = $derived(teacherJobId ? 50 : listContext.page_size);
 
 	let neighborPages = $state(new SvelteMap<number, string[]>());
 	let neighborMeta = $state<{ pages: number; total: number } | null>(null);
@@ -111,13 +132,13 @@
 	const positionLabel = $derived.by(() => {
 		const loc = sampleLocation;
 		if (!loc || !neighborMeta) return null;
-		const absoluteIndex = (loc.pageNum - 1) * listContext.page_size + loc.idx + 1;
+		const absoluteIndex = (loc.pageNum - 1) * navPageSize + loc.idx + 1;
 		return `${absoluteIndex} / ${neighborMeta.total}`;
 	});
 
 	$effect(() => {
-		if (listContextKey !== lastNeighborKey) {
-			lastNeighborKey = listContextKey;
+		if (navSourceKey !== lastNeighborKey) {
+			lastNeighborKey = navSourceKey;
 			neighborPages = new SvelteMap();
 			neighborMeta = null;
 		}
@@ -125,7 +146,12 @@
 
 	$effect(() => {
 		if (!sampleId) return;
-		void ensureNeighborPage(listContext.page);
+		if (teacherJobId) {
+			const start = Number(page.url.searchParams.get('teacher_job_items_page') ?? '1');
+			void ensureNeighborPage(Math.max(1, start));
+		} else {
+			void ensureNeighborPage(listContext.page);
+		}
 	});
 
 	$effect(() => {
@@ -143,16 +169,27 @@
 	async function ensureNeighborPage(pageNum: number) {
 		if (pageNum < 1) return;
 		if (neighborPages.has(pageNum)) return;
+		const sourceAtRequest = navSourceKey;
 		try {
-			const result = await api.getSamples({
-				...sampleListFilterParams(listContext),
-				page: pageNum,
-				page_size: listContext.page_size
-			});
-			// Bail if context changed under us mid-flight.
-			if (sampleListContextKey(listContext) !== listContextKey) return;
-			neighborPages.set(pageNum, result.items.map((s) => s.id));
-			neighborMeta = { pages: result.pages, total: result.total };
+			if (teacherJobId) {
+				const result = await api.getTeacherJob(teacherJobId, {
+					items_page: pageNum,
+					items_page_size: navPageSize,
+					items_status: teacherJobItemsStatus === 'all' ? undefined : teacherJobItemsStatus
+				});
+				if (navSourceKey !== sourceAtRequest) return;
+				neighborPages.set(pageNum, result.items.map((i) => i.sample_id));
+				neighborMeta = { pages: result.items_pages, total: result.items_total };
+			} else {
+				const result = await api.getSamples({
+					...sampleListFilterParams(listContext),
+					page: pageNum,
+					page_size: listContext.page_size
+				});
+				if (navSourceKey !== sourceAtRequest) return;
+				neighborPages.set(pageNum, result.items.map((s) => s.id));
+				neighborMeta = { pages: result.pages, total: result.total };
+			}
 		} catch {
 			// ignore — neighbor info is best-effort
 		}
@@ -160,7 +197,12 @@
 
 	function navigateToNeighbor(targetId: string | null) {
 		if (!targetId) return;
-		let targetPage = listContext.page;
+		// Default page based on source: when navigating via teacher_job, use the
+		// teacher_job_items_page param so the back-link lands on the right job page.
+		const defaultPage = teacherJobId
+			? Number(page.url.searchParams.get('teacher_job_items_page') ?? '1')
+			: listContext.page;
+		let targetPage = defaultPage;
 		for (const [pageNum, ids] of neighborPages.entries()) {
 			if (ids.includes(targetId)) {
 				targetPage = pageNum;
@@ -168,8 +210,9 @@
 			}
 		}
 		const sp = new URLSearchParams(page.url.searchParams);
-		if (targetPage <= 1) sp.delete('page');
-		else sp.set('page', String(targetPage));
+		const pageKey = teacherJobId ? 'teacher_job_items_page' : 'page';
+		if (targetPage <= 1) sp.delete(pageKey);
+		else sp.set(pageKey, String(targetPage));
 		const search = sp.toString();
 		void goto(`/samples/${targetId}${search ? `?${search}` : ''}`, {
 			noScroll: true,
