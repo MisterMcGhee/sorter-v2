@@ -15,6 +15,7 @@ from app.deps import (
     verify_csrf,
 )
 from app.errors import APIError
+from app.models.machine import Machine
 from app.models.sample import Sample
 from app.models.user import User
 from app.schemas.sample import (
@@ -60,8 +61,12 @@ def _visible_sample_query(db: Session, current_user: User, scope: str | None):
 
     Default scope is 'all' — samples are public to any logged-in user. ``scope='mine'``
     restricts to the caller's machines.
+
+    Always hides samples whose machine is archived. Archived rigs (old hardware,
+    decommissioned setups) shouldn't show up in browse/diversity/training pulls; their
+    samples stay in the DB so an admin can un-archive without data loss.
     """
-    query = db.query(Sample)
+    query = db.query(Sample).filter(Sample.machine.has(Machine.archived_at.is_(None)))
     if scope == "mine":
         query = query.filter(Sample.machine.has(owner_id=current_user.id))
     return query
