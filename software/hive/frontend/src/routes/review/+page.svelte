@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
+	import { goto } from '$app/navigation';
 	import {
 		api,
 		type SampleClassificationPayload,
@@ -211,13 +212,26 @@
 	const queueFilters = $derived.by(() => {
 		const sp = page.url.searchParams;
 		const params: Record<string, string> = {};
-		for (const key of ['scope', 'machine_id', 'source_role', 'capture_reason', 'max_age_hours']) {
+		for (const key of ['scope', 'machine_id', 'source_role', 'capture_reason', 'kind', 'max_age_hours']) {
 			const value = sp.get(key);
 			if (value) params[key] = value;
 		}
 		return params;
 	});
 	const activeFilterChips = $derived(Object.entries(queueFilters));
+
+	const currentKind = $derived(queueFilters.kind ?? '');
+
+	function setKind(next: '' | 'regular' | 'condition') {
+		const url = new URL(page.url);
+		if (next) url.searchParams.set('kind', next);
+		else url.searchParams.delete('kind');
+		void goto(`${url.pathname}${url.search ? url.search : ''}`, {
+			replaceState: false,
+			noScroll: true,
+			keepFocus: true
+		});
+	}
 
 	async function loadNext() {
 		loading = true;
@@ -443,6 +457,23 @@
 				<a href="/review" class="text-primary hover:underline">Clear</a>
 			</div>
 		{/if}
+	</div>
+	<!-- Kind switcher — flips the queue between regular detection samples and
+	     piece-condition crops without leaving the review page. -->
+	<div class="flex border border-border bg-white text-xs">
+		{#each [
+			{ value: '', label: 'All' },
+			{ value: 'regular', label: 'Regular' },
+			{ value: 'condition', label: 'Condition' }
+		] as opt}
+			<button
+				type="button"
+				class="border-l border-border px-3 py-1.5 first:border-l-0 {currentKind === opt.value ? 'bg-primary text-white' : 'text-text hover:bg-bg'}"
+				onclick={() => setKind(opt.value as '' | 'regular' | 'condition')}
+			>
+				{opt.label}
+			</button>
+		{/each}
 	</div>
 </div>
 

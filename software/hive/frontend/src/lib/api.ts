@@ -645,6 +645,7 @@ export const api = {
 		source_role?: string;
 		capture_reason?: string;
 		review_status?: string;
+		kind?: 'regular' | 'condition' | 'all' | string;
 		max_age_hours?: number | string;
 		scope?: 'mine' | 'all' | string;
 	} = {}) {
@@ -708,6 +709,7 @@ export const api = {
 			machine_id?: string;
 			source_role?: string;
 			capture_reason?: string;
+			kind?: 'regular' | 'condition' | 'all' | string;
 			max_age_hours?: number | string;
 		} = {}
 	) {

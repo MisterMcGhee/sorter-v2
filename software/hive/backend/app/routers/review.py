@@ -18,6 +18,7 @@ from app.schemas.review import (
     ReviewResponse,
 )
 from app.schemas.sample import SampleResponse
+from app.routers.samples import apply_kind_filter
 from app.services.condition_analysis import (
     COMPOSITION_VALUES,
     CONDITION_VALUES,
@@ -43,6 +44,7 @@ def get_next_review(
     machine_id: UUID | None = None,
     source_role: str | None = None,
     capture_reason: str | None = None,
+    kind: str | None = Query(None, pattern="^(regular|condition|all)$"),
     max_age_hours: int | None = Query(None, ge=1, le=24 * 365),
     current_user: User = Depends(require_role("reviewer", "admin")),
     db: Session = Depends(get_db),
@@ -52,6 +54,9 @@ def get_next_review(
     The samples list page passes its sidebar selection through to the Review Samples link
     as URL params; the review queue then drains only the slice the reviewer chose. Without
     a filter the queue behaves exactly as before (any unreviewed/in-review sample).
+
+    ``kind=regular|condition`` is the same filter the samples list uses, so a reviewer
+    can drain only condition-collector samples (or only the regular detection queue).
     """
     already_reviewed = select(SampleReview.sample_id).where(
         SampleReview.reviewer_id == current_user.id
@@ -61,6 +66,7 @@ def get_next_review(
         Sample.review_status.in_(["unreviewed", "in_review"]),
         Sample.id.notin_(already_reviewed),
     )
+    query = apply_kind_filter(query, kind)
 
     if scope == "mine":
         query = query.filter(Sample.machine.has(owner_id=current_user.id))

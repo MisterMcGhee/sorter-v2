@@ -37,6 +37,9 @@
 	const filterStatus = $derived(listContext.review_status ?? '');
 	const filterSourceRole = $derived(listContext.source_role ?? '');
 	const filterCaptureReason = $derived(listContext.capture_reason ?? '');
+	// 'regular' (default once a filter is picked, also means: no condition crops)
+	// or 'condition'. Empty string = all = both kinds mixed.
+	const filterKind = $derived(listContext.kind ?? '');
 	const filterMaxAgeHours = $derived(listContext.max_age_hours ?? '');
 	const currentPage = $derived(listContext.page);
 	const pageSize = $derived(listContext.page_size);
@@ -71,7 +74,7 @@
 	};
 
 	const hasActiveFilters = $derived(
-		filterMachine || filterStatus || filterSourceRole || filterCaptureReason || filterMaxAgeHours
+		filterMachine || filterStatus || filterSourceRole || filterCaptureReason || filterKind || filterMaxAgeHours
 	);
 
 	$effect(() => {
@@ -85,6 +88,7 @@
 		void filterStatus;
 		void filterSourceRole;
 		void filterCaptureReason;
+		void filterKind;
 		void filterMaxAgeHours;
 		void currentPage;
 		void pageSize;
@@ -157,6 +161,7 @@
 				review_status: filterStatus || undefined,
 				source_role: filterSourceRole || undefined,
 				capture_reason: filterCaptureReason || undefined,
+				kind: filterKind || undefined,
 				max_age_hours: filterMaxAgeHours || undefined
 			});
 		} catch {
@@ -270,6 +275,7 @@
 			sp.delete('review_status');
 			sp.delete('source_role');
 			sp.delete('capture_reason');
+			sp.delete('kind');
 			sp.delete('max_age_hours');
 			sp.delete('page');
 		});
@@ -485,6 +491,7 @@
 				if (filterMachine) sp.set('machine_id', filterMachine);
 				if (filterSourceRole) sp.set('source_role', filterSourceRole);
 				if (filterCaptureReason) sp.set('capture_reason', filterCaptureReason);
+				if (filterKind) sp.set('kind', filterKind);
 				if (filterMaxAgeHours) sp.set('max_age_hours', filterMaxAgeHours);
 				// review_status filter doesn't make sense — the queue only serves unreviewed
 				// + in_review samples anyway.
@@ -669,6 +676,29 @@
 							My samples
 						</button>
 					</li>
+				</ul>
+			</div>
+
+			<!-- Kind: regular detection samples vs condition crops. Coarser than
+			     source_role / capture_reason — splits the queue into the two
+			     fundamentally different content streams the sorter ships. -->
+			<div>
+				<h3 class="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">Kind</h3>
+				<ul class="space-y-0.5">
+					{#each [
+						{ key: '', label: 'All' },
+						{ key: 'regular', label: 'Regular' },
+						{ key: 'condition', label: 'Condition' },
+					] as item}
+						<li>
+							<button
+								onclick={() => setFilterValue('kind', item.key)}
+								class="w-full px-2 py-1 text-left text-xs {filterKind === item.key ? 'bg-primary-light font-medium text-primary' : 'text-text hover:bg-bg'}"
+							>
+								{item.label}
+							</button>
+						</li>
+					{/each}
 				</ul>
 			</div>
 

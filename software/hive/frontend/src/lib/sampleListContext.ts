@@ -9,6 +9,7 @@ export const SAMPLE_LIST_FILTER_KEYS = [
 	'review_status',
 	'source_role',
 	'capture_reason',
+	'kind',
 	'max_age_hours'
 ] as const;
 
@@ -26,6 +27,10 @@ export interface SampleListFilters {
 	review_status?: string;
 	source_role?: string;
 	capture_reason?: string;
+	// 'regular' | 'condition' | undefined (= all). Coarser than capture_reason
+	// — splits the queue between detection samples and condition-collector
+	// crops so reviewers / browsers can drain one bucket at a time.
+	kind?: string;
 	max_age_hours?: string;
 }
 
@@ -79,6 +84,7 @@ export function sampleListContextKey(ctx: SampleListContext): string {
 		review_status: ctx.review_status ?? '',
 		source_role: ctx.source_role ?? '',
 		capture_reason: ctx.capture_reason ?? '',
+		kind: ctx.kind ?? '',
 		max_age_hours: ctx.max_age_hours ?? '',
 		page_size: ctx.page_size
 	});

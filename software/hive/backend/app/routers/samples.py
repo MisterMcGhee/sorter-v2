@@ -72,6 +72,34 @@ def _visible_sample_query(db: Session, current_user: User, scope: str | None):
     return query
 
 
+# Capture reasons that mark a sample as a piece-condition crop (collected by
+# the sorter's condition_collector or the archived condition_teacher). Kept as
+# a single source of truth so the kind filter on /samples and the queue filter
+# on /review can't drift.
+CONDITION_CAPTURE_REASONS: tuple[str, ...] = (
+    "piece_condition_collector",
+    "piece_condition_teacher",
+)
+
+
+def apply_kind_filter(query, kind: str | None):
+    """Filter a Sample query down to 'regular' or 'condition' samples.
+
+    `kind=condition` keeps only condition-collector / condition-teacher rows.
+    `kind=regular` keeps everything *but* those. Anything else (None / 'all')
+    is a no-op so the filter is safe to call unconditionally.
+    """
+
+    if kind == "condition":
+        return query.filter(Sample.capture_reason.in_(CONDITION_CAPTURE_REASONS))
+    if kind == "regular":
+        return query.filter(
+            (Sample.capture_reason.is_(None))
+            | (Sample.capture_reason.notin_(CONDITION_CAPTURE_REASONS))
+        )
+    return query
+
+
 def _get_sample_for_read(db: Session, sample_id: UUID) -> Sample:
     sample = db.query(Sample).filter(Sample.id == sample_id).first()
     if not sample:
@@ -526,12 +554,14 @@ def list_samples(
     source_role: str | None = None,
     capture_reason: str | None = None,
     review_status: str | None = None,
+    kind: str | None = Query(None, pattern="^(regular|condition|all)$"),
     max_age_hours: int | None = Query(None, ge=1, le=24 * 365),
     scope: str | None = Query(None, pattern="^(mine|all)$"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_api_key_scopes(API_KEY_SCOPE_SAMPLES_READ)),
 ):
     query = _visible_sample_query(db, current_user, scope)
+    query = apply_kind_filter(query, kind)
 
     if machine_id:
         query = query.filter(Sample.machine_id == machine_id)
