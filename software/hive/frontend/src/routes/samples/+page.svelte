@@ -381,6 +381,51 @@
 		teacherJob = null;
 	}
 
+	// Live wall-clock that ticks once a second so the ETA chip recomputes between
+	// the slower 3s job-poll cycles — otherwise the time-remaining label would
+	// only refresh on each polled state change.
+	let nowMs = $state(Date.now());
+	let nowTicker: ReturnType<typeof setInterval> | null = null;
+	$effect(() => {
+		nowTicker = setInterval(() => { nowMs = Date.now(); }, 1000);
+		return () => {
+			if (nowTicker) clearInterval(nowTicker);
+		};
+	});
+
+	function formatRemaining(seconds: number): string {
+		if (!Number.isFinite(seconds) || seconds < 0) return '—';
+		if (seconds < 60) return `${Math.round(seconds)}s`;
+		const totalMins = Math.round(seconds / 60);
+		if (totalMins < 60) return `${totalMins}m`;
+		const hours = Math.floor(totalMins / 60);
+		const mins = totalMins % 60;
+		return mins === 0 ? `${hours}h` : `${hours}h ${mins}m`;
+	}
+
+	function computeEta(job: TeacherJobSummary): {
+		remainingLabel: string;
+		rate: number;
+		startedAtLabel: string;
+	} | null {
+		// Only meaningful while the job is in-flight with measurable progress.
+		if (job.status !== 'running' && job.status !== 'pending') return null;
+		if (!job.started_at || job.processed <= 0 || job.processed >= job.total) return null;
+		const startMs = new Date(job.started_at).getTime();
+		if (!Number.isFinite(startMs)) return null;
+		const elapsedSec = Math.max(1, (nowMs - startMs) / 1000);
+		const rate = job.processed / elapsedSec;
+		if (rate <= 0) return null;
+		const remaining = (job.total - job.processed) / rate;
+		return {
+			remainingLabel: formatRemaining(remaining),
+			rate,
+			startedAtLabel: new Date(job.started_at).toLocaleTimeString('de-DE', {
+				hour: '2-digit', minute: '2-digit'
+			})
+		};
+	}
+
 	$effect(() => {
 		return () => stopTeacherPolling();
 	});
@@ -463,6 +508,7 @@
 {#if teacherJob}
 	{@const job = teacherJob}
 	{@const pct = job.total > 0 ? Math.round((job.processed / job.total) * 100) : 0}
+	{@const eta = computeEta(job)}
 	<div class="mb-4 border border-border bg-white">
 		<div class="flex items-center justify-between gap-3 border-b border-border px-4 py-2.5">
 			<div class="flex items-center gap-2 text-xs">
@@ -483,6 +529,14 @@
 					{/if}
 				</span>
 				<span class="text-text-muted">· {job.status}</span>
+				{#if eta}
+					<span
+						class="tabular-nums text-text-muted"
+						title={`Based on ${eta.rate.toFixed(2)} items/sec since ${eta.startedAtLabel}. Updates every refresh.`}
+					>
+						· ETA {eta.remainingLabel}
+					</span>
+				{/if}
 			</div>
 			<div class="flex items-center gap-3">
 				<a href={`/admin/teacher-jobs/${job.id}`} class="text-xs text-primary hover:underline">
