@@ -357,7 +357,7 @@ class PerceptronAdapter:
     # Push concurrency to 6 and shorten spacing to 0.15s to land around ~3.5-4 req/s
     # with comfortable headroom before the 5/s ceiling; the worker's 429-with-Retry-After
     # backoff catches the rare overshoot without disturbing the rest of the pool.
-    max_concurrent = 6
+    max_concurrent = 7
     min_interval_s = 0.15
 
     def detect(
