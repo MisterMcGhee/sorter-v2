@@ -87,21 +87,22 @@ PRESETS: dict[str, RknnPreset] = {
         std_values=(255.0, 255.0, 255.0),
         head_stripped=False,
     ),
-    # Target preset for the upcoming H100 build: yolo11s at 320x320 → Orange Pi 5
-    # (RK3588 NPU, int8). Calibration images come from the classification_channel
-    # dataset built by `train build --zone classification_channel`. Replace the
-    # model_id slot once the first H100 run actually produces a best.onnx and you
-    # know the run timestamp.
-    "classification_channel_yolo11s_320_rk3588": RknnPreset(
-        name="classification_channel_yolo11s_320_rk3588",
-        label="Classification Channel YOLO11s 320 → RKNN (Orange Pi 5 / RK3588)",
-        # Update this to the actual run id after the H100 training completes;
-        # the bundle script resolves `onnx_path` relative to RUNS_DIR / <id>.
-        model_id="TBD-classification-channel-yolo11s-320",
+    # Target preset for the upcoming H100 build: yolo11s @ 320×320 → Orange Pi 5
+    # (RK3588 NPU, int8). Successor of A5-yolo11s-320-20260514, which was the
+    # previous best (mAP50=0.962, mAP50_95=0.837) on 900 samples from
+    # c_channel_full. Same architecture + image size; the bigger lever this round
+    # is the ~6× larger, machine-balanced dataset (5500 across 4 active rigs).
+    #
+    # After the H100 run finishes, update model_id + onnx_path + calibration_dir
+    # to point at the actual run folder (e.g. "20260524-...-c_channel_full-yolo-v2").
+    "c_channel_full_yolo11s_320_rk3588": RknnPreset(
+        name="c_channel_full_yolo11s_320_rk3588",
+        label="C-Channel Full YOLO11s 320 → RKNN (Orange Pi 5 / RK3588)",
+        model_id="TBD-c-channel-full-yolo11s-320",
         model_family="yolo",
         target_platform="rk3588",
         onnx_path=RUNS_DIR
-            / "TBD-classification-channel-yolo11s-320"
+            / "TBD-c-channel-full-yolo11s-320"
             / "exports"
             / "best.onnx",
         onnx_input_name="images",
@@ -109,7 +110,7 @@ PRESETS: dict[str, RknnPreset] = {
         classes=1,
         default_conf=0.25,
         default_iou=0.45,
-        calibration_dir=ZONE_DATASETS_DIR / "classification_channel" / "v1" / "train" / "images",
+        calibration_dir=ZONE_DATASETS_DIR / "c_channel_full" / "v2" / "train" / "images",
         calibration_count=150,
         quantization="i8",
         mean_values=(0.0, 0.0, 0.0),
