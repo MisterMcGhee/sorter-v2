@@ -287,6 +287,17 @@ def apply_teacher_result_to_sample(
     if job_id is not None:
         audit["job_id"] = job_id
     extra["teacher_rerun"] = audit
+
+    # Drop the sorter's original bbox proposals — they're obsolete once a teacher
+    # has overwritten detection_bboxes. The UI on /samples/[id] (and /review) reads
+    # these legacy fields as additional overlays and would otherwise keep showing
+    # the original guess alongside the new teacher result. manual_annotations
+    # (user-drawn polygons) are preserved on purpose — those are independent of
+    # the bbox stream.
+    extra.pop("detection_bbox", None)
+    extra.pop("detection_candidate_bboxes", None)
+    extra.pop("review", None)
+
     sample.extra_metadata = extra
 
 
