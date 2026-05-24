@@ -18,6 +18,45 @@ from sqlalchemy.orm import Session
 # Curated alphabetically. Drop a name if it ever feels off; this list is only
 # consulted when a new codename is needed, so removing entries doesn't break
 # already-assigned ones.
+# Hex color per codename — picked to evoke the actual color, not the canonical
+# LEGO ABS shade (those are too saturated for UI dots). Used to render a small
+# colored dot next to the codename in the UI. Derived (no DB column) so we can
+# tweak shades centrally without a migration.
+CODENAME_COLORS: dict[str, str] = {
+    "Aqua": "#5BC2C5", "Amber": "#FFBF00", "Azure": "#3FA9F5", "Apricot": "#FBCEB1",
+    "Bronze": "#CD7F32", "Berry": "#A12B5A", "Blush": "#DE5D83", "Blossom": "#F5C6D4",
+    "Cherry": "#DE3163", "Coral": "#FF7F50", "Citrine": "#E4D00A", "Crimson": "#DC143C", "Cobalt": "#0047AB",
+    "Dune": "#C2B280", "Denim": "#1560BD", "Dahlia": "#A02050",
+    "Ember": "#E25822", "Emerald": "#50C878", "Eggshell": "#F0EAD6",
+    "Forest": "#228B22", "Flame": "#E25822", "Flax": "#EEDC82", "Fuchsia": "#FF00FF",
+    "Garnet": "#733635", "Ginger": "#B06500", "Goldenrod": "#DAA520",
+    "Hazel": "#8E7618", "Honey": "#FFC30B",
+    "Indigo": "#4B0082", "Ivory": "#FFFFF0",
+    "Jade": "#00A86B", "Juniper": "#3A5F0B",
+    "Kelp": "#4A5D23", "Khaki": "#C3B091",
+    "Lime": "#BFFF00", "Lavender": "#B57EDC", "Lilac": "#C8A2C8", "Lemon": "#FFF44F",
+    "Magenta": "#FF00FF", "Maroon": "#800000", "Moss": "#8A9A5B", "Mauve": "#E0B0FF",
+    "Nougat": "#B5876A", "Navy": "#000080", "Nutmeg": "#7E481C",
+    "Ochre": "#CC7722", "Olive": "#808000", "Onyx": "#353839", "Opal": "#A8C3BC",
+    "Pumpkin": "#FF7518", "Peach": "#FFE5B4", "Pearl": "#EAE0C8", "Plum": "#673147", "Poppy": "#E35B5B",
+    "Quartz": "#D9D7E8", "Quince": "#D5C97F",
+    "Rose": "#FF66CC", "Ruby": "#E0115F", "Russet": "#80461B", "Rust": "#B7410E",
+    "Saffron": "#F4C430", "Slate": "#708090", "Sand": "#C2B280", "Sage": "#9CAF88", "Scarlet": "#FF2400",
+    "Tangerine": "#F28500", "Teal": "#008080", "Topaz": "#FFC87C", "Tan": "#D2B48C",
+    "Umber": "#635147", "Ultramarine": "#3F00FF",
+    "Violet": "#7F00FF", "Verdant": "#1E5631", "Vermilion": "#E34234",
+    "Wisteria": "#A18BCB", "Wheat": "#F5DEB3", "Walnut": "#5C4033",
+    "Zinc": "#7F7F7F", "Zephyr": "#CFD8DC",
+}
+
+
+def color_for(codename: str | None) -> str | None:
+    """Hex color for a codename, or None if unknown / unassigned."""
+    if not codename:
+        return None
+    return CODENAME_COLORS.get(codename)
+
+
 CODENAME_POOL: tuple[str, ...] = (
     # A
     "Aqua", "Amber", "Azure", "Apricot",

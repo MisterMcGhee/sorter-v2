@@ -23,7 +23,16 @@
 	<div class="mb-2 flex items-start justify-between gap-4">
 		<div>
 			{#if model.codename}
-				<h3 class="text-lg font-bold text-[var(--color-text)]">{model.codename}</h3>
+				<h3 class="flex items-center gap-2 text-lg font-bold text-[var(--color-text)]">
+					{#if model.codename_color}
+						<span
+							class="inline-block h-3 w-3 rounded-full border border-[var(--color-border)]"
+							style="background-color: {model.codename_color}"
+							aria-hidden="true"
+						></span>
+					{/if}
+					{model.codename}
+				</h3>
 				<p class="text-xs text-[var(--color-text-muted)]">{model.name}</p>
 				<p class="font-mono text-[11px] text-[var(--color-text-muted)]">{model.slug} · v{model.version}</p>
 			{:else}

@@ -1088,6 +1088,7 @@ export interface DetectionModelSummary {
 	slug: string;
 	version: number;
 	codename: string | null;
+	codename_color: string | null;
 	name: string;
 	description: string | null;
 	model_family: string;

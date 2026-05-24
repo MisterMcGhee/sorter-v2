@@ -101,9 +101,16 @@
 						<span>· published {formatDate(model.published_at)}</span>
 					</div>
 					{#if model.codename}
-						<h1 class="mt-1 text-2xl font-bold tracking-tight text-[var(--color-text)]">
+						<h1 class="mt-1 flex items-center gap-2 text-2xl font-bold tracking-tight text-[var(--color-text)]">
+							{#if model.codename_color}
+								<span
+									class="inline-block h-4 w-4 rounded-full border border-[var(--color-border)]"
+									style="background-color: {model.codename_color}"
+									aria-hidden="true"
+								></span>
+							{/if}
 							{model.codename}
-							<span class="ml-2 text-sm font-normal text-[var(--color-text-muted)]">— {model.name}</span>
+							<span class="text-sm font-normal text-[var(--color-text-muted)]">— {model.name}</span>
 						</h1>
 					{:else}
 						<h1 class="mt-1 text-xl font-semibold tracking-tight text-[var(--color-text)]">{model.name}</h1>
