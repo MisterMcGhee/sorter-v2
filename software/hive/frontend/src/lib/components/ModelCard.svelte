@@ -7,59 +7,139 @@
 
 	let { model }: Props = $props();
 
-	function formatDate(value: string): string {
-		return new Date(value).toLocaleDateString(undefined, {
-			year: 'numeric',
-			month: 'short',
-			day: 'numeric'
-		});
+	type MetaRecord = Record<string, unknown>;
+	function asRecord(v: unknown): MetaRecord | null {
+		return v && typeof v === 'object' && !Array.isArray(v) ? (v as MetaRecord) : null;
+	}
+	function asNumber(v: unknown): number | null {
+		return typeof v === 'number' && Number.isFinite(v) ? v : null;
+	}
+	function asInt(v: unknown): number | null {
+		const n = asNumber(v);
+		return n === null ? null : Math.round(n);
+	}
+
+	// Pull the values the card needs out of training_metadata. All optional —
+	// older models without metadata gracefully degrade to a minimal layout.
+	const meta = $derived(asRecord(model.training_metadata));
+	const modelMeta = $derived(asRecord(meta?.model));
+	const datasetMeta = $derived(asRecord(meta?.dataset));
+	const benchMeta = $derived(asRecord(asRecord(meta?.benchmarks)?.local_mac));
+	const best = $derived(asRecord(modelMeta?.best_metrics));
+
+	const map50 = $derived(asNumber(best?.mAP50));
+	const map50_95 = $derived(asNumber(best?.mAP50_95));
+	const recall = $derived(asNumber(best?.recall));
+
+	const samples = $derived(asInt(datasetMeta?.total) ?? asInt(datasetMeta?.train_samples));
+	const machineCount = $derived(asInt(asRecord(datasetMeta?.machines)?.count));
+
+	const arch = $derived(typeof modelMeta?.architecture === 'string' ? (modelMeta.architecture as string) : null);
+	const imgsz = $derived(asInt(modelMeta?.imgsz));
+
+	const coremlFps = $derived(asNumber(asRecord(benchMeta?.coreml_onnxruntime)?.fps_mean));
+
+	function relativeTime(iso: string): string {
+		const then = new Date(iso).getTime();
+		if (!Number.isFinite(then)) return '';
+		const diffMs = Date.now() - then;
+		const sec = Math.round(diffMs / 1000);
+		if (sec < 60) return 'gerade eben';
+		const min = Math.round(sec / 60);
+		if (min < 60) return `vor ${min} min`;
+		const hr = Math.round(min / 60);
+		if (hr < 24) return `vor ${hr} Std`;
+		const days = Math.round(hr / 24);
+		if (days < 7) return `vor ${days} Tag${days === 1 ? '' : 'en'}`;
+		const weeks = Math.round(days / 7);
+		if (weeks < 5) return `vor ${weeks} Woche${weeks === 1 ? '' : 'n'}`;
+		return new Date(iso).toLocaleDateString('de-DE', { year: 'numeric', month: 'short', day: 'numeric' });
+	}
+
+	function formatPct(v: number | null): string {
+		return v === null ? '—' : v.toFixed(3);
 	}
 </script>
 
 <a
 	href="/models/{model.id}"
-	class="block border border-[var(--color-border)] bg-[var(--color-surface)] p-4 hover:border-primary"
+	class="block border border-[var(--color-border)] bg-[var(--color-surface)] transition-colors hover:border-primary"
 >
-	<div class="mb-2 flex items-start justify-between gap-4">
-		<div>
-			{#if model.codename}
-				<h3 class="flex items-center gap-2 text-lg font-bold text-[var(--color-text)]">
-					{#if model.codename_color}
-						<span
-							class="inline-block h-3 w-3 rounded-full border border-[var(--color-border)]"
-							style="background-color: {model.codename_color}"
-							aria-hidden="true"
-						></span>
-					{/if}
-					{model.codename}
-				</h3>
-				<p class="text-xs text-[var(--color-text-muted)]">{model.name}</p>
-				<p class="font-mono text-[11px] text-[var(--color-text-muted)]">{model.slug} · v{model.version}</p>
-			{:else}
-				<h3 class="text-base font-semibold text-[var(--color-text)]">{model.name}</h3>
-				<p class="font-mono text-xs text-[var(--color-text-muted)]">{model.slug} · v{model.version}</p>
-			{/if}
+	<!-- Header strip — codename swatch as colored band on the left edge, big H1 codename -->
+	<div class="flex items-start gap-3 border-b border-[var(--color-border)] px-4 py-3">
+		{#if model.codename_color}
+			<span
+				class="mt-1 inline-block h-5 w-5 shrink-0 rounded-full border border-[var(--color-border)]"
+				style="background-color: {model.codename_color}"
+				aria-hidden="true"
+			></span>
+		{/if}
+		<div class="min-w-0 flex-1">
+			<div class="flex items-baseline gap-2">
+				{#if model.codename}
+					<h3 class="truncate text-xl font-bold text-[var(--color-text)]">{model.codename}</h3>
+				{:else}
+					<h3 class="truncate text-base font-semibold text-[var(--color-text)]">{model.name}</h3>
+				{/if}
+				{#if arch && imgsz}
+					<span class="text-xs text-[var(--color-text-muted)]">· {arch} @ {imgsz}</span>
+				{/if}
+			</div>
+			<p class="truncate font-mono text-[11px] text-[var(--color-text-muted)]">
+				{model.slug} · v{model.version} · {relativeTime(model.published_at)}
+			</p>
 		</div>
 		{#if !model.is_public}
-			<span class="border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-0.5 text-xs text-[var(--color-text-muted)]">Private</span>
+			<span class="border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Private</span>
 		{/if}
 	</div>
 
-	{#if model.description}
-		<p class="mb-3 text-sm text-[var(--color-text-muted)]">{model.description}</p>
+	<!-- Metric pills — only render when training_metadata.best_metrics is present -->
+	{#if map50 !== null || map50_95 !== null}
+		<div class="grid grid-cols-4 gap-px border-b border-[var(--color-border)] bg-[var(--color-border)]">
+			<div class="bg-[var(--color-surface)] px-3 py-2">
+				<div class="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">mAP50</div>
+				<div class="font-mono text-sm font-semibold text-[var(--color-text)]">{formatPct(map50)}</div>
+			</div>
+			<div class="bg-[var(--color-surface)] px-3 py-2">
+				<div class="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">mAP50_95</div>
+				<div class="font-mono text-sm font-semibold text-[var(--color-text)]">{formatPct(map50_95)}</div>
+			</div>
+			<div class="bg-[var(--color-surface)] px-3 py-2">
+				<div class="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Recall</div>
+				<div class="font-mono text-sm font-semibold text-[var(--color-text)]">{formatPct(recall)}</div>
+			</div>
+			<div class="bg-[var(--color-surface)] px-3 py-2">
+				<div class="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+					{coremlFps !== null ? 'FPS (CoreML)' : samples !== null ? 'Samples' : '—'}
+				</div>
+				<div class="font-mono text-sm font-semibold text-[var(--color-text)]">
+					{coremlFps !== null ? Math.round(coremlFps) : samples !== null ? samples.toLocaleString() : '—'}
+				</div>
+			</div>
+		</div>
 	{/if}
 
-	<div class="flex flex-wrap items-center gap-2">
-		<span class="bg-[var(--color-bg)] px-2 py-0.5 text-xs text-[var(--color-text)]">
-			{model.model_family}
-		</span>
-		{#each model.variant_runtimes as runtime (runtime)}
-			<span class="bg-info px-2 py-0.5 text-xs text-white">{runtime}</span>
-		{/each}
-		{#each (model.scopes ?? []) as scope (scope)}
-			<span class="border border-[var(--color-border)] px-2 py-0.5 text-xs text-[var(--color-text-muted)]">{scope}</span>
-		{/each}
-	</div>
+	<!-- Body: dataset summary + runtimes/scopes -->
+	<div class="space-y-2 px-4 py-3">
+		{#if samples !== null && machineCount !== null}
+			<p class="text-xs text-[var(--color-text-muted)]">
+				{samples.toLocaleString()} samples · {machineCount} rigs
+			</p>
+		{:else if model.description}
+			<p class="line-clamp-2 text-xs text-[var(--color-text-muted)]">{model.description}</p>
+		{/if}
 
-	<p class="mt-3 text-xs text-[var(--color-text-muted)]">Published {formatDate(model.published_at)}</p>
+		<div class="flex flex-wrap items-center gap-1">
+			{#each model.variant_runtimes as runtime (runtime)}
+				<span class="bg-info px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-white">{runtime}</span>
+			{/each}
+			{#if (model.scopes ?? []).length > 0}
+				<span class="mx-1 text-[10px] text-[var(--color-text-muted)]">·</span>
+				{#each (model.scopes ?? []) as scope (scope)}
+					<span class="border border-[var(--color-border)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-muted)]">{scope}</span>
+				{/each}
+			{/if}
+		</div>
+	</div>
 </a>

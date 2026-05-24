@@ -1097,6 +1097,7 @@ export interface DetectionModelSummary {
 	published_at: string;
 	updated_at: string;
 	variant_runtimes: string[];
+	training_metadata: Record<string, unknown> | null;
 }
 
 export interface DetectionModelDetail extends DetectionModelSummary {

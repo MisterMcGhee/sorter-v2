@@ -32,6 +32,9 @@ class DetectionModelSummary(BaseModel):
     published_at: datetime
     updated_at: datetime
     variant_runtimes: list[str] = Field(default_factory=list)
+    # Included on Summary so the /models list page can render metric pills
+    # without a second round-trip per row. Same blob as Detail.
+    training_metadata: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def _fill_codename_color(self):
