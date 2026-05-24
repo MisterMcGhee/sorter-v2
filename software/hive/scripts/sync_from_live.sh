@@ -5,10 +5,11 @@
 # real samples without burning roundtrips to prod.
 #
 # Usage:
-#   ./sync_from_live.sh              # both db + s3
+#   ./sync_from_live.sh              # db + s3 + env
 #   ./sync_from_live.sh db           # db only
 #   ./sync_from_live.sh s3           # s3 only
-#   ./sync_from_live.sh --dry-run    # print sizes + counts, change nothing
+#   ./sync_from_live.sh env          # secrets only (SECRET_ENCRYPTION_KEY, JWT_SECRET)
+#   ./sync_from_live.sh --dry-run    # print sizes + commands, change nothing
 #
 # Prereqs: ssh access to LIVE_HOST, local docker postgres running (services
 # from software/hive/docker-compose.yml), aws CLI installed locally. The
@@ -29,6 +30,15 @@ LIVE_PG_CONTAINER="${LIVE_PG_CONTAINER:-hive-postgres}"
 
 LOCAL_PG_CONTAINER="${LOCAL_PG_CONTAINER:-hive-postgres-1}"
 LOCAL_UPLOAD_DIR="${LOCAL_UPLOAD_DIR:-$(cd "$(dirname "$0")/.." && pwd)/backend/data/uploads}"
+LOCAL_ENV_FILE="${LOCAL_ENV_FILE:-$(cd "$(dirname "$0")/.." && pwd)/backend/.env}"
+
+# Which keys from live's .env.prod to mirror into local .env. Curated, not a
+# wholesale copy — we explicitly skip DATABASE_URL, STORAGE_BACKEND, S3_*,
+# COOKIE_SECURE, ADMIN_*, GITHUB_*, etc. because those are local-specific. The
+# two we DO want: SECRET_ENCRYPTION_KEY (to decrypt synced api_key columns) and
+# JWT_SECRET (so a browser tab switching between local + live doesn't bounce
+# its session on every cookie check).
+SYNCABLE_ENV_KEYS=(SECRET_ENCRYPTION_KEY JWT_SECRET)
 
 DUMP_REMOTE="/tmp/hive_live.dump"
 DUMP_LOCAL="${TMPDIR:-/tmp}/hive_live.dump"
@@ -60,7 +70,7 @@ require_cmd() {
 
 for arg in "$@"; do
   case "$arg" in
-    db|s3|all) PHASE="$arg" ;;
+    db|s3|env|all) PHASE="$arg" ;;
     --dry-run) DRY_RUN=1 ;;
     -h|--help)
       grep -E '^#( |$)' "$0" | sed -E 's/^# ?//'
@@ -153,7 +163,9 @@ sync_db() {
   fi
 
   ok "DB restored"
-  warn "Encrypted columns (api keys, magic links) only decrypt if your local SECRET_ENCRYPTION_KEY matches the live one. Copy it from live's .env.prod into backend/.env if you need to use those features."
+  # The accompanying 'env' phase mirrors SECRET_ENCRYPTION_KEY so encrypted columns
+  # (api keys, magic links) decrypt locally; running 'db' on its own leaves them
+  # unreadable until you also run './sync_from_live.sh env'.
 }
 
 # ------------------------------------------------------------------ s3 phase
@@ -172,12 +184,41 @@ sync_s3() {
   ok "S3 synced into $LOCAL_UPLOAD_DIR"
 }
 
+# ------------------------------------------------------------------ env phase
+
+sync_env() {
+  info "Mirroring selected secrets from live .env.prod into ${LOCAL_ENV_FILE}"
+  for key in "${SYNCABLE_ENV_KEYS[@]}"; do
+    local value
+    value=$(ssh "$LIVE_HOST" "grep -E '^${key}=' $LIVE_REPO/.env.prod | head -1 | cut -d= -f2-" | tr -d '\r\n')
+    if [[ -z "$value" ]]; then
+      warn "  $key not set on live — skipping"
+      continue
+    fi
+    if [[ $DRY_RUN -eq 1 ]]; then
+      color 90 "  [dry-run] would set $key=*** (${#value} chars) in ${LOCAL_ENV_FILE}"
+      continue
+    fi
+    # Atomically replace any existing line for $key, or append if absent.
+    mkdir -p "$(dirname "$LOCAL_ENV_FILE")"
+    touch "$LOCAL_ENV_FILE"
+    local tmp
+    tmp=$(mktemp)
+    grep -v "^${key}=" "$LOCAL_ENV_FILE" > "$tmp" || true
+    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    mv "$tmp" "$LOCAL_ENV_FILE"
+    ok "  $key updated (${#value} chars)"
+  done
+  warn "Restart the local backend so it picks up the new env."
+}
+
 # ------------------------------------------------------------------ run
 
 case "$PHASE" in
   db) sync_db ;;
   s3) sync_s3 ;;
-  all) sync_db; sync_s3 ;;
+  env) sync_env ;;
+  all) sync_db; sync_s3; sync_env ;;
 esac
 
 ok "Done."
