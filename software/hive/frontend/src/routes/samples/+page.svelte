@@ -61,7 +61,7 @@
 	};
 	const STATUS_LABELS: Record<string, string> = {
 		unreviewed: 'Unreviewed',
-		in_review: 'In Review',
+		in_review: 'Needs more reviews',
 		accepted: 'Accepted',
 		rejected: 'Rejected',
 		conflict: 'Conflict'
@@ -1010,7 +1010,7 @@
 	{@const segments = [
 		{ key: 'accepted', label: 'Accepted', count: stats.accepted_samples, color: '#00852B' },
 		{ key: 'rejected', label: 'Rejected', count: stats.rejected_samples, color: '#D01012' },
-		{ key: 'in_review', label: 'In Review', count: stats.in_review_samples, color: '#0055BF' },
+		{ key: 'in_review', label: 'Needs more reviews', count: stats.in_review_samples, color: '#0055BF' },
 		{ key: 'conflict', label: 'Conflict', count: stats.conflict_samples, color: '#FFD500' },
 		{ key: 'unreviewed', label: 'Unreviewed', count: stats.unreviewed_samples, color: '#E2E0DB' },
 	]}
@@ -1201,7 +1201,7 @@
 					{#each [
 						{ key: '', label: 'All' },
 						{ key: 'unreviewed', label: 'Unreviewed' },
-						{ key: 'in_review', label: 'In Review' },
+						{ key: 'in_review', label: 'Needs more reviews' },
 						{ key: 'accepted', label: 'Accepted' },
 						{ key: 'rejected', label: 'Rejected' },
 						{ key: 'conflict', label: 'Conflict' },

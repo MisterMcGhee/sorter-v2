@@ -15,7 +15,7 @@
 	const statusConfig: Record<string, { label: string; color: string; bg: string }> = {
 		accepted: { label: 'Accepted', color: '#00852B', bg: 'rgba(0,133,43,0.12)' },
 		rejected: { label: 'Rejected', color: '#D01012', bg: 'rgba(208,16,18,0.10)' },
-		in_review: { label: 'In Review', color: '#0055BF', bg: 'rgba(0,85,191,0.10)' },
+		in_review: { label: 'Needs more reviews', color: '#0055BF', bg: 'rgba(0,85,191,0.10)' },
 		conflict: { label: 'Conflict', color: '#FFD500', bg: 'rgba(255,213,0,0.15)' },
 		unreviewed: { label: 'Unreviewed', color: '#FFFFFF', bg: 'rgba(0,0,0,0.45)' }
 	};

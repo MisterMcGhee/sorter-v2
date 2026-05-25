@@ -252,7 +252,7 @@
 
 	const statusLabel: Record<string, string> = {
 		unreviewed: 'Unreviewed',
-		in_review: 'In Review',
+		in_review: 'Needs more reviews',
 		accepted: 'Accepted',
 		rejected: 'Rejected',
 		conflict: 'Conflict'
@@ -524,34 +524,6 @@
 			{#if sample.review_count > 0}
 				<span class="text-xs text-text-muted">{sample.review_count} review{sample.review_count !== 1 ? 's' : ''}</span>
 			{/if}
-			{#if auth.isReviewer}
-				{@const myVote = sample.my_review_decision}
-				<div class="ml-1 flex items-center gap-1">
-					{#if myVote}
-						<span
-							class="border px-2 py-1 text-xs font-medium {myVote === 'accept' ? 'border-success/30 bg-success/10 text-success' : 'border-primary/30 bg-primary/10 text-primary'}"
-							title={myVote === 'accept' ? 'You accepted this sample' : 'You rejected this sample'}
-						>You: {myVote === 'accept' ? '✓' : '✗'}</span>
-					{/if}
-					<button
-						type="button"
-						onclick={() => void submitVote('accept')}
-						disabled={voteSubmitting || myVote === 'accept'}
-						class="border border-success/30 bg-white px-2 py-1 text-xs font-medium text-success hover:bg-success/10 disabled:cursor-not-allowed disabled:opacity-50"
-						title={myVote ? 'Change your vote to Accept' : 'Accept this sample'}
-					>{myVote === 'accept' ? '✓ Accepted' : myVote === 'reject' ? 'Change to ✓' : '✓ Accept'}</button>
-					<button
-						type="button"
-						onclick={() => void submitVote('reject')}
-						disabled={voteSubmitting || myVote === 'reject'}
-						class="border border-primary/30 bg-white px-2 py-1 text-xs font-medium text-primary hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
-						title={myVote ? 'Change your vote to Reject' : 'Reject this sample'}
-					>{myVote === 'reject' ? '✗ Rejected' : myVote === 'accept' ? 'Change to ✗' : '✗ Reject'}</button>
-				</div>
-				{#if voteError}
-					<span class="text-xs text-danger">{voteError}</span>
-				{/if}
-			{/if}
 			<div class="ml-1 flex items-center gap-1.5">
 				<a
 					href={`/samples/${sample.id}/similar`}
@@ -673,6 +645,60 @@
 			<!-- Annotator controls (only in annotate mode) -->
 			{#if activeView === 'annotate'}
 				<SampleAnnotatorPanel {annotatorApi} />
+			{/if}
+
+			<!-- Review actions — mirrors the /review page's action pad so
+			     reviewers vote from the same spot regardless of which
+			     surface they're working from. -->
+			{#if auth.isReviewer}
+				{@const myVote = sample.my_review_decision}
+				<div class="border border-border bg-surface">
+					<div class="flex items-center justify-between border-b border-border px-4 py-2.5">
+						<h2 class="text-xs font-semibold uppercase tracking-wider text-text-muted">Your review</h2>
+						{#if myVote}
+							<span
+								class="border px-1.5 py-0.5 text-[11px] font-medium {myVote === 'accept' ? 'border-success/30 bg-success/10 text-success' : 'border-primary/30 bg-primary/10 text-primary'}"
+								title={myVote === 'accept' ? 'You accepted this sample' : 'You rejected this sample'}
+							>You: {myVote === 'accept' ? '✓' : '✗'}</span>
+						{:else}
+							<span class="text-[11px] text-text-muted">Not voted</span>
+						{/if}
+					</div>
+					<div class="space-y-2 p-3">
+						<div class="grid grid-cols-2 gap-1.5">
+							<button
+								type="button"
+								onclick={() => void submitVote('accept')}
+								disabled={voteSubmitting || myVote === 'accept'}
+								class="border border-success/20 bg-[#F0F9F5] px-3 py-2.5 text-center transition-colors hover:bg-success/15 disabled:cursor-not-allowed disabled:opacity-50"
+								title={myVote ? 'Change your vote to Accept' : 'Accept this sample'}
+							>
+								<div class="text-xl font-bold text-success">↑</div>
+								<div class="text-xs font-medium text-success">
+									{myVote === 'accept' ? 'Accepted' : myVote === 'reject' ? 'Change to ✓' : 'Accept'}
+								</div>
+							</button>
+							<button
+								type="button"
+								onclick={() => void submitVote('reject')}
+								disabled={voteSubmitting || myVote === 'reject'}
+								class="border border-primary/20 bg-primary-light px-3 py-2.5 text-center transition-colors hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
+								title={myVote ? 'Change your vote to Reject' : 'Reject this sample'}
+							>
+								<div class="text-xl font-bold text-primary">↓</div>
+								<div class="text-xs font-medium text-primary">
+									{myVote === 'reject' ? 'Rejected' : myVote === 'accept' ? 'Change to ✗' : 'Reject'}
+								</div>
+							</button>
+						</div>
+						{#if voteError}
+							<div class="border border-danger bg-danger/10 px-2 py-1 text-[11px] text-danger">{voteError}</div>
+						{/if}
+						<p class="text-center text-[11px] text-text-muted">
+							{sample.review_count} of 3 reviews · {sample.accepted_count} ✓ / {sample.rejected_count} ✗
+						</p>
+					</div>
+				</div>
 			{/if}
 
 			<!-- Detection summary card -->
