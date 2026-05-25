@@ -25,7 +25,12 @@ class Settings(BaseSettings):
     CORS_ORIGIN: str = "http://localhost:5174"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 30
-    MIN_REVIEWS_FOR_CONSENSUS: int = 1
+    # Reviews required before a sample can flip out of 'in_review' into a
+    # final status. Aligned with REVIEW_CONSENSUS_TARGET so the global status
+    # only resolves once the queue stops serving the sample — no "tentative
+    # accepted after the first vote" race. Unanimity is enforced by
+    # recompute_sample_status: 3✓ → accepted, 3✗ → rejected, any mix → conflict.
+    MIN_REVIEWS_FOR_CONSENSUS: int = 3
     # Once a sample has REVIEW_CONSENSUS_TARGET independent reviews, it drops
     # out of every reviewer's queue regardless of whether they personally
     # reviewed it. Edge cases (ties / conflicts) can be revisited via the
