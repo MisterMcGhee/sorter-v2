@@ -109,6 +109,9 @@ class TeacherJobFilter(BaseModel):
     source_role: str | None = None
     capture_reason: str | None = None
     review_status: str | None = None
+    kind: str | None = None
+    my_review: str | None = None
+    annotated: str | None = None
     max_age_hours: int | None = None
 
 
@@ -206,7 +209,21 @@ def create_teacher_job(
         _resolve_adapter_secret(admin, candidate_adapter)
 
     filt = payload.filter
-    query = db.query(Sample)
+    from app.models.machine import Machine as _Machine
+    from app.routers.samples import (
+        apply_annotated_filter as _apply_annotated,
+        apply_kind_filter as _apply_kind,
+        apply_my_review_filter as _apply_my_review,
+    )
+
+    # Never enqueue archived rows (per-sample or per-machine) — admins
+    # already pulled those out of circulation. Same guard the list +
+    # review endpoints use.
+    query = (
+        db.query(Sample)
+        .filter(Sample.archived_at.is_(None))
+        .filter(Sample.machine.has(_Machine.archived_at.is_(None)))
+    )
     if filt.scope == "mine":
         query = query.filter(Sample.machine.has(owner_id=admin.id))
     if filt.machine_id is not None:
@@ -223,6 +240,15 @@ def create_teacher_job(
         from datetime import timedelta
         cutoff = datetime.now(timezone.utc) - timedelta(hours=filt.max_age_hours)
         query = query.filter(Sample.uploaded_at >= cutoff)
+    # Honor the same kind/my_review/annotated filters as the list view so
+    # "Re-run teacher" on a filtered list operates on exactly what the
+    # admin sees. Bug fix: previously these were silently dropped, so a
+    # job built from e.g. ?annotated=raw would still pick up everything.
+    query = _apply_kind(query, filt.kind)
+    if filt.my_review:
+        query = _apply_my_review(query, filt.my_review, admin.id)
+    if filt.annotated:
+        query = _apply_annotated(query, filt.annotated)
 
     # Only enqueue samples whose source_role has a teacher zone — otherwise we'd just burn
     # Gemini credits on the wrong prompt. We also skip rows missing image_path defensively.

@@ -455,6 +455,14 @@
 		review_status: filterStatus || undefined,
 		source_role: filterSourceRole || undefined,
 		capture_reason: filterCaptureReason || undefined,
+		kind: filterKind || undefined,
+		my_review: filterMyReview || undefined,
+		// Only forward an explicit annotated filter ('teacher' / 'raw' /
+		// 'all'). Empty stays undefined so a default-view re-run sweeps
+		// everything matching the other filters — re-running teacher is
+		// usually meant as a broad re-pass, not "only what's already been
+		// teacher'd" which is what mirroring the server default would imply.
+		annotated: filterAnnotated || undefined,
 		// Age filter must travel with the job filter — otherwise the modal counts a 24h
 		// slice but the job picks up the full table.
 		max_age_hours: filterMaxAgeHours ? Number(filterMaxAgeHours) : undefined

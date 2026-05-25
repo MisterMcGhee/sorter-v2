@@ -1214,6 +1214,9 @@ export interface TeacherJobFilter {
 	source_role?: string;
 	capture_reason?: string;
 	review_status?: string;
+	kind?: 'regular' | 'condition' | 'all' | string;
+	my_review?: 'unreviewed' | 'reviewed' | 'accepted' | 'rejected' | string;
+	annotated?: 'teacher' | 'raw' | 'all' | string;
 	max_age_hours?: number;
 }
 
