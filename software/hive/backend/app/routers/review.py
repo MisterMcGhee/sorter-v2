@@ -18,6 +18,7 @@ from app.schemas.review import (
     ReviewResponse,
 )
 from app.schemas.sample import SampleResponse
+from app.models.machine import Machine
 from app.routers.samples import apply_kind_filter
 from app.services.condition_analysis import (
     COMPOSITION_VALUES,
@@ -65,6 +66,11 @@ def get_next_review(
     query = db.query(Sample).filter(
         Sample.review_status.in_(["unreviewed", "in_review"]),
         Sample.id.notin_(already_reviewed),
+        # Hide archived rows (per-sample archive + machine-level archive) so
+        # the queue never serves something an admin has already taken out of
+        # circulation.
+        Sample.archived_at.is_(None),
+        Sample.machine.has(Machine.archived_at.is_(None)),
     )
     query = apply_kind_filter(query, kind)
 

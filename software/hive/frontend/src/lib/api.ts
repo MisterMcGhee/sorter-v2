@@ -646,6 +646,7 @@ export const api = {
 		capture_reason?: string;
 		review_status?: string;
 		kind?: 'regular' | 'condition' | 'all' | string;
+		archived?: 'active' | 'archived' | 'all' | string;
 		max_age_hours?: number | string;
 		scope?: 'mine' | 'all' | string;
 	} = {}) {
@@ -715,6 +716,32 @@ export const api = {
 			dry_run: boolean;
 			capped: boolean;
 		}>('POST', '/api/samples/batch-delete', body);
+	},
+	batchArchiveSamples(
+		payload: {
+			machine_id?: string;
+			source_role?: string;
+			capture_reason?: string;
+			review_status?: string;
+			kind?: 'regular' | 'condition' | 'all' | string;
+			max_age_hours?: number | string;
+			dry_run?: boolean;
+			max_archive?: number;
+		},
+		mode: 'archive' | 'unarchive' = 'archive'
+	) {
+		const body: Record<string, unknown> = {};
+		for (const [key, val] of Object.entries(payload)) {
+			if (val !== undefined && val !== null && val !== '') body[key] = val;
+		}
+		const path = mode === 'archive' ? '/api/samples/batch-archive' : '/api/samples/batch-unarchive';
+		return request<{
+			ok: boolean;
+			matched: number;
+			archived: number;
+			dry_run: boolean;
+			capped: boolean;
+		}>('POST', path, body);
 	},
 	sampleImageUrl(id: string) {
 		return resolveApiPath(`/api/samples/${id}/assets/image`);

@@ -10,6 +10,7 @@ export const SAMPLE_LIST_FILTER_KEYS = [
 	'source_role',
 	'capture_reason',
 	'kind',
+	'archived',
 	'max_age_hours'
 ] as const;
 
@@ -31,6 +32,9 @@ export interface SampleListFilters {
 	// — splits the queue between detection samples and condition-collector
 	// crops so reviewers / browsers can drain one bucket at a time.
 	kind?: string;
+	// Admin-only: 'active' (default), 'archived' (only archived), 'all'. Members
+	// always see 'active' regardless of what they pass — server enforces.
+	archived?: string;
 	max_age_hours?: string;
 }
 
@@ -85,6 +89,7 @@ export function sampleListContextKey(ctx: SampleListContext): string {
 		source_role: ctx.source_role ?? '',
 		capture_reason: ctx.capture_reason ?? '',
 		kind: ctx.kind ?? '',
+		archived: ctx.archived ?? '',
 		max_age_hours: ctx.max_age_hours ?? '',
 		page_size: ctx.page_size
 	});

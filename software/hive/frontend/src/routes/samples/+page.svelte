@@ -40,6 +40,9 @@
 	// 'regular' (default once a filter is picked, also means: no condition crops)
 	// or 'condition'. Empty string = all = both kinds mixed.
 	const filterKind = $derived(listContext.kind ?? '');
+	// Admin-only: 'active' (default), 'archived', 'all'. Server enforces:
+	// non-admins always see active regardless of what they send.
+	const filterArchived = $derived(listContext.archived ?? '');
 	const filterMaxAgeHours = $derived(listContext.max_age_hours ?? '');
 	const currentPage = $derived(listContext.page);
 	const pageSize = $derived(listContext.page_size);
@@ -74,7 +77,7 @@
 	};
 
 	const hasActiveFilters = $derived(
-		filterMachine || filterStatus || filterSourceRole || filterCaptureReason || filterKind || filterMaxAgeHours
+		filterMachine || filterStatus || filterSourceRole || filterCaptureReason || filterKind || filterArchived || filterMaxAgeHours
 	);
 
 	$effect(() => {
@@ -89,6 +92,7 @@
 		void filterSourceRole;
 		void filterCaptureReason;
 		void filterKind;
+		void filterArchived;
 		void filterMaxAgeHours;
 		void currentPage;
 		void pageSize;
@@ -162,6 +166,7 @@
 				source_role: filterSourceRole || undefined,
 				capture_reason: filterCaptureReason || undefined,
 				kind: filterKind || undefined,
+				archived: filterArchived || undefined,
 				max_age_hours: filterMaxAgeHours || undefined
 			});
 		} catch {
@@ -276,6 +281,7 @@
 			sp.delete('source_role');
 			sp.delete('capture_reason');
 			sp.delete('kind');
+			sp.delete('archived');
 			sp.delete('max_age_hours');
 			sp.delete('page');
 		});
@@ -362,6 +368,69 @@
 			deleteError = e instanceof Error ? e.message : 'Delete failed.';
 		} finally {
 			deleteRunning = false;
+		}
+	}
+
+	// Admin-only batch archive. Reversible (no file deletion); operates on
+	// the full library (no ownership constraint, server enforces admin role).
+	let archiveMode = $state<'archive' | 'unarchive'>('archive');
+	let archiveModalOpen = $state(false);
+	let archiveCount = $state<number | null>(null);
+	let archiveCapped = $state(false);
+	let archiveRunning = $state(false);
+	let archiveError = $state<string | null>(null);
+	let archiveResult = $state<{ archived: number; matched: number; mode: 'archive' | 'unarchive' } | null>(null);
+
+	const currentBatchArchivePayload = $derived(() => ({
+		machine_id: filterMachine || undefined,
+		source_role: filterSourceRole || undefined,
+		capture_reason: filterCaptureReason || undefined,
+		review_status: filterStatus || undefined,
+		kind: filterKind || undefined,
+		max_age_hours: filterMaxAgeHours ? Number(filterMaxAgeHours) : undefined
+	}));
+
+	async function openArchiveModal(mode: 'archive' | 'unarchive') {
+		archiveMode = mode;
+		archiveModalOpen = true;
+		archiveCount = null;
+		archiveCapped = false;
+		archiveError = null;
+		archiveResult = null;
+		try {
+			const res = await api.batchArchiveSamples(
+				{ ...currentBatchArchivePayload(), dry_run: true },
+				mode
+			);
+			archiveCount = res.matched;
+			archiveCapped = res.capped;
+		} catch (e) {
+			archiveError = e instanceof Error ? e.message : 'Count probe failed.';
+		}
+	}
+
+	function closeArchiveModal() {
+		if (archiveRunning) return;
+		archiveModalOpen = false;
+		archiveCount = null;
+		archiveCapped = false;
+		archiveError = null;
+		archiveResult = null;
+	}
+
+	async function runBatchArchive() {
+		if (archiveRunning || archiveCount === null || archiveCount === 0 || archiveCapped) return;
+		archiveRunning = true;
+		archiveError = null;
+		try {
+			const res = await api.batchArchiveSamples(currentBatchArchivePayload(), archiveMode);
+			archiveResult = { archived: res.archived, matched: res.matched, mode: archiveMode };
+			await loadSamples();
+			await loadFilters();
+		} catch (e) {
+			archiveError = e instanceof Error ? e.message : 'Archive failed.';
+		} finally {
+			archiveRunning = false;
 		}
 	}
 
@@ -545,6 +614,27 @@
 				Re-run teacher
 			</button>
 		{/if}
+		{#if auth.user?.role === 'admin'}
+			<!-- Admin-only soft-delete. Shows Unarchive when looking at the
+			     archived-only view; Archive otherwise. -->
+			<button
+				type="button"
+				onclick={() => openArchiveModal(filterArchived === 'archived' ? 'unarchive' : 'archive')}
+				class="inline-flex items-center gap-2 border border-border px-4 py-2 text-sm font-medium text-text hover:border-text hover:bg-text hover:text-white"
+				title={hasActiveFilters
+					? (filterArchived === 'archived'
+						? 'Unarchive every sample matching the current filter'
+						: 'Archive every sample matching the current filter')
+					: (filterArchived === 'archived'
+						? 'Unarchive every currently-archived sample (no filter active)'
+						: 'Archive every sample in the library (no filter active)')}
+			>
+				<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
+				</svg>
+				{filterArchived === 'archived' ? 'Unarchive filtered' : 'Archive filtered'}
+			</button>
+		{/if}
 		{#if filterScope === 'mine'}
 			<!-- Destructive: only shown when looking at "My samples" so an
 			     admin browsing the global library can't even start the flow. -->
@@ -655,6 +745,97 @@
 		{/if}
 	</div>
 {/if}
+
+<Modal
+	open={archiveModalOpen}
+	title={archiveMode === 'archive' ? 'Archive filtered samples' : 'Unarchive filtered samples'}
+	onclose={closeArchiveModal}
+>
+	<div class="space-y-4 text-sm">
+		{#if archiveError}
+			<div class="border border-danger bg-danger/10 px-3 py-2 text-xs text-danger">
+				{archiveError}
+			</div>
+		{/if}
+
+		{#if archiveResult}
+			<p class="text-text">
+				{archiveResult.mode === 'archive' ? 'Archived' : 'Unarchived'}
+				<span class="font-semibold">{archiveResult.archived}</span>
+				sample{archiveResult.archived === 1 ? '' : 's'}.
+			</p>
+		{:else if archiveCount === null}
+			<p class="text-text-muted">Counting…</p>
+		{:else if archiveCount === 0}
+			<p class="text-text">
+				No {archiveMode === 'archive' ? 'active' : 'archived'} samples match the current filter.
+			</p>
+		{:else}
+			<p class="text-text">
+				{#if archiveMode === 'archive'}
+					Archive <span class="font-semibold">{archiveCount.toLocaleString()}</span>
+					sample{archiveCount === 1 ? '' : 's'} matching the current filter?
+				{:else}
+					Restore <span class="font-semibold">{archiveCount.toLocaleString()}</span>
+					archived sample{archiveCount === 1 ? '' : 's'} back into circulation?
+				{/if}
+			</p>
+			<ul class="space-y-1 text-xs text-text-muted">
+				{#if archiveMode === 'archive'}
+					<li>• Hidden from the sample list, review queue and training pulls.</li>
+					<li>• Files + sample_payload stay intact — reversible via Unarchive.</li>
+					<li>• Admin-only action, applied across the global library.</li>
+				{:else}
+					<li>• Samples reappear in listings, review queue and training pulls.</li>
+					<li>• No data changes besides clearing the archived_at flag.</li>
+				{/if}
+			</ul>
+			{#if hasActiveFilters}
+				<div class="border border-border bg-bg px-3 py-2 text-xs">
+					<div class="mb-1 font-semibold text-text-muted">Active filter</div>
+					<div class="flex flex-wrap gap-1.5">
+						{#if filterScope === 'mine'}<span class="border border-border px-1.5 py-0.5 text-text">scope=mine</span>{/if}
+						{#if filterMachine}<span class="border border-border px-1.5 py-0.5 text-text">machine={filterMachine}</span>{/if}
+						{#if filterSourceRole}<span class="border border-border px-1.5 py-0.5 text-text">source_role={filterSourceRole}</span>{/if}
+						{#if filterCaptureReason}<span class="border border-border px-1.5 py-0.5 text-text">capture_reason={filterCaptureReason}</span>{/if}
+						{#if filterStatus}<span class="border border-border px-1.5 py-0.5 text-text">status={filterStatus}</span>{/if}
+						{#if filterKind}<span class="border border-border px-1.5 py-0.5 text-text">kind={filterKind}</span>{/if}
+						{#if filterMaxAgeHours}<span class="border border-border px-1.5 py-0.5 text-text">max_age_hours={filterMaxAgeHours}</span>{/if}
+					</div>
+				</div>
+			{:else}
+				<div class="border border-warning bg-warning/10 px-3 py-2 text-xs text-text">
+					No filter active — this will {archiveMode === 'archive' ? 'archive every active sample in the library' : 'unarchive every currently-archived sample'}. Narrow with the sidebar first if you only want a slice.
+				</div>
+			{/if}
+			{#if archiveCapped}
+				<div class="border border-warning bg-warning/10 px-3 py-2 text-xs text-text">
+					Match count exceeds the 20,000-per-call cap. Narrow the filter and try again.
+				</div>
+			{/if}
+		{/if}
+
+		<div class="flex justify-end gap-2 border-t border-border pt-3">
+			<Button variant="secondary" onclick={closeArchiveModal} disabled={archiveRunning}>
+				{archiveResult ? 'Close' : 'Cancel'}
+			</Button>
+			{#if !archiveResult}
+				<Button
+					variant="primary"
+					onclick={runBatchArchive}
+					disabled={archiveRunning || archiveCount === null || archiveCount === 0 || archiveCapped}
+					loading={archiveRunning}
+				>
+					{#if archiveCount && archiveCount > 0}
+						{archiveMode === 'archive' ? `Archive ${archiveCount.toLocaleString()}` : `Unarchive ${archiveCount.toLocaleString()}`}
+					{:else}
+						{archiveMode === 'archive' ? 'Archive' : 'Unarchive'}
+					{/if}
+				</Button>
+			{/if}
+		</div>
+	</div>
+</Modal>
 
 <Modal open={deleteModalOpen} title="Delete filtered samples" onclose={closeDeleteModal}>
 	<div class="space-y-4 text-sm">
@@ -830,6 +1011,30 @@
 					</li>
 				</ul>
 			</div>
+
+			<!-- Archived view — admin only. Members never see archived samples
+			     regardless of what's in the URL (server enforces). -->
+			{#if auth.user?.role === 'admin'}
+				<div>
+					<h3 class="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">Archived</h3>
+					<ul class="space-y-0.5">
+						{#each [
+							{ key: '', label: 'Active only' },
+							{ key: 'archived', label: 'Archived only' },
+							{ key: 'all', label: 'Both' },
+						] as item}
+							<li>
+								<button
+									onclick={() => setFilterValue('archived', item.key)}
+									class="w-full px-2 py-1 text-left text-xs {filterArchived === item.key ? 'bg-primary-light font-medium text-primary' : 'text-text hover:bg-bg'}"
+								>
+									{item.label}
+								</button>
+							</li>
+						{/each}
+					</ul>
+				</div>
+			{/if}
 
 			<!-- Kind: regular detection samples vs condition crops. Coarser than
 			     source_role / capture_reason — splits the queue into the two

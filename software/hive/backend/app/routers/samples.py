@@ -12,6 +12,7 @@ from app.deps import (
     API_KEY_SCOPE_SAMPLES_WRITE,
     get_db,
     require_api_key_scopes,
+    require_role,
     verify_csrf,
 )
 from app.errors import APIError
@@ -19,6 +20,8 @@ from app.models.machine import Machine
 from app.models.sample import Sample
 from app.models.user import User
 from app.schemas.sample import (
+    BatchArchiveSamplesRequest,
+    BatchArchiveSamplesResponse,
     BatchDeleteSamplesRequest,
     BatchDeleteSamplesResponse,
     SampleDetailResponse,
@@ -58,7 +61,13 @@ def _normalized_optional_string(value: str | None) -> str | None:
     return normalized or None
 
 
-def _visible_sample_query(db: Session, current_user: User, scope: str | None):
+def _visible_sample_query(
+    db: Session,
+    current_user: User,
+    scope: str | None,
+    *,
+    include_archived: bool = False,
+):
     """Read-side query.
 
     Default scope is 'all' — samples are public to any logged-in user. ``scope='mine'``
@@ -67,8 +76,14 @@ def _visible_sample_query(db: Session, current_user: User, scope: str | None):
     Always hides samples whose machine is archived. Archived rigs (old hardware,
     decommissioned setups) shouldn't show up in browse/diversity/training pulls; their
     samples stay in the DB so an admin can un-archive without data loss.
+
+    Per-sample archive flag (``Sample.archived_at``) is also filtered out by default.
+    Admins can opt in to seeing them with ``include_archived=True`` so they have a
+    surface to un-archive from.
     """
     query = db.query(Sample).filter(Sample.machine.has(Machine.archived_at.is_(None)))
+    if not include_archived:
+        query = query.filter(Sample.archived_at.is_(None))
     if scope == "mine":
         query = query.filter(Sample.machine.has(owner_id=current_user.id))
     return query
@@ -557,12 +572,21 @@ def list_samples(
     capture_reason: str | None = None,
     review_status: str | None = None,
     kind: str | None = Query(None, pattern="^(regular|condition|all)$"),
+    archived: str | None = Query(None, pattern="^(active|archived|all)$"),
     max_age_hours: int | None = Query(None, ge=1, le=24 * 365),
     scope: str | None = Query(None, pattern="^(mine|all)$"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_api_key_scopes(API_KEY_SCOPE_SAMPLES_READ)),
 ):
-    query = _visible_sample_query(db, current_user, scope)
+    # `archived` is admin-only — members never see archived samples regardless
+    # of what they pass. Default ('active' or unset) hides them.
+    is_admin = current_user.role == "admin"
+    include_archived = is_admin and archived in ("archived", "all")
+    only_archived = is_admin and archived == "archived"
+
+    query = _visible_sample_query(db, current_user, scope, include_archived=include_archived)
+    if only_archived:
+        query = query.filter(Sample.archived_at.isnot(None))
     query = apply_kind_filter(query, kind)
 
     if machine_id:
@@ -687,6 +711,128 @@ def save_sample_classification(
         ok=True,
         cleared=False,
         data=payload,
+    )
+
+
+def _apply_archive_filters(query, payload: BatchArchiveSamplesRequest):
+    """Shared filter assembly for archive + unarchive endpoints."""
+
+    query = apply_kind_filter(query, payload.kind)
+    if payload.machine_id:
+        try:
+            machine_uuid = UUID(payload.machine_id)
+        except ValueError:
+            raise APIError(400, "machine_id must be a UUID", "INVALID_MACHINE_ID")
+        query = query.filter(Sample.machine_id == machine_uuid)
+    if payload.source_role:
+        query = query.filter(Sample.source_role == payload.source_role)
+    if payload.capture_reason:
+        query = query.filter(Sample.capture_reason == payload.capture_reason)
+    if payload.review_status:
+        query = query.filter(Sample.review_status == payload.review_status)
+    if payload.max_age_hours is not None:
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=payload.max_age_hours)
+        query = query.filter(Sample.uploaded_at >= cutoff)
+    return query
+
+
+@router.post("/batch-archive", response_model=BatchArchiveSamplesResponse)
+def batch_archive_samples(
+    payload: BatchArchiveSamplesRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_role("admin")),
+    _csrf: None = Depends(verify_csrf),
+):
+    """Admin-only soft-delete: stamp `archived_at` on every active sample
+    matching the filter, hiding it from listings + review + training pulls.
+
+    Reversible via POST /api/samples/batch-unarchive with the same filter.
+    No file deletion happens — just the flag — so unarchive restores fully.
+    """
+
+    # Only operate on currently-active samples (skip those already archived).
+    query = (
+        db.query(Sample)
+        .filter(Sample.machine.has(Machine.archived_at.is_(None)))
+        .filter(Sample.archived_at.is_(None))
+    )
+    query = _apply_archive_filters(query, payload)
+
+    matched = query.count()
+
+    if payload.dry_run:
+        return BatchArchiveSamplesResponse(
+            ok=True,
+            matched=matched,
+            archived=0,
+            dry_run=True,
+            capped=matched > payload.max_archive,
+        )
+
+    if matched > payload.max_archive:
+        raise APIError(
+            400,
+            f"Filter matches {matched} samples — narrow the filter or raise max_archive "
+            f"(currently {payload.max_archive}). Refusing to archive in one shot.",
+            "BATCH_ARCHIVE_TOO_LARGE",
+        )
+
+    # Bulk UPDATE is cheaper than row-by-row for large sets and keeps the
+    # transaction short — no per-row ORM overhead.
+    now = datetime.now(timezone.utc)
+    archived = query.update({Sample.archived_at: now}, synchronize_session=False)
+    db.commit()
+    return BatchArchiveSamplesResponse(
+        ok=True,
+        matched=matched,
+        archived=int(archived or 0),
+        dry_run=False,
+    )
+
+
+@router.post("/batch-unarchive", response_model=BatchArchiveSamplesResponse)
+def batch_unarchive_samples(
+    payload: BatchArchiveSamplesRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_role("admin")),
+    _csrf: None = Depends(verify_csrf),
+):
+    """Reverse of batch-archive. Operates only on currently-archived rows."""
+
+    query = (
+        db.query(Sample)
+        .filter(Sample.machine.has(Machine.archived_at.is_(None)))
+        .filter(Sample.archived_at.isnot(None))
+    )
+    query = _apply_archive_filters(query, payload)
+
+    matched = query.count()
+
+    if payload.dry_run:
+        return BatchArchiveSamplesResponse(
+            ok=True,
+            matched=matched,
+            archived=0,
+            dry_run=True,
+            capped=matched > payload.max_archive,
+        )
+
+    if matched > payload.max_archive:
+        raise APIError(
+            400,
+            f"Filter matches {matched} archived samples — narrow the filter or raise "
+            f"max_archive (currently {payload.max_archive}).",
+            "BATCH_UNARCHIVE_TOO_LARGE",
+        )
+
+    unarchived = query.update({Sample.archived_at: None}, synchronize_session=False)
+    db.commit()
+    return BatchArchiveSamplesResponse(
+        ok=True,
+        matched=matched,
+        archived=int(unarchived or 0),
+        dry_run=False,
     )
 
 

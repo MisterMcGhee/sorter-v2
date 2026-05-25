@@ -35,6 +35,10 @@ class Sample(Base):
     rejected_count = Column(Integer, nullable=False, default=0)
     uploaded_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     resolved_at = Column(DateTime(timezone=True), nullable=True)
+    # Admin soft-delete. Non-null means hidden from default listings + review
+    # queue + training pulls. Files + sample_payload stay intact so an admin
+    # can un-archive without data loss.
+    archived_at = Column(DateTime(timezone=True), nullable=True)
 
     machine = relationship("Machine", back_populates="samples")
     upload_session = relationship("UploadSession", back_populates="samples")

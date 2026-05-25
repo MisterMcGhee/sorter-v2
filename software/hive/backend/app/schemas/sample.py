@@ -167,3 +167,28 @@ class BatchDeleteSamplesResponse(BaseModel):
     deleted: int
     dry_run: bool
     capped: bool = False
+
+
+class BatchArchiveSamplesRequest(BaseModel):
+    """Admin-only soft-delete. Same filter spec as BatchDeleteSamplesRequest
+    but the target set is the *full library* (no ownership constraint) —
+    admins manage the global content surface.
+    """
+
+    machine_id: str | None = None
+    source_role: str | None = None
+    capture_reason: str | None = None
+    review_status: str | None = None
+    kind: str | None = None
+    max_age_hours: int | None = None
+    archived: str | None = None  # 'active' | 'archived' | 'all' (for unarchive flow)
+    dry_run: bool = False
+    max_archive: int = 20000
+
+
+class BatchArchiveSamplesResponse(BaseModel):
+    ok: bool
+    matched: int
+    archived: int
+    dry_run: bool
+    capped: bool = False
