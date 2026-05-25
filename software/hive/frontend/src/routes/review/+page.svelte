@@ -23,6 +23,7 @@
 	import TeacherRerunButtons from '$lib/components/teacher/TeacherRerunButtons.svelte';
 	import SampleConditionCard from '$lib/components/sample/SampleConditionCard.svelte';
 	import SampleConditionTagger from '$lib/components/sample/SampleConditionTagger.svelte';
+	import { FEATURES } from '$lib/features';
 	import { Alert } from '$lib/components/primitives';
 	import { extractLegacyReviewBboxes, extractPrimaryBboxes, mergeUniqueBboxes, parseBboxCollection, proposalColor } from '$lib/components/sample/bbox-helpers';
 
@@ -343,6 +344,7 @@
 	}
 
 	function toggleAnnotateMode() {
+		if (!FEATURES.ANNOTATION_EDITING) return;
 		if (!sample || loading) return;
 		annotateMode = !annotateMode;
 		if (annotateMode) {
@@ -378,13 +380,13 @@
 			return;
 		}
 
-		if (event.key.toLowerCase() === 'd') {
+		if (FEATURES.ANNOTATION_EDITING && event.key.toLowerCase() === 'd') {
 			event.preventDefault();
 			toggleAnnotateMode();
 			return;
 		}
 
-		if (event.key === 'Escape' && annotateMode) {
+		if (FEATURES.ANNOTATION_EDITING && event.key === 'Escape' && annotateMode) {
 			event.preventDefault();
 			annotateMode = false;
 		}
@@ -444,7 +446,7 @@
 	<div>
 		<h1 class="text-2xl font-bold text-text">Review Queue</h1>
 		<p class="mt-1 text-sm text-text-muted">
-			Arrow up accepts, arrow down rejects, arrow right skips, arrow left goes back, and <kbd class="border border-border bg-bg px-1.5 py-0.5 text-[11px] font-semibold text-text">D</kbd> toggles annotation.
+			Arrow up accepts, arrow down rejects, arrow right skips, arrow left goes back{#if FEATURES.ANNOTATION_EDITING}, and <kbd class="border border-border bg-bg px-1.5 py-0.5 text-[11px] font-semibold text-text">D</kbd> toggles annotation{/if}.
 		</p>
 		{#if activeFilterChips.length > 0}
 			<div class="mt-2 flex flex-wrap items-center gap-2 text-[11px]">

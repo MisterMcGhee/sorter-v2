@@ -13,6 +13,7 @@
 	import Spinner from '$lib/components/Spinner.svelte';
 	import Modal from '$lib/components/Modal.svelte';
 	import SampleAnnotator, { type SeedBox } from '$lib/components/SampleAnnotator.svelte';
+	import { FEATURES } from '$lib/features';
 	import TeacherRerunButtons from '$lib/components/teacher/TeacherRerunButtons.svelte';
 	import SampleClassificationCard from '$lib/components/SampleClassificationCard.svelte';
 	import { AnnotatorApi } from '$lib/components/annotator-api.svelte';
@@ -44,6 +45,10 @@
 
 	function readViewFromUrl(): ViewMode {
 		const v = page.url.searchParams.get('view');
+		// If a stale URL still references the annotate view but the feature is
+		// gated off, fall back to the default image view instead of mounting
+		// the half-baked annotator behind no toggle.
+		if (v === 'annotate' && !FEATURES.ANNOTATION_EDITING) return 'image';
 		if (v && validViews.includes(v as ViewMode)) return v as ViewMode;
 		return 'image';
 	}
@@ -542,12 +547,14 @@
 						Overlay
 					</button>
 				{/if}
-				<button
-					onclick={() => setView('annotate')}
-					class="px-3 py-1.5 text-xs font-medium transition-colors {activeView === 'annotate' ? 'bg-surface text-text' : 'text-text-muted hover:text-text'}"
-				>
-					Annotate
-				</button>
+				{#if FEATURES.ANNOTATION_EDITING}
+					<button
+						onclick={() => setView('annotate')}
+						class="px-3 py-1.5 text-xs font-medium transition-colors {activeView === 'annotate' ? 'bg-surface text-text' : 'text-text-muted hover:text-text'}"
+					>
+						Annotate
+					</button>
+				{/if}
 
 				{#if activeView === 'image' && proposalBoxes.length > 0}
 					<div class="ml-auto flex items-center gap-1.5 pr-1">
