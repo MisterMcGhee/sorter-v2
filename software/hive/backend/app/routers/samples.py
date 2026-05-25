@@ -117,6 +117,33 @@ def apply_kind_filter(query, kind: str | None):
     return query
 
 
+def apply_annotated_filter(query, annotated: str | None):
+    """Filter by whether the Hive teacher (Gemini/Perceptron) has already
+    re-run on the sample.
+
+    The signal is ``extra_metadata.teacher_rerun`` — that key is set only
+    by ``apply_teacher_result_to_sample`` after a successful teacher pass.
+    Raw sorter-side detections (the boxes that arrive with the upload)
+    are often incomplete or off, so reviewers usually want to wait until
+    a teacher has validated them.
+
+    Values:
+      - 'teacher' — has a teacher_rerun audit entry (training-ready)
+      - 'raw'     — no teacher_rerun yet (likely still needs a pass)
+      - anything else / None — no filter
+
+    Uses PostgreSQL JSONB containment (``?`` operator). Live + dev both
+    run postgres; this isn't tested on SQLite.
+    """
+
+    if annotated not in {"teacher", "raw"}:
+        return query
+    has_teacher = Sample.extra_metadata.op("?")("teacher_rerun")
+    if annotated == "teacher":
+        return query.filter(has_teacher)
+    return query.filter(~has_teacher | Sample.extra_metadata.is_(None))
+
+
 def apply_my_review_filter(query, my_review: str | None, viewer_id):
     """Filter samples by the viewer's own review decision.
 
@@ -635,6 +662,7 @@ def list_samples(
     review_status: str | None = None,
     kind: str | None = Query(None, pattern="^(regular|condition|all)$"),
     my_review: str | None = Query(None, pattern="^(unreviewed|reviewed|accepted|rejected)$"),
+    annotated: str | None = Query(None, pattern="^(teacher|raw|all)$"),
     archived: str | None = Query(None, pattern="^(active|archived|all)$"),
     max_age_hours: int | None = Query(None, ge=1, le=24 * 365),
     scope: str | None = Query(None, pattern="^(mine|all)$"),
@@ -652,6 +680,7 @@ def list_samples(
         query = query.filter(Sample.archived_at.isnot(None))
     query = apply_kind_filter(query, kind)
     query = apply_my_review_filter(query, my_review, current_user.id)
+    query = apply_annotated_filter(query, annotated)
 
     if machine_id:
         query = query.filter(Sample.machine_id == machine_id)

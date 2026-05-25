@@ -31,6 +31,11 @@
 	};
 
 	const cfg = $derived(statusConfig[sample.review_status] ?? statusConfig.unreviewed);
+	// True when the Hive teacher (Gemini/Perceptron) hasn't re-processed
+	// the sample yet — boxes are likely raw sorter detections that aren't
+	// training-ready. Surface a badge so reviewers can spot them at a
+	// glance and skip them via the Annotation sidebar filter.
+	const isRaw = $derived(!sample.extra_metadata || !('teacher_rerun' in sample.extra_metadata));
 	const roleLabel = $derived(sample.source_role ? (sourceRoleLabels[sample.source_role] ?? sample.source_role) : null);
 	const score = $derived(sample.detection_score != null ? Math.round(sample.detection_score * 100) : null);
 	const bboxes = $derived.by(() => {
@@ -114,6 +119,16 @@
 		{#if sample.detection_count != null && sample.detection_count > 0}
 			<span class="absolute top-1.5 right-1.5 flex h-5 min-w-5 items-center justify-center bg-black/50 px-1 text-[10px] font-bold text-white backdrop-blur-sm">
 				{sample.detection_count}
+			</span>
+		{/if}
+		<!-- "Raw" marker — no teacher pass yet, boxes are likely incomplete. -->
+		{#if isRaw}
+			<span
+				class="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-[#A16207]"
+				style="background: rgba(255,213,0,0.85); backdrop-filter: blur(4px);"
+				title="No teacher pass yet — boxes may be incomplete. Consider waiting before reviewing."
+			>
+				Raw
 			</span>
 		{/if}
 	</div>

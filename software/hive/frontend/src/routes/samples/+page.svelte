@@ -44,6 +44,11 @@
 	// 'unreviewed' = I haven't reviewed; 'accepted' / 'rejected' = my own
 	// past decision; 'reviewed' = I reviewed either way.
 	const filterMyReview = $derived(listContext.my_review ?? '');
+	// 'teacher' = already validated by a Hive teacher pass;
+	// 'raw' = still raw sorter detections, often incomplete (Dave's freshly
+	// uploaded samples typically fall here until the teacher worker has
+	// caught up). Default '' shows both.
+	const filterAnnotated = $derived(listContext.annotated ?? '');
 	// Admin-only: 'active' (default), 'archived', 'all'. Server enforces:
 	// non-admins always see active regardless of what they send.
 	const filterArchived = $derived(listContext.archived ?? '');
@@ -81,7 +86,7 @@
 	};
 
 	const hasActiveFilters = $derived(
-		filterMachine || filterStatus || filterSourceRole || filterCaptureReason || filterKind || filterMyReview || filterArchived || filterMaxAgeHours
+		filterMachine || filterStatus || filterSourceRole || filterCaptureReason || filterKind || filterMyReview || filterAnnotated || filterArchived || filterMaxAgeHours
 	);
 
 	$effect(() => {
@@ -97,6 +102,7 @@
 		void filterCaptureReason;
 		void filterKind;
 		void filterMyReview;
+		void filterAnnotated;
 		void filterArchived;
 		void filterMaxAgeHours;
 		void currentPage;
@@ -172,6 +178,7 @@
 				capture_reason: filterCaptureReason || undefined,
 				kind: filterKind || undefined,
 				my_review: filterMyReview || undefined,
+				annotated: filterAnnotated || undefined,
 				archived: filterArchived || undefined,
 				max_age_hours: filterMaxAgeHours || undefined
 			});
@@ -288,6 +295,7 @@
 			sp.delete('capture_reason');
 			sp.delete('kind');
 			sp.delete('my_review');
+			sp.delete('annotated');
 			sp.delete('archived');
 			sp.delete('max_age_hours');
 			sp.delete('page');
@@ -670,6 +678,7 @@
 				if (filterSourceRole) sp.set('source_role', filterSourceRole);
 				if (filterCaptureReason) sp.set('capture_reason', filterCaptureReason);
 				if (filterKind) sp.set('kind', filterKind);
+				if (filterAnnotated) sp.set('annotated', filterAnnotated);
 				if (filterMaxAgeHours) sp.set('max_age_hours', filterMaxAgeHours);
 				// Forward review_status + my_review so e.g. "show me conflict
 				// samples" or "show me what I already accepted" carries into
@@ -1038,6 +1047,30 @@
 							<button
 								onclick={() => setFilterValue('kind', item.key)}
 								class="w-full px-2 py-1 text-left text-xs {filterKind === item.key ? 'bg-primary-light font-medium text-primary' : 'text-text hover:bg-bg'}"
+							>
+								{item.label}
+							</button>
+						</li>
+					{/each}
+				</ul>
+			</div>
+
+			<!-- Annotation source: separates samples a Hive teacher has
+			     already processed (training-ready) from raw sorter uploads
+			     that still have unreliable boxes. Reviewers usually want
+			     'Teacher pass' to skip work that's not annotation-ready. -->
+			<div>
+				<h3 class="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">Annotation</h3>
+				<ul class="space-y-0.5">
+					{#each [
+						{ key: '', label: 'All' },
+						{ key: 'teacher', label: 'Teacher pass' },
+						{ key: 'raw', label: 'Raw (pending)' },
+					] as item}
+						<li>
+							<button
+								onclick={() => setFilterValue('annotated', item.key)}
+								class="w-full px-2 py-1 text-left text-xs {filterAnnotated === item.key ? 'bg-primary-light font-medium text-primary' : 'text-text hover:bg-bg'}"
 							>
 								{item.label}
 							</button>

@@ -11,6 +11,7 @@ export const SAMPLE_LIST_FILTER_KEYS = [
 	'capture_reason',
 	'kind',
 	'my_review',
+	'annotated',
 	'archived',
 	'max_age_hours'
 ] as const;
@@ -38,6 +39,10 @@ export interface SampleListFilters {
 	// Independent of the global review_status — that's the consensus state
 	// across all reviewers, this is "what did *I* do".
 	my_review?: string;
+	// Filter by whether a Hive teacher (Gemini/Perceptron) has already
+	// processed the sample. 'teacher' = re-run done (training-ready);
+	// 'raw' = still raw sorter detections, often incomplete.
+	annotated?: string;
 	// Admin-only: 'active' (default), 'archived' (only archived), 'all'. Members
 	// always see 'active' regardless of what they pass — server enforces.
 	archived?: string;
@@ -96,6 +101,7 @@ export function sampleListContextKey(ctx: SampleListContext): string {
 		capture_reason: ctx.capture_reason ?? '',
 		kind: ctx.kind ?? '',
 		my_review: ctx.my_review ?? '',
+		annotated: ctx.annotated ?? '',
 		archived: ctx.archived ?? '',
 		max_age_hours: ctx.max_age_hours ?? '',
 		page_size: ctx.page_size

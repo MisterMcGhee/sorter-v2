@@ -650,6 +650,7 @@ export const api = {
 		review_status?: string;
 		kind?: 'regular' | 'condition' | 'all' | string;
 		my_review?: 'unreviewed' | 'reviewed' | 'accepted' | 'rejected' | string;
+		annotated?: 'teacher' | 'raw' | 'all' | string;
 		archived?: 'active' | 'archived' | 'all' | string;
 		max_age_hours?: number | string;
 		scope?: 'mine' | 'all' | string;
@@ -767,6 +768,7 @@ export const api = {
 			kind?: 'regular' | 'condition' | 'all' | string;
 			review_status?: 'unreviewed' | 'in_review' | 'accepted' | 'rejected' | 'conflict' | string;
 			my_review?: 'unreviewed' | 'reviewed' | 'accepted' | 'rejected' | string;
+			annotated?: 'teacher' | 'raw' | 'all' | string;
 			max_age_hours?: number | string;
 		} = {}
 	) {
