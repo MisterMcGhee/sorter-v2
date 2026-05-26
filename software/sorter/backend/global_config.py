@@ -5,7 +5,8 @@ import argparse
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import Optional, TYPE_CHECKING
 from logger import Logger
 from profiler import Profiler
 from blob_manager import getMachineId
@@ -48,13 +49,13 @@ class GlobalConfig:
     disable_video_streams: list[str]  # "feeder", "classification_bottom", "classification_top"
     run_recorder: "RunRecorder"
     runtime_stats: "RuntimeStatsCollector"
-    brickognize_dump_images: bool
+    brickognize_dump_root: Optional[Path]
     def __init__(self):
         from runtime_stats import RuntimeStatsCollector
 
         self.debug_level = 0
         self.should_write_camera_feeds = False
-        self.brickognize_dump_images = False
+        self.brickognize_dump_root: Optional[Path] = None
         self.disable_chute = False
         # On the restart branch we explicitly simulate the distributor: the
         # Waveshare layer-servo bus isn't reliably available, but C1-C4 must
@@ -110,11 +111,12 @@ def mkGlobalConfig() -> GlobalConfig:
             gc.disable_c_channels.add(ch)
     gc.disable_carousel = "carousel" in all_disable
     gc.use_channel_bus = os.getenv("USE_CHANNEL_BUS", "0") == "1"
-    gc.brickognize_dump_images = os.getenv("BRICKOGNIZE_DUMP_IMAGES", "0") == "1"
     gc.region_provider = RegionProviderType.HANDDRAWN
 
     log_dir = os.path.join(os.path.dirname(__file__), "..", "..", "logs")
     os.makedirs(log_dir, exist_ok=True)
+    if os.getenv("BRICKOGNIZE_DUMP_IMAGES", "0") == "1":
+        gc.brickognize_dump_root = Path(log_dir).resolve() / "brickognize" / gc.run_id
     log_file = os.path.join(log_dir, datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + ".log")
     gc.logger = Logger(gc.debug_level, log_file=log_file)
     gc.profiler = Profiler(
