@@ -22,6 +22,7 @@ class SimpleStateMachineRev01Context:
     def __init__(self) -> None:
         self.config: Rev01Config = _loadConfig()
         self.captured_crops: list[np.ndarray] = []
+        self.captured_crop_timestamps: list[float] = []
         self.last_capture_frame_ts: float = 0.0
         self.rotating_started_at: float = 0.0
         self.classify_started_at: float = 0.0
@@ -35,6 +36,7 @@ class SimpleStateMachineRev01Context:
     def reset(self) -> None:
         self.config = _loadConfig()
         self.captured_crops = []
+        self.captured_crop_timestamps = []
         self.last_capture_frame_ts = 0.0
         self.rotating_started_at = 0.0
         self.classify_started_at = 0.0

@@ -71,6 +71,7 @@ class RotatingAndCapturing(Rev01BaseState):
                 crop = self.cv.cropBbox(frame, primary_bbox, self.ctx.config.crop_padding_px)
                 if crop is not None:
                     self.ctx.captured_crops.append(crop)
+                    self.ctx.captured_crop_timestamps.append(frame_ts)
                     self.ctx.last_capture_frame_ts = frame_ts
                     elapsed = now - self.ctx.rotating_started_at
                     self.logger.info(

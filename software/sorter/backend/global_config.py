@@ -50,12 +50,14 @@ class GlobalConfig:
     run_recorder: "RunRecorder"
     runtime_stats: "RuntimeStatsCollector"
     brickognize_dump_root: Optional[Path]
+    classification_burst_dump_root: Optional[Path]
     def __init__(self):
         from runtime_stats import RuntimeStatsCollector
 
         self.debug_level = 0
         self.should_write_camera_feeds = False
         self.brickognize_dump_root: Optional[Path] = None
+        self.classification_burst_dump_root: Optional[Path] = None
         self.disable_chute = False
         # On the restart branch we explicitly simulate the distributor: the
         # Waveshare layer-servo bus isn't reliably available, but C1-C4 must
@@ -117,6 +119,8 @@ def mkGlobalConfig() -> GlobalConfig:
     os.makedirs(log_dir, exist_ok=True)
     if os.getenv("BRICKOGNIZE_DUMP_IMAGES", "0") == "1":
         gc.brickognize_dump_root = Path(log_dir).resolve() / "brickognize" / gc.run_id
+    if os.getenv("CLASSIFICATION_BURST_DUMP_IMAGES", "0") == "1":
+        gc.classification_burst_dump_root = Path(log_dir).resolve() / "classification_burst" / gc.run_id
     log_file = os.path.join(log_dir, datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + ".log")
     gc.logger = Logger(gc.debug_level, log_file=log_file)
     gc.profiler = Profiler(
