@@ -130,7 +130,7 @@
 		return payload ? `data:image/jpeg;base64,${payload}` : null;
 	}
 
-	type CropEntry = { src: string; role: string; ts: number | null; used: boolean };
+	type CropEntry = { src: string; role: string; ts: number | null; used: boolean; seq?: number; total?: number };
 
 	// --- Tracker-backed crop fetch ----------------------------------------
 	// The "Captured Crops" gallery used to surface just top/bottom/thumbnail.
@@ -288,14 +288,19 @@
 				}
 			}
 
-			for (const recognition_image of (_fetchedPiece?.recognition_images ?? [])) {
+			const recog = _fetchedPiece?.recognition_images ?? [];
+			let recogSeq = 0;
+			for (const recognition_image of recog) {
 				const src = dataImageUrl(recognition_image);
 				if (!src) continue;
+				recogSeq += 1;
 				entries.push({
 					src,
 					role: 'recognition_capture',
 					ts: null,
-					used: false
+					used: false,
+					seq: recogSeq,
+					total: recog.length
 				});
 			}
 
@@ -423,6 +428,13 @@
 		if (role === 'c_channel_2') return 'C-Channel 2';
 		if (role === 'c_channel_3') return 'C-Channel 3';
 		return role;
+	}
+
+	function formatCropLabel(crop: CropEntry): string {
+		if (crop.role === 'recognition_capture' && crop.seq && crop.total) {
+			return `Burst ${crop.seq}/${crop.total}`;
+		}
+		return formatRole(crop.role);
 	}
 
 	function confidenceClass(conf: number | null | undefined): string {
@@ -705,14 +717,14 @@
 									class={`flex flex-col bg-bg text-left hover:border-primary/70 ${
 										crop.used ? 'border-2 border-primary' : 'border border-border'
 									}`}
-									title={crop.used ? 'Shipped to Brickognize for classification' : formatRole(crop.role)}
-									onclick={() => (zoomImage = { src: crop.src, label: formatRole(crop.role) })}
+									title={crop.used ? 'Shipped to Brickognize for classification' : formatCropLabel(crop)}
+									onclick={() => (zoomImage = { src: crop.src, label: formatCropLabel(crop) })}
 								>
 									<div class="relative aspect-square w-full bg-white">
 										<img src={crop.src} alt={crop.role} class="h-full w-full object-contain" loading="lazy" />
 									</div>
 									<div class="flex items-center justify-between gap-2 px-2 py-1.5 text-xs text-text-muted">
-										<span>{formatRole(crop.role)}</span>
+										<span>{formatCropLabel(crop)}</span>
 										<span class="tabular-nums">{formatAbsTs(crop.ts)}</span>
 									</div>
 								</button>
