@@ -12,6 +12,7 @@
 	import CollapsibleSection from '$lib/components/CollapsibleSection.svelte';
 	import RecentObjects from '$lib/components/RecentObjects.svelte';
 	import ResizeHandle from '$lib/components/ResizeHandle.svelte';
+	import RuntimeHomingModal from '$lib/components/RuntimeHomingModal.svelte';
 	import SampleCollectionSpeedPanel from '$lib/components/SampleCollectionSpeedPanel.svelte';
 	import SidebarBottomTabs from '$lib/components/SidebarBottomTabs.svelte';
 	import SortingStatusCard from '$lib/components/SortingStatusCard.svelte';
@@ -175,6 +176,8 @@
 	let sidebar_width = $state(SIDEBAR_DEFAULT);
 	let startSystemError = $state<string | null>(null);
 	let startSystemPending = $state(false);
+	let homingModalOpen = $state(false);
+	let homingModalDismissed = $state(false);
 	let classification_view = $state<'top' | 'bottom'>('top');
 	let classification_layer = $state<'raw' | 'annotated'>('annotated');
 	let machineSetup = $state<'standard_carousel' | 'classification_channel' | 'manual_carousel'>(
@@ -217,6 +220,28 @@
 	const startingSystem = $derived(hardwareState === 'homing' || startSystemPending);
 	const runtimeStats = $derived((machine.machine?.runtimeStats ?? {}) as Record<string, unknown>);
 	const exitIncident = $derived(normalizeExitIncident(runtimeStats.active_incident));
+
+	function openHomingModal() {
+		homingModalDismissed = false;
+		homingModalOpen = true;
+	}
+
+	function dismissHomingModal() {
+		homingModalOpen = false;
+		homingModalDismissed = true;
+	}
+
+	$effect(() => {
+		if (!machine.machine) return;
+		if (hardwareState === 'ready') {
+			homingModalOpen = false;
+			homingModalDismissed = false;
+			return;
+		}
+		if (!homingModalDismissed && !homingModalOpen) {
+			homingModalOpen = true;
+		}
+	});
 
 	async function startSystem() {
 		const baseUrl = currentBackendBaseUrl();
@@ -1218,32 +1243,36 @@
 									<div>
 										<div class="text-sm font-medium text-text">System Standby</div>
 										<div class="text-xs text-text-muted">
-											Press Home to initialize hardware and home all axes.
+											Homing is required before a sorting run.
 										</div>
-										{#if startSystemError}
-											<div class="mt-1 text-xs text-danger">{startSystemError}</div>
-										{/if}
 									</div>
 									<button
-										onclick={startSystem}
-										disabled={startingSystem}
-										class="shrink-0 cursor-pointer border border-success bg-success px-4 py-1.5 text-sm font-medium text-white hover:bg-success/90 disabled:cursor-not-allowed disabled:opacity-50"
+										onclick={openHomingModal}
+										class="shrink-0 cursor-pointer border border-success bg-success px-4 py-1.5 text-sm font-medium text-white hover:bg-success/90"
 									>
 										Home
 									</button>
 								</div>
 							{:else if hardwareState === 'homing'}
-								<div class="flex items-center gap-3">
-									<div
-										class="h-4 w-4 animate-spin border-2 border-primary border-t-transparent"
-										style="border-radius: 50%;"
-									></div>
-									<div>
-										<div class="text-sm font-medium text-text">Homing...</div>
-										<div class="text-xs text-text-muted">
-											{homingStep ?? 'Initializing hardware...'}
+								<div class="flex items-center justify-between gap-3">
+									<div class="flex items-center gap-3">
+										<div
+											class="h-4 w-4 animate-spin border-2 border-primary border-t-transparent"
+											style="border-radius: 50%;"
+										></div>
+										<div>
+											<div class="text-sm font-medium text-text">Homing...</div>
+											<div class="text-xs text-text-muted">
+												{homingStep ?? 'Initializing hardware...'}
+											</div>
 										</div>
 									</div>
+									<button
+										onclick={openHomingModal}
+										class="shrink-0 cursor-pointer border border-border bg-surface px-3 py-1 text-xs text-text hover:bg-bg"
+									>
+										Show
+									</button>
 								</div>
 							{:else if hardwareState === 'error'}
 								<div class="flex flex-col gap-2">
@@ -1252,11 +1281,10 @@
 										<div class="text-xs text-text-muted">{hardwareError}</div>
 									{/if}
 									<button
-										onclick={startSystem}
-										disabled={startingSystem}
-										class="w-fit cursor-pointer border border-border bg-surface px-3 py-1 text-xs text-text hover:bg-bg disabled:cursor-not-allowed disabled:opacity-50"
+										onclick={openHomingModal}
+										class="w-fit cursor-pointer border border-border bg-surface px-3 py-1 text-xs text-text hover:bg-bg"
 									>
-										Retry
+										Retry Homing
 									</button>
 								</div>
 							{/if}
@@ -1544,4 +1572,13 @@
 			</div>
 		{/if}
 	</div>
+	<RuntimeHomingModal
+		open={homingModalOpen && Boolean(machine.machine)}
+		{hardwareState}
+		{hardwareError}
+		{homingStep}
+		homePending={startingSystem}
+		onHome={startSystem}
+		onCancel={dismissHomingModal}
+	/>
 </div>

@@ -5,7 +5,6 @@
 	import { getMachineContext } from '$lib/machines/context';
 	import { getBackendHttpBase, machineHttpBaseUrlFromWsUrl } from '$lib/backend';
 	import AppHeader from '$lib/components/AppHeader.svelte';
-	import SetupHomingSection from '$lib/components/setup/SetupHomingSection.svelte';
 	import SetupPictureSettingsModal from '$lib/components/setup/SetupPictureSettingsModal.svelte';
 	import SetupServoOnboardingSection from '$lib/components/setup/SetupServoOnboardingSection.svelte';
 	import SetupZoneEditorModal from '$lib/components/setup/SetupZoneEditorModal.svelte';
@@ -18,6 +17,7 @@
 	import DiscoveryStep from '$lib/components/setup/steps/DiscoveryStep.svelte';
 	import CamerasStep from '$lib/components/setup/steps/CamerasStep.svelte';
 	import MotionStep from '$lib/components/setup/steps/MotionStep.svelte';
+	import CalibrationStep from '$lib/components/setup/steps/CalibrationStep.svelte';
 	import HiveStep from '$lib/components/setup/steps/HiveStep.svelte';
 	import AdvancedStep from '$lib/components/setup/steps/AdvancedStep.svelte';
 	import { beginHiveLink, completeReturnedHiveLink } from '$lib/hive/link-flow';
@@ -54,7 +54,7 @@
 		| 'discovery'
 		| 'cameras'
 		| 'motion'
-		| 'homing'
+		| 'calibration'
 		| 'servos'
 		| 'hive'
 		| 'advanced';
@@ -133,11 +133,11 @@
 			requiresManualConfirm: true
 		},
 		{
-			id: 'homing',
-			title: 'Endstops and Homing',
+			id: 'calibration',
+			title: 'Endstops and Geometry',
 			kicker: 'Step 5',
 			description:
-				'Verify the carousel and chute endstops, then run the guided home procedures safely.',
+				'Verify each endstop polarity and the chute geometry. Homing itself runs later from the dashboard, right before a sorting run.',
 			requiresManualConfirm: true
 		},
 		{
@@ -237,7 +237,7 @@
 	let stepConfirmations = $state<WizardStepConfirmation>({});
 	let progressLoadedMachineId = $state('');
 	let verificationLoadedMachineId = $state('');
-	let homingSectionRef = $state<SetupHomingSection | null>(null);
+	let calibrationStepRef = $state<CalibrationStep | null>(null);
 	let storedServoSource = $state<PersistedServoSource | null>(null);
 	let servoSourceLoadedMachineId = $state('');
 
@@ -440,8 +440,8 @@
 				);
 			case 'motion':
 				return Boolean(stepConfirmations.motion);
-			case 'homing':
-				return Boolean(stepConfirmations.homing);
+			case 'calibration':
+				return Boolean(stepConfirmations.calibration);
 			case 'servos':
 				return Boolean(wizard?.readiness.servo_configured) && Boolean(stepConfirmations.servos);
 			case 'hive':
@@ -491,8 +491,8 @@
 		switch (stepId) {
 			case 'motion':
 				return 'Directions look correct';
-			case 'homing':
-				return 'Endstops and homing look correct';
+			case 'calibration':
+				return 'Endstops and geometry look correct';
 			case 'servos':
 				return 'Servo setup looks correct';
 			case 'hive':
@@ -508,7 +508,7 @@
 		switch (stepId) {
 			case 'motion':
 				return hardwareState === 'initialized' || hardwareState === 'ready';
-			case 'homing':
+			case 'calibration':
 				return hardwareState === 'initialized' || hardwareState === 'ready';
 			case 'servos':
 				return Boolean(wizard?.readiness.servo_configured);
@@ -551,7 +551,7 @@
 				return 'Hardware must be initialized before continuing';
 			return null;
 		},
-		homing: () => {
+		calibration: () => {
 			if (hardwareState !== 'initialized' && hardwareState !== 'ready')
 				return 'Hardware must be initialized before continuing';
 			return null;
@@ -590,12 +590,12 @@
 		if (activeStepId === 'motion') {
 			stepConfirmations = { ...stepConfirmations, motion: true };
 		}
-		if (activeStepId === 'homing') {
-			if (homingSectionRef) {
-				const ok = await homingSectionRef.persistPendingSettings();
+		if (activeStepId === 'calibration') {
+			if (calibrationStepRef) {
+				const ok = await calibrationStepRef.persistPendingSettings();
 				if (!ok) return;
 			}
-			stepConfirmations = { ...stepConfirmations, homing: true };
+			stepConfirmations = { ...stepConfirmations, calibration: true };
 		}
 		if (activeStepId === 'servos') {
 			stepConfirmations = { ...stepConfirmations, servos: true };
@@ -794,7 +794,7 @@
 				body: JSON.stringify(payload)
 			});
 			if (!res.ok) throw new Error(await res.text());
-			clearManualConfirmations(['motion', 'homing', 'servos', 'advanced']);
+			clearManualConfirmations(['motion', 'calibration', 'servos', 'advanced']);
 			for (const role of changedRoles) {
 				clearCameraVerification(role);
 			}
@@ -932,7 +932,7 @@
 	});
 
 	$effect(() => {
-		if (activeStepId !== 'motion' && activeStepId !== 'homing') return;
+		if (activeStepId !== 'motion' && activeStepId !== 'calibration') return;
 		if (homingSystem) return;
 		if (hardwareState === 'standby') {
 			void initializeSteppers();
@@ -1076,8 +1076,8 @@
 							onPulse={pulseStepper}
 							onRecordObservedDirection={recordObservedDirection}
 						/>
-					{:else if activeStepId === 'homing'}
-						<SetupHomingSection bind:this={homingSectionRef} />
+					{:else if activeStepId === 'calibration'}
+						<CalibrationStep bind:this={calibrationStepRef} />
 					{:else if activeStepId === 'servos'}
 						<SetupServoOnboardingSection
 							servoSource={effectiveServoSource}
