@@ -898,6 +898,7 @@ def mkIRLConfig(machine_params: dict[str, object] | None = None) -> IRLConfig:
     # Check for TOML camera layout override
     import os
     from toml_config import loadTomlFile
+    from .toml_migrations import applyTomlMigrations
     camera_layout_type = "default"
     feeding_mode = "auto_channels"
     machine_setup_key = DEFAULT_MACHINE_SETUP
@@ -905,6 +906,7 @@ def mkIRLConfig(machine_params: dict[str, object] | None = None) -> IRLConfig:
     params_path = os.getenv("MACHINE_SPECIFIC_PARAMS_PATH")
     if params_path and os.path.exists(params_path):
         raw_toml = loadTomlFile(params_path)
+        applyTomlMigrations(raw_toml)
         cameras_section = raw_toml.get("cameras", {})
         if isinstance(cameras_section, dict):
             camera_layout_type = cameras_section.get("layout", "default")
