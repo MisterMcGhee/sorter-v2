@@ -788,13 +788,17 @@ export const api = {
 			my_review?: 'unreviewed' | 'reviewed' | 'accepted' | 'rejected' | string;
 			annotated?: 'teacher' | 'raw' | 'all' | string;
 			max_age_hours?: number | string;
-		} = {}
+		} = {},
+		excludeIds: string[] = []
 	) {
 		const sp = new URLSearchParams();
 		for (const [key, val] of Object.entries(params)) {
 			if (val !== undefined && val !== null && val !== '') {
 				sp.set(key, String(val));
 			}
+		}
+		for (const id of excludeIds) {
+			sp.append('exclude_id', id);
 		}
 		const qs = sp.toString();
 		return request<Sample | null>('GET', `/api/review/queue/next${qs ? '?' + qs : ''}`);

@@ -5,6 +5,11 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
+# How many recently-skipped IDs the queue will accept per request. Keeps the
+# URL bounded and the IN-list from blowing up; in practice a reviewer rarely
+# skips more than a handful before something new looks worth reviewing.
+MAX_EXCLUDE_IDS = 200
+
 from app.deps import get_current_user, get_db, verify_csrf
 from app.errors import APIError
 from app.models.sample import Sample
@@ -57,6 +62,7 @@ def get_next_review(
     annotated: str | None = Query(None, pattern="^(teacher|raw|all)$"),
     exposure: str | None = Query(None, pattern="^(under|normal|over)$"),
     max_age_hours: int | None = Query(None, ge=1, le=24 * 365),
+    exclude_id: list[UUID] | None = Query(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -122,6 +128,13 @@ def get_next_review(
     if max_age_hours is not None:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
         query = query.filter(Sample.uploaded_at >= cutoff)
+
+    # Skipped samples for this session — the reviewer pressed → on them and
+    # doesn't want to see them again until they reload. Without this the
+    # deterministic per-user order below would just return the same top
+    # candidate every time, looping the reviewer on a single sample.
+    if exclude_id:
+        query = query.filter(Sample.id.notin_(exclude_id[:MAX_EXCLUDE_IDS]))
 
     # Deterministic-but-per-user shuffle. Same reviewer always sees the
     # same order (so back/forward navigation is stable) but two reviewers

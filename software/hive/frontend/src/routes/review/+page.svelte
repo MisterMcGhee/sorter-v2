@@ -46,6 +46,11 @@
 	let imageNaturalWidth = $state(0);
 	let imageNaturalHeight = $state(0);
 	let reviewHistory = $state<string[]>([]);
+	// Session-local list of samples the reviewer pressed → on. Without
+	// this the backend's deterministic per-user order serves the same top
+	// candidate again and the queue gets stuck on a single sample. Reset
+	// when filters change so changing the slice gives a fresh queue.
+	let skippedIds = $state<string[]>([]);
 	let lastLoadedReviewKey = $state<string | null>(null);
 	let lastSampleId = $state<string | null>(null);
 	let reviewImageAsset = $state<ReviewImageAsset>('image');
@@ -221,6 +226,19 @@
 	});
 	const activeFilterChips = $derived(Object.entries(queueFilters));
 
+	// Re-slicing the queue invalidates the skip set — a sample I skipped
+	// inside "kind=regular" might be exactly what I want to see in
+	// "kind=condition". Compare by string so the effect only fires when
+	// the filter shape actually changes.
+	let lastQueueFiltersKey = $state<string | null>(null);
+	$effect(() => {
+		const key = JSON.stringify(queueFilters);
+		if (lastQueueFiltersKey !== null && key !== lastQueueFiltersKey) {
+			skippedIds = [];
+		}
+		lastQueueFiltersKey = key;
+	});
+
 	const currentKind = $derived(queueFilters.kind ?? '');
 
 	function setKind(next: '' | 'regular' | 'condition') {
@@ -239,7 +257,7 @@
 		error = null;
 		feedback = null;
 		try {
-			const next = await api.getNextReview(queueFilters);
+			const next = await api.getNextReview(queueFilters, skippedIds);
 			if (!next) {
 				sample = null;
 				reviews = [];
@@ -326,6 +344,16 @@
 		if (!classificationOk) return;
 		const annotationsOk = await savePendingAnnotationsIfNeeded();
 		if (!annotationsOk) return;
+		// Record the skip so the backend doesn't immediately hand it back
+		// (its order is md5-deterministic per viewer), and so ← lets the
+		// reviewer return to the skipped sample if they change their mind.
+		if (sample) {
+			const id = sample.id;
+			if (!skippedIds.includes(id)) skippedIds = [...skippedIds, id];
+			if (reviewHistory[reviewHistory.length - 1] !== id) {
+				reviewHistory = [...reviewHistory, id];
+			}
+		}
 		await loadNext();
 	}
 

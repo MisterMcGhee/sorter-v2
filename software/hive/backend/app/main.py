@@ -7,7 +7,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from app.config import settings
-from app.errors import APIError, api_error_handler, http_exception_handler
+from app.errors import APIError, api_error_handler, http_exception_handler, unhandled_exception_handler
 from app.routers import (
     admin,
     api_keys,
@@ -60,6 +60,7 @@ app.add_middleware(
 
 app.add_exception_handler(APIError, api_error_handler)
 app.add_exception_handler(HTTPException, http_exception_handler)
+app.add_exception_handler(Exception, unhandled_exception_handler)
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.include_router(auth.router)
