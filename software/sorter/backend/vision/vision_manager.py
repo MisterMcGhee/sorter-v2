@@ -2483,6 +2483,43 @@ class VisionManager:
                 return True
         return False
 
+    def feederTrackGidInExitZone(self, role: str, global_id: int) -> bool:
+        """Return True if ``global_id``'s track on ``role`` is in the exit zone.
+
+        Used by the C-channel tracking stress test to recognise a successful
+        exit: once a tracked piece reaches the channel's exit sections it has
+        made it all the way down, whether or not it later disappears. Unlike
+        ``feederRoleExitOccupied`` this is scoped to a single piece, and unlike
+        ``_channelDetectionsFromTracks`` it does *not* drop coasting or
+        low-hit-count tracks — a piece riding into the exit is frequently
+        coasting (detector momentarily lost it), and that still counts.
+        """
+        from subsystems.feeder.analysis import (
+            bboxCenterCrossedSectionMidpoint,
+            bboxSectionOverlapRatio,
+        )
+
+        channel = self._channelInfoForRole(role)
+        if channel is None or not channel.exit_sections:
+            return False
+        try:
+            tracks = self.getFeederTracks(role)
+        except Exception:
+            return False
+        for track in tracks:
+            gid = getattr(track, "global_id", None)
+            if not isinstance(gid, int) or gid != int(global_id):
+                continue
+            bbox = getattr(track, "bbox", None)
+            if not isinstance(bbox, tuple) or len(bbox) < 4:
+                continue
+            bbox4 = cast(Tuple[int, int, int, int], tuple(int(v) for v in bbox[:4]))
+            if bboxSectionOverlapRatio(bbox4, channel, channel.exit_sections) > 0.0:
+                return True
+            if bboxCenterCrossedSectionMidpoint(bbox4, channel, channel.exit_sections):
+                return True
+        return False
+
     def getFeederTrackerLiveGlobalIds(self, role: str) -> set[int]:
         """Return the set of ``global_id``s currently alive on ``role``'s tracker.
 
