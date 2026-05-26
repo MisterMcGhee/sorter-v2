@@ -31,7 +31,20 @@
 		try {
 			data = await api.getLeaderboard(p);
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to load leaderboard.';
+			// Show whatever we can about the failure so a "Failed to fetch"
+			// doesn't look like a magic black box. Browser fetch() throws a
+			// TypeError on network/CORS/connection failure; backend errors
+			// throw a structured ApiError object.
+			console.error('Leaderboard fetch failed:', e);
+			if (e instanceof TypeError) {
+				error = `Network/CORS error: ${e.message} (check DevTools Network tab — request likely never reached the backend)`;
+			} else if (e instanceof Error) {
+				error = e.message;
+			} else if (e && typeof e === 'object' && 'error' in e) {
+				error = String((e as { error: unknown }).error ?? 'Unknown server error');
+			} else {
+				error = 'Failed to load leaderboard.';
+			}
 		} finally {
 			loading = false;
 		}

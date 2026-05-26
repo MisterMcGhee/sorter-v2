@@ -66,24 +66,25 @@ def get_leaderboard(db: Session, *, period: str, limit: int = 100) -> list[Leade
     """
 
     cutoff = _cutoff(period)
+    q = db.query(
+        User.id.label("user_id"),
+        User.display_name,
+        User.avatar_url,
+        User.role,
+        func.count(SampleReview.id).label("total"),
+        func.sum(case((SampleReview.decision == "accept", 1), else_=0)).label("accepts"),
+        func.sum(case((SampleReview.decision == "reject", 1), else_=0)).label("rejects"),
+        func.max(SampleReview.created_at).label("last_at"),
+    ).join(SampleReview, SampleReview.reviewer_id == User.id)
+    # WHERE-clause must be applied before group/order/limit — SQLAlchemy
+    # raises InvalidRequestError if you call .filter() after .limit().
+    if cutoff is not None:
+        q = q.filter(SampleReview.created_at >= cutoff)
     q = (
-        db.query(
-            User.id.label("user_id"),
-            User.display_name,
-            User.avatar_url,
-            User.role,
-            func.count(SampleReview.id).label("total"),
-            func.sum(case((SampleReview.decision == "accept", 1), else_=0)).label("accepts"),
-            func.sum(case((SampleReview.decision == "reject", 1), else_=0)).label("rejects"),
-            func.max(SampleReview.created_at).label("last_at"),
-        )
-        .join(SampleReview, SampleReview.reviewer_id == User.id)
-        .group_by(User.id, User.display_name, User.avatar_url, User.role)
+        q.group_by(User.id, User.display_name, User.avatar_url, User.role)
         .order_by(func.count(SampleReview.id).desc(), User.display_name.asc())
         .limit(limit)
     )
-    if cutoff is not None:
-        q = q.filter(SampleReview.created_at >= cutoff)
 
     rows = q.all()
     return [
