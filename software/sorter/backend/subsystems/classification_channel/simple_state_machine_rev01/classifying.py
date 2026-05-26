@@ -220,11 +220,6 @@ class Classifying(Rev01BaseState):
         if frames:
             best_idx = max(range(len(frames)), key=lambda i: self.sharpness(frames[i]))
             obj.thumbnail = self.encodeFrame(frames[best_idx])
-            others = [i for i in range(len(frames)) if i != best_idx]
-            if others:
-                obj.top_image = self.encodeFrame(frames[others[0]])
-            if len(others) >= 2:
-                obj.bottom_image = self.encodeFrame(frames[others[-1]])
 
         self.emitKnownObject()
 
