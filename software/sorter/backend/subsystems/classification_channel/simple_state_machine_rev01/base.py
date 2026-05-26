@@ -52,6 +52,8 @@ class Rev01BaseState(BaseState):
         if stepper is None or not hasattr(stepper, "move_at_speed"):
             return
         try:
+            if bool(getattr(stepper, "stopped", False)):
+                return
             stepper.move_at_speed(0)
         except Exception as exc:
             self.logger.warning(f"{LOG_TAG} stepper stop failed: {exc}")
