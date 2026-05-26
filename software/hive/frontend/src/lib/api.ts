@@ -1166,8 +1166,64 @@ export const api = {
 				override_prompt: override_prompt ?? null
 			}
 		);
+	},
+
+	// Leaderboard
+	getLeaderboard(period: '24h' | '7d' | '30d' | 'all' = '7d', limit = 100) {
+		return request<LeaderboardResponse>(
+			'GET',
+			`/api/leaderboard?period=${period}&limit=${limit}`
+		);
+	},
+	getReviewerProfile(userId: string) {
+		return request<ReviewerProfile>('GET', `/api/leaderboard/${userId}`);
 	}
 };
+
+export interface LeaderboardEntry {
+	user_id: string;
+	display_name: string | null;
+	avatar_url: string | null;
+	role: string;
+	total_reviews: number;
+	accepts: number;
+	rejects: number;
+	last_review_at: string | null;
+}
+
+export interface LeaderboardResponse {
+	period: '24h' | '7d' | '30d' | 'all' | string;
+	entries: LeaderboardEntry[];
+}
+
+export interface AchievementEntry {
+	slug: string;
+	name: string;
+	description: string;
+	icon: string;
+	tier: 'bronze' | 'silver' | 'gold' | 'special' | string;
+	earned: boolean;
+	progress: string;
+}
+
+export interface ReviewerProfile {
+	user_id: string;
+	display_name: string | null;
+	avatar_url: string | null;
+	role: string;
+	total_reviews: number;
+	accepts: number;
+	rejects: number;
+	agreement_rate: number | null;
+	machines_covered: number;
+	current_streak_days: number;
+	longest_streak_days: number;
+	speed_record_24h: number;
+	first_review_at: string | null;
+	last_review_at: string | null;
+	daily_counts: number[];
+	achievements: AchievementEntry[];
+}
 
 export interface DetectionModelVariant {
 	id: string;

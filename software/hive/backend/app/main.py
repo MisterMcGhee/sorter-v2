@@ -12,6 +12,7 @@ from app.routers import (
     admin,
     api_keys,
     auth,
+    leaderboard,
     machine_models,
     machines,
     models as models_router,
@@ -74,6 +75,7 @@ app.include_router(models_router.router)
 app.include_router(machine_models.router)
 app.include_router(api_keys.router)
 app.include_router(teacher.router)
+app.include_router(leaderboard.router)
 
 
 @app.get("/api/health")
