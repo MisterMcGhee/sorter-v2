@@ -12,14 +12,17 @@ restarting it (RestartPreventExitStatus=0 in the unit).
 
 from __future__ import annotations
 
+import html as _html
 import logging
 import os
 import random
 import re
 import socket
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 
@@ -50,6 +53,7 @@ except ImportError:
 
 STAMP_DIR = Path("/var/lib/sorteros")
 CONFIG_PATH = Path("/etc/sorteros-config.toml")
+STATUS_PORT = 80
 # Split so the patcher (which scans the raw .img) doesn't find these
 # occurrences instead of the real placeholder in /etc/sorteros-config.toml.
 CFG_START_MARKER = "__SORTEROS_CFG" + "_START__"
@@ -68,6 +72,171 @@ class Stage:
     name: str
     needs_internet: bool
     run: Callable[[], None]
+
+
+# ─── status server ─────────────────────────────────────────────────────────
+#
+# A tiny HTTP server on port 80 that renders live firstboot progress so users
+# pointing a browser at the device see "what's happening" instead of an
+# ERR_CONNECTION_REFUSED. Hands port 80 over to sorter-ui-dev.service once
+# all stages complete — same URL transitions from setup status to the UI.
+
+_state_lock = threading.Lock()
+_stage_state: dict[str, dict] = {}
+_runtime: dict = {"net": False, "started_at": time.time()}
+
+STATUS_ICONS = {
+    "done":    ("✓", "done"),
+    "active":  ("●", "running"),
+    "waiting": ("…", "waiting"),
+    "pending": ("○", "pending"),
+}
+
+
+def _set_state(name: str, status: str, info: str = "") -> None:
+    with _state_lock:
+        prev = _stage_state.get(name, {})
+        _stage_state[name] = {
+            "status": status,
+            "info": info,
+            "started_at": time.time() if status == "active" and prev.get("status") != "active" else prev.get("started_at"),
+        }
+
+
+def _read_meta() -> tuple[str, str, str]:
+    hostname = socket.gethostname() or "sorty"
+    version = "dev"
+    branch = "?"
+    try:
+        version = Path("/etc/sorteros/version").read_text().strip()
+    except OSError:
+        pass
+    try:
+        branch = Path("/etc/sorteros/branch").read_text().strip()
+    except OSError:
+        pass
+    return hostname, version, branch
+
+
+STATUS_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>SorterOS · {hostname}</title>
+<meta http-equiv="refresh" content="5">
+<style>
+*{{box-sizing:border-box}}
+body{{font-family:ui-monospace,'SF Mono',Menlo,monospace;background:#0a0a0a;color:#e5e5e5;margin:0;padding:2rem;line-height:1.45}}
+.head{{display:flex;justify-content:space-between;align-items:baseline;max-width:760px;margin:0 auto 1.5rem;flex-wrap:wrap;gap:.5rem}}
+h1{{font-size:1.25rem;font-weight:600;margin:0;letter-spacing:.02em}}
+.meta{{color:#666;font-size:.85rem}}
+.banner{{padding:.9rem 1.1rem;max-width:720px;margin:0 auto 1.5rem;font-size:.95rem}}
+.banner.done{{background:#0d1e10;color:#4ade80}}
+.banner.busy{{background:#1c1a0d;color:#fbbf24}}
+.banner a{{color:#60a5fa;font-weight:600;text-decoration:none}}
+.banner a:hover{{text-decoration:underline}}
+table{{border-collapse:collapse;width:100%;max-width:720px;margin:0 auto;font-size:.9rem}}
+td{{padding:.4rem .8rem;border-bottom:1px solid #1c1c1c;vertical-align:top}}
+.icon{{width:1.3rem;text-align:center;font-family:ui-sans-serif}}
+.done .icon{{color:#4ade80}}
+.running .icon{{color:#fbbf24}}
+.waiting .icon{{color:#888}}
+.pending .icon{{color:#444}}
+.name{{font-weight:500;width:14rem}}
+.info{{color:#777;font-size:.82rem}}
+.running .info{{color:#fbbf24}}
+.waiting .info{{color:#888}}
+.pending .info{{color:#555}}
+.foot{{color:#555;font-size:.8rem;margin:2rem auto 0;max-width:720px}}
+code{{background:#1a1a1a;padding:.1rem .35rem}}
+</style></head><body>
+<div class="head">
+<h1>SorterOS · {hostname}</h1>
+<div class="meta">v{version} · {branch} · {done}/{total} · {net_label}</div>
+</div>
+{banner}
+<table>{rows}</table>
+<div class="foot">Live log: <code>journalctl -fu sorteros-firstboot</code></div>
+</body></html>
+"""
+
+
+def _render_status_page() -> bytes:
+    hostname, version, branch = _read_meta()
+    with _state_lock:
+        snapshot = {k: dict(v) for k, v in _stage_state.items()}
+        net = _runtime.get("net", False)
+
+    done = sum(1 for s in snapshot.values() if s.get("status") == "done")
+    total = len(STAGES)
+    complete = done == total
+
+    rows = []
+    for stage in STAGES:
+        st = snapshot.get(stage.name, {"status": "pending", "info": ""})
+        status = st.get("status", "pending")
+        info = st.get("info") or ""
+        if status == "active" and st.get("started_at"):
+            elapsed = int(time.time() - st["started_at"])
+            mins, secs = divmod(elapsed, 60)
+            elapsed_str = f"{mins}m {secs:02d}s" if mins else f"{secs}s"
+            info = f"{info} · {elapsed_str}" if info else f"running · {elapsed_str}"
+        icon, cls = STATUS_ICONS.get(status, ("?", "pending"))
+        rows.append(
+            f'<tr class="{cls}">'
+            f'<td class="icon">{icon}</td>'
+            f'<td class="name">{_html.escape(stage.name)}</td>'
+            f'<td class="info">{_html.escape(info) if info else "—"}</td>'
+            f'</tr>'
+        )
+
+    if complete:
+        banner = (
+            '<div class="banner done">✓ Setup complete · '
+            f'<a href="http://{_html.escape(hostname)}.local/">Reload for Sorter UI →</a></div>'
+        )
+    else:
+        banner = (
+            '<div class="banner busy">⏳ Setting up… first install can take 10–30 min. '
+            'Page auto-refreshes every 5s.</div>'
+        )
+
+    return STATUS_HTML.format(
+        hostname=_html.escape(hostname),
+        version=_html.escape(version),
+        branch=_html.escape(branch),
+        done=done, total=total,
+        net_label="online" if net else "offline",
+        banner=banner,
+        rows="".join(rows),
+    ).encode("utf-8")
+
+
+class _StatusHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler convention)
+        if self.path != "/":
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = _render_status_page()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args, **_kw) -> None:  # noqa: N802
+        return  # silence default access log
+
+
+def _start_status_server(port: int) -> ThreadingHTTPServer | None:
+    try:
+        srv = ThreadingHTTPServer(("0.0.0.0", port), _StatusHandler)
+    except OSError as e:
+        log.warning("status server: cannot bind port %d (%s) — skipping", port, e)
+        return None
+    threading.Thread(target=srv.serve_forever, name="status-http", daemon=True).start()
+    log.info("status server on http://0.0.0.0:%d", port)
+    return srv
 
 
 def internet_up() -> bool:
@@ -302,7 +471,9 @@ def stage_write_env() -> None:
         'export MACHINE_SPECIFIC_PARAMS_PATH="../machine.toml"\n'
         f'export SORTING_PROFILE_PATH="{SOFTWARE_DIR}/sorter/backend/sorting_profile.json"\n'
         "export SORTER_API_HOST=0.0.0.0\n"
-        f'export SORTER_API_ALLOWED_ORIGINS="http://{hostname}:5173,http://localhost:5173"\n'
+        f'export SORTER_API_ALLOWED_ORIGINS='
+        f'"http://{hostname},http://{hostname}.local,http://localhost,'
+        f'http://{hostname}:5173,http://localhost:5173"\n'
     )
     sh(["chown", "orangepi:orangepi", str(env_path)])
 
@@ -313,7 +484,15 @@ def stage_write_machine_toml() -> None:
         return
     if not (SOFTWARE_DIR / "sorter").exists():
         raise RuntimeError("repo not cloned yet")
-    machine_toml.write_text("")
+    # Minimal [cameras] section — backend bails on startup without it.
+    # -1 means "no camera assigned"; user picks real indexes in Settings → Cameras.
+    machine_toml.write_text(
+        "# Auto-generated by sorteros firstboot. Edit via Settings → Cameras in the UI.\n"
+        "[cameras]\n"
+        "feeder = -1\n"
+        "classification_top = -1\n"
+        "classification_bottom = -1\n"
+    )
     sh(["chown", "orangepi:orangepi", str(machine_toml)])
 
 
@@ -338,7 +517,7 @@ def stage_uv_sync() -> None:
         raise RuntimeError("repo not cloned yet")
     if (backend / ".venv").exists():
         return
-    sh(["/usr/local/bin/uv", "sync", "--python", "3.13"], cwd=backend)
+    sh(["/usr/local/bin/uv", "sync", "--python", "3.12"], cwd=backend)
 
 
 def stage_pnpm_install() -> None:
@@ -374,25 +553,35 @@ def stage_install_services() -> None:
         "__PNPM_BIN__": pnpm_bin,
     }
 
-    for unit in ["sorter-backend.service", "sorter-ui.service", "sorter-backend-dev.service", "sorter-ui-dev.service"]:
+    required = ["sorter-backend.service", "sorter-ui.service"]
+    optional = ["sorter-backend-dev.service", "sorter-ui-dev.service"]
+    installed: list[str] = []
+    for unit in required + optional:
         src = systemd_src / unit
         if not src.exists():
-            raise RuntimeError(f"service template {unit} not found in repo")
+            if unit in required:
+                raise RuntimeError(f"service template {unit} not found in repo")
+            log.info("optional service template %s not in repo — skipping", unit)
+            continue
         content = src.read_text()
         for k, v in replacements.items():
             content = content.replace(k, v)
         dest = Path("/etc/systemd/system") / unit
         dest.write_text(content)
         dest.chmod(0o644)
+        installed.append(unit)
 
     sh(["systemctl", "daemon-reload"])
     sh(["systemctl", "enable", "wifi-repair.service", "wifi-connect.service"])
-    # Dev services enabled by default. At this project stage, hot reload and rapid
-    # iteration during setup/debugging are more valuable than production optimization.
-    # Switch to sorter-backend.service / sorter-ui.service later when the system
-    # stabilizes and we don't need frequent remote adjustments.
-    sh(["systemctl", "enable", "--now", "sorter-backend-dev.service", "sorter-ui-dev.service"])
-    log.info("sorter services installed and started (dev mode)")
+    # Prefer dev services for HMR during early setup; fall back to prod
+    # when dev templates aren't in this branch yet. Enable only — main()
+    # starts the services AFTER our status server releases port 80,
+    # otherwise vite-dev fights us for the same port.
+    to_start = [u for u in ("sorter-backend-dev.service", "sorter-ui-dev.service") if u in installed] or \
+               [u for u in ("sorter-backend.service", "sorter-ui.service") if u in installed]
+    sh(["systemctl", "enable", *to_start])
+    Path("/var/lib/sorteros/active-services").write_text("\n".join(to_start) + "\n")
+    log.info("sorter services installed: %s (will start after firstboot exits)", ", ".join(to_start))
 
 
 def _ensure_clock_synced() -> None:
@@ -400,13 +589,17 @@ def _ensure_clock_synced() -> None:
 
     Without this, the Pi boots with a stale RTC/no-RTC clock (often years
     behind), curl rejects TLS certs as 'not yet valid', and installs fail.
-    chronyc makestep forces an immediate step adjustment; falls back to
-    timedatectl if chrony isn't available.
+    Tries chronyc first (if installed); falls back to systemd-timesyncd
+    via timedatectl when chrony is missing (OPi Noble base ships timesyncd).
     """
-    r = subprocess.run(["chronyc", "makestep"], capture_output=True)
-    if r.returncode != 0:
-        subprocess.run(["timedatectl", "set-ntp", "true"])
-        time.sleep(5)
+    try:
+        r = subprocess.run(["chronyc", "makestep"], capture_output=True)
+        if r.returncode == 0:
+            return
+    except FileNotFoundError:
+        pass
+    subprocess.run(["timedatectl", "set-ntp", "true"], check=False)
+    time.sleep(5)
 
 
 def stage_install_tailscale() -> None:
@@ -467,24 +660,46 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="[%(name)s %(asctime)s] %(message)s")
     STAMP_DIR.mkdir(parents=True, exist_ok=True)
 
+    for s in STAGES:
+        _set_state(s.name, "done" if stamp_path(s.name).exists() else "pending")
+    server = _start_status_server(STATUS_PORT)
+
     while True:
         remaining = [s for s in STAGES if not stamp_path(s.name).exists()]
         if not remaining:
-            log.info("all stages complete; exiting")
+            log.info("all stages complete")
+            # let the final "complete" page render before we hand port 80 over
+            time.sleep(5)
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+                log.info("released port %d", STATUS_PORT)
+            try:
+                services = Path("/var/lib/sorteros/active-services").read_text().split()
+            except OSError:
+                services = ["sorter-backend.service", "sorter-ui.service"]
+            subprocess.run(["systemctl", "start", *services])
             return 0
 
         net = internet_up()
+        with _state_lock:
+            _runtime["net"] = net
         if net:
             _ensure_clock_synced()
+
         for s in remaining:
             if s.needs_internet and not net:
+                _set_state(s.name, "waiting", "waiting for internet")
                 continue
+            _set_state(s.name, "active")
             log.info("running stage: %s", s.name)
             try:
                 s.run()
                 stamp_path(s.name).touch()
+                _set_state(s.name, "done")
             except Exception as e:
                 log.warning("stage %s failed: %s — will retry", s.name, e)
+                _set_state(s.name, "waiting", str(e))
 
         time.sleep(POLL_INTERVAL)
 
