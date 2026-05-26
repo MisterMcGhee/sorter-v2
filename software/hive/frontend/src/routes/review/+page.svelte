@@ -462,7 +462,7 @@
 	</div>
 	<!-- Kind switcher — flips the queue between regular detection samples and
 	     piece-condition crops without leaving the review page. -->
-	<div class="flex border border-border bg-white text-xs">
+	<div class="flex border border-border bg-surface text-xs">
 		{#each [
 			{ value: '', label: 'All' },
 			{ value: 'regular', label: 'Regular' },

@@ -141,7 +141,7 @@
 	{:else}
 		<div class="space-y-6">
 			{#each ZONES as zone (zone.key)}
-				<div class="border border-border bg-white">
+				<div class="border border-border bg-surface">
 					<div class="border-b border-border px-4 py-2">
 						<h3 class="text-sm font-semibold text-text">{zone.label}</h3>
 						<div class="text-[11px] text-text-muted font-mono">{zone.key}</div>
@@ -172,7 +172,7 @@
 								<textarea
 									bind:value={drafts[k]}
 									rows={kind.key === 'perceptron' ? 4 : 14}
-									class="block w-full border border-border bg-white px-3 py-2 font-mono text-[11px] leading-relaxed text-text focus:border-primary focus:outline-none"
+									class="block w-full border border-border bg-surface px-3 py-2 font-mono text-[11px] leading-relaxed text-text focus:border-primary focus:outline-none"
 								></textarea>
 
 								{#if errors[k]}
@@ -194,7 +194,7 @@
 										type="button"
 										onclick={() => loadDefaultIntoDraft(zone.key, kind.key)}
 										disabled={saving[k]}
-										class="border border-border bg-white px-3 py-1 text-xs text-text hover:bg-bg disabled:opacity-40"
+										class="border border-border bg-surface px-3 py-1 text-xs text-text hover:bg-bg disabled:opacity-40"
 										title="Replace the textarea with the built-in default; doesn't save until you click Save."
 									>
 										Load default into editor

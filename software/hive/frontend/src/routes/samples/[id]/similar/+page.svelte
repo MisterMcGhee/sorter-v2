@@ -64,7 +64,7 @@
 		</div>
 		<a
 			href={`/samples/${sampleId}`}
-			class="inline-flex items-center gap-1 border border-border bg-white px-3 py-1.5 text-xs font-medium text-text hover:bg-bg"
+			class="inline-flex items-center gap-1 border border-border bg-surface px-3 py-1.5 text-xs font-medium text-text hover:bg-bg"
 		>
 			← Back to sample
 		</a>

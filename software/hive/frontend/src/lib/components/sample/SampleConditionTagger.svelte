@@ -130,7 +130,7 @@
 	});
 </script>
 
-<div class="border border-border bg-white">
+<div class="border border-border bg-surface">
 	<div class="flex items-center justify-between border-b border-border px-4 py-2.5">
 		<h2 class="text-xs font-semibold uppercase tracking-wider text-text-muted">Tag condition</h2>
 		{#if providerLabel}
@@ -151,7 +151,7 @@
 						type="button"
 						class="border px-2.5 py-1 text-[11px] font-medium {composition === opt.value
 							? 'border-primary bg-primary text-white'
-							: 'border-border bg-white text-text hover:border-primary'}"
+							: 'border-border bg-surface text-text hover:border-primary'}"
 						onclick={() => (composition = opt.value)}
 					>
 						{opt.label}
@@ -170,7 +170,7 @@
 						type="button"
 						class="border px-2.5 py-1 text-[11px] font-medium {condition === opt.value
 							? 'border-primary bg-primary text-white'
-							: 'border-border bg-white text-text hover:border-primary'}"
+							: 'border-border bg-surface text-text hover:border-primary'}"
 						onclick={() => (condition = opt.value)}
 					>
 						{opt.label}
@@ -189,7 +189,7 @@
 						type="button"
 						class="border px-2.5 py-1 text-[11px] font-medium {flags[chip.value]
 							? 'border-text bg-text text-white'
-							: 'border-border bg-white text-text-muted hover:border-text'}"
+							: 'border-border bg-surface text-text-muted hover:border-text'}"
 						onclick={() => toggleFlag(chip.value)}
 					>
 						{chip.label}
@@ -207,7 +207,7 @@
 				type="text"
 				bind:value={evidence}
 				placeholder="Visible scratch on top stud, slight discoloration..."
-				class="w-full border border-border bg-white px-2 py-1.5 text-xs text-text focus:border-primary focus:outline-none"
+				class="w-full border border-border bg-surface px-2 py-1.5 text-xs text-text focus:border-primary focus:outline-none"
 			/>
 		</div>
 

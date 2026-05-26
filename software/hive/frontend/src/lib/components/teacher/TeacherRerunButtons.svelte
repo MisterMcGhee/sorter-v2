@@ -95,7 +95,7 @@
 	}
 </script>
 
-<div class="border border-border bg-white">
+<div class="border border-border bg-surface">
 	<div class="flex items-center justify-between border-b border-border px-3 py-2">
 		<h3 class="text-xs font-semibold uppercase tracking-wider text-text-muted">Re-run teacher</h3>
 		<a
@@ -122,7 +122,7 @@
 				disabled={running}
 				onclick={() => run(m.model_id)}
 				title={m.notes || m.model_id}
-				class="flex items-center gap-2 border px-2 py-1.5 text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60 {isPreferred ? 'border-primary bg-primary-light text-primary' : 'border-border bg-white text-text hover:bg-bg'}"
+				class="flex items-center gap-2 border px-2 py-1.5 text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60 {isPreferred ? 'border-primary bg-primary-light text-primary' : 'border-border bg-surface text-text hover:bg-bg'}"
 			>
 				{#if running}
 					<span class="inline-block h-3 w-3 shrink-0 animate-spin border-2 border-current border-t-transparent rounded-full"></span>

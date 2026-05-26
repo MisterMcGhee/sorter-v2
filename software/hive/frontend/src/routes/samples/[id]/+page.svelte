@@ -503,7 +503,7 @@
 					onclick={() => navigateToNeighbor(prevSampleId)}
 					disabled={!prevSampleId}
 					aria-label="Previous sample (←)"
-					class="border border-border bg-white p-1.5 text-text-muted transition-colors hover:bg-bg hover:text-text disabled:cursor-not-allowed disabled:opacity-30"
+					class="border border-border bg-surface p-1.5 text-text-muted transition-colors hover:bg-bg hover:text-text disabled:cursor-not-allowed disabled:opacity-30"
 				>
 					<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" /></svg>
 				</button>
@@ -515,7 +515,7 @@
 					onclick={() => navigateToNeighbor(nextSampleId)}
 					disabled={!nextSampleId}
 					aria-label="Next sample (→)"
-					class="border border-border bg-white p-1.5 text-text-muted transition-colors hover:bg-bg hover:text-text disabled:cursor-not-allowed disabled:opacity-30"
+					class="border border-border bg-surface p-1.5 text-text-muted transition-colors hover:bg-bg hover:text-text disabled:cursor-not-allowed disabled:opacity-30"
 				>
 					<svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" /></svg>
 				</button>
@@ -527,7 +527,7 @@
 			<div class="ml-1 flex items-center gap-1.5">
 				<a
 					href={`/samples/${sample.id}/similar`}
-					class="inline-flex items-center gap-1 border border-border bg-white px-3 py-1 text-xs font-medium text-text hover:bg-bg"
+					class="inline-flex items-center gap-1 border border-border bg-surface px-3 py-1 text-xs font-medium text-text hover:bg-bg"
 					title="Find samples that look visually similar to this one (uses perceptual hashing — good for spotting bursts of near-identical frames or a batch shot under the same bad lighting)."
 				>
 					Find similar
@@ -535,7 +535,7 @@
 				{#if auth.isAdmin}
 					<a
 						href={`/samples/${sample.id}/compare`}
-						class="inline-flex items-center gap-1 border border-border bg-white px-3 py-1 text-xs font-medium text-text hover:bg-bg"
+						class="inline-flex items-center gap-1 border border-border bg-surface px-3 py-1 text-xs font-medium text-text hover:bg-bg"
 						title="Run every supported teacher model on this sample and compare bounding boxes side-by-side."
 					>
 						Compare models

@@ -522,7 +522,7 @@
 
 		{#if auth.user.role === 'admin'}
 			<!-- Perceptron native API key (teacher-only, admin scope) -->
-			<div class="border border-border bg-white p-6">
+			<div class="border border-border bg-surface p-6">
 				<h2 class="mb-4 font-semibold text-text">Perceptron Teacher</h2>
 				<p class="mb-4 text-sm text-text-muted">
 					Used for the Perceptron Mk1 teacher path, which calls Perceptron's native API
@@ -583,7 +583,7 @@
 			</div>
 
 			<!-- Default Teacher Model — separate from the AI Assistant chat model -->
-			<div class="border border-border bg-white p-6">
+			<div class="border border-border bg-surface p-6">
 				<h2 class="mb-4 font-semibold text-text">Default Teacher Model</h2>
 				<p class="mb-4 text-sm text-text-muted">
 					Used for re-running the Gemini/Perceptron/etc. teacher across samples. Separate
