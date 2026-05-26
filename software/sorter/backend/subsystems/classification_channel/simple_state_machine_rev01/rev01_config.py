@@ -14,6 +14,7 @@ class Rev01Config:
     classify_timeout_s: float = 30.0
     presence_streak_to_start: int = 2
     empty_streak_to_abort: int = 3
+    stuck_in_exit_zone_timeout_s: float = 30.0
 
 
 _DEFAULTS = Rev01Config()
@@ -30,6 +31,7 @@ FIELD_META: list[dict] = [
     {"key": "classify_timeout_s", "label": "Classify timeout (s)", "type": "float", "default": _DEFAULTS.classify_timeout_s},
     {"key": "presence_streak_to_start", "label": "Presence streak to start rotation", "type": "int", "default": _DEFAULTS.presence_streak_to_start},
     {"key": "empty_streak_to_abort", "label": "Empty streak to abort rotation", "type": "int", "default": _DEFAULTS.empty_streak_to_abort},
+    {"key": "stuck_in_exit_zone_timeout_s", "label": "Stuck-in-exit-zone warn timeout (s)", "type": "float", "default": _DEFAULTS.stuck_in_exit_zone_timeout_s},
 ]
 
 

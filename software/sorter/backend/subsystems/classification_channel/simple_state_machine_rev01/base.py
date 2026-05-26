@@ -132,3 +132,20 @@ class Rev01BaseState(BaseState):
             for b in bboxes
         )
         return hit, angles
+
+    def bboxesOutsideExitZone(
+        self, bboxes: list[tuple[int, int, int, int]]
+    ) -> list[tuple[int, int, int, int]]:
+        center = self.cv.channelCenter()
+        if center is None:
+            return list(bboxes)
+        return [
+            b
+            for b in bboxes
+            if not self.cv.bboxInExitZone(
+                b,
+                center,
+                self.cc_config.drop_angle_deg,
+                self.cc_config.drop_tolerance_deg,
+            )
+        ]
