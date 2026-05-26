@@ -189,7 +189,7 @@ class GoToAngleFeeding(BaseState):
         if not detection_available:
             return FeederState.FEEDING
 
-        analysis = analyzeFeederChannels(self.gc, detections)
+        analysis = analyzeFeederChannels(detections)
 
         # Downstream-first so a channel never advances onto an occupied next
         # drop zone: C3 -> C4 (classification), C2 -> C3, C1 -> C2.
