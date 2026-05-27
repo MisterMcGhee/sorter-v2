@@ -16,7 +16,16 @@ class Idle(Rev01BaseState):
         self.logger.info(f"{LOG_TAG} IDLE state constructed")
 
     def step(self) -> Optional[ClassificationChannelState]:
+        bboxes_started = time.perf_counter()
         bboxes = self.cv.bboxesOnChannel()
+        self.gc.runtime_stats.observePerfMs(
+            "classification.rev01.idle.bboxes_on_channel_ms",
+            (time.perf_counter() - bboxes_started) * 1000.0,
+        )
+        self.gc.profiler.observeValue(
+            "classification.rev01.idle.bbox_count",
+            float(len(bboxes)),
+        )
         if not bboxes:
             self._presence_streak = 0
             self._stuck_since = None
@@ -24,7 +33,16 @@ class Idle(Rev01BaseState):
             self.setClassificationReady(True, "channel clear")
             return None
 
+        actionable_started = time.perf_counter()
         actionable = self.bboxesOutsideExitZone(bboxes)
+        self.gc.runtime_stats.observePerfMs(
+            "classification.rev01.idle.bboxes_outside_exit_ms",
+            (time.perf_counter() - actionable_started) * 1000.0,
+        )
+        self.gc.profiler.observeValue(
+            "classification.rev01.idle.actionable_bbox_count",
+            float(len(actionable)),
+        )
         if not actionable:
             now = time.monotonic()
             if self._stuck_since is None:
@@ -44,6 +62,10 @@ class Idle(Rev01BaseState):
         self._stuck_since = None
         self._stuck_warned = False
         self._presence_streak += 1
+        self.gc.profiler.observeValue(
+            "classification.rev01.idle.presence_streak",
+            float(self._presence_streak),
+        )
         self.setClassificationReady(False, f"{len(actionable)} bbox(es) on channel")
         if self._presence_streak >= self.ctx.config.presence_streak_to_start:
             self._presence_streak = 0

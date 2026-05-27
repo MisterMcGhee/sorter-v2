@@ -47,6 +47,7 @@ class GoToAngleFeeding(BaseState):
         self._config: GoToAngleConfig = GoToAngleConfig()
         self._config_loaded_at: float = 0.0
         self._classification_pending_until: float = 0.0
+        self._ch3_was_at_exit: bool = False
         machine_setup = getattr(irl_config, "machine_setup", None)
         self._classification_setup = bool(
             machine_setup is not None
@@ -75,12 +76,14 @@ class GoToAngleFeeding(BaseState):
         output_deg: float,
         settle_ms: int,
         cfg: GoToAngleConfig,
+        enforce_min: bool = True,
     ) -> bool:
         if self._busy(stepper):
             return False
-        output_deg = max(
-            cfg.min_move_output_deg, min(cfg.max_move_output_deg, abs(output_deg))
-        )
+        output_deg = abs(output_deg)
+        if enforce_min:
+            output_deg = max(cfg.min_move_output_deg, output_deg)
+        output_deg = min(cfg.max_move_output_deg, output_deg)
         sign = 1 if cfg.forward_direction_sign >= 0 else -1
         motor_deg = sign * output_deg * CHANNEL_OUTPUT_GEAR_RATIO
         try:
@@ -111,45 +114,57 @@ class GoToAngleFeeding(BaseState):
             out.append((rel, det))
         return out
 
+    def _piece_at_exit(
+        self, channel_id: int, detections: list[ChannelDetection]
+    ) -> bool:
+        pieces = self._pieces_for_channel(detections, channel_id)
+        for rel, det in pieces:
+            if geometry.sectionForRelativeAngle(rel) in det.channel.exit_sections:
+                return True
+        return False
+
     def _service_channel(
         self,
         label: str,
         channel_id: int,
         stepper: "StepperMotor",
         detections: list[ChannelDetection],
-        gate_open: bool,
+        downstream_ready: bool,
         cfg: GoToAngleConfig,
     ) -> bool:
-        if not gate_open or self._busy(stepper):
+        if self._busy(stepper):
             return False
         pieces = self._pieces_for_channel(detections, channel_id)
         if not pieces:
             return False
         channel = pieces[0][1].channel
         exit_sections = channel.exit_sections
-        exit_edge = geometry.sectionSetForwardEdge(exit_sections)
 
-        # Is any piece sitting in the exit zone? If so, precisely dispense the
-        # leading one (closest to the exit edge) just past the edge.
-        at_exit = [
-            (rel, det)
-            for (rel, det) in pieces
-            if geometry.sectionForRelativeAngle(rel) in exit_sections
-        ]
-        if at_exit and exit_edge is not None:
-            leading_rel = min(
-                (rel for rel, _ in at_exit),
-                key=lambda r: geometry.forwardDistance(r, exit_edge),
+        at_exit = any(
+            geometry.sectionForRelativeAngle(rel) in exit_sections
+            for (rel, _) in pieces
+        )
+        if at_exit:
+            # The ONLY condition under which a channel holds still: it has a
+            # piece at its exit and the downstream channel can't accept it yet.
+            # Precise mode otherwise — nudge one small fixed angle at a time,
+            # pausing between pulses so the downstream channel can register the
+            # piece before we push again. Each tick re-reads vision, so we stop
+            # as soon as the piece clears the exit instead of dumping the train.
+            if not downstream_ready:
+                return False
+            return self._move(
+                f"{label}_precise",
+                stepper,
+                cfg.precise_pulse_output_deg,
+                cfg.precise_pulse_pause_ms,
+                cfg,
+                enforce_min=False,
             )
-            move_deg = geometry.forwardDistance(leading_rel, exit_edge) + cfg.exit_overshoot_deg
-            moved = self._move(
-                f"{label}_exit", stepper, move_deg, cfg.precise_settle_after_move_ms, cfg
-            )
-            if moved and channel_id == 3:
-                self._on_ch3_dispense()
-            return moved
 
-        # Otherwise advance the train toward the exit by the normal step.
+        # No piece at the exit: advance freely to carry pieces forward and clear
+        # this channel's own drop zone. Downstream readiness is irrelevant here —
+        # channels run in parallel and only the exit push waits on downstream.
         return self._move(
             f"{label}_advance", stepper, cfg.advance_output_deg, cfg.settle_after_move_ms, cfg
         )
@@ -177,45 +192,108 @@ class GoToAngleFeeding(BaseState):
 
     def step(self) -> Optional[FeederState]:
         cfg = self._cfg()
+        runtime_stats = self.gc.runtime_stats
 
+        can_run_started = time.perf_counter()
         can_run = self.gc.rotary_channel_steppers_can_operate_in_parallel or (
             not self.shared.chute_move_in_progress
+        )
+        runtime_stats.observePerfMs(
+            "feeder.go_to_angle.can_run_ms",
+            (time.perf_counter() - can_run_started) * 1000.0,
         )
         if not can_run:
             return FeederState.FEEDING
 
+        detections_started = time.perf_counter()
         detections = self.vision.getFeederHeatmapDetections()
+        runtime_stats.observePerfMs(
+            "feeder.go_to_angle.get_feeder_detections_ms",
+            (time.perf_counter() - detections_started) * 1000.0,
+        )
+        detection_available_started = time.perf_counter()
         detection_available, _reason = self.vision.getFeederDetectionAvailability()
+        runtime_stats.observePerfMs(
+            "feeder.go_to_angle.detection_availability_ms",
+            (time.perf_counter() - detection_available_started) * 1000.0,
+        )
         if not detection_available:
             return FeederState.FEEDING
 
+        analyze_started = time.perf_counter()
         analysis = analyzeFeederChannels(detections)
+        runtime_stats.observePerfMs(
+            "feeder.go_to_angle.analyze_state_ms",
+            (time.perf_counter() - analyze_started) * 1000.0,
+        )
 
-        # Downstream-first so a channel never advances onto an occupied next
-        # drop zone: C3 -> C4 (classification), C2 -> C3, C1 -> C2.
+        # Channels run in parallel and independently. Each one advances freely
+        # to clear its own drop zone; only its exit push waits on the downstream
+        # channel being ready to accept (C3 -> C4 classification, C2 -> C3,
+        # C1 -> C2).
         if cfg.enable_ch3:
+            classification_ready_started = time.perf_counter()
+            classification_ready = self._classification_ready(cfg)
+            runtime_stats.observePerfMs(
+                "feeder.go_to_angle.classification_ready_ms",
+                (time.perf_counter() - classification_ready_started) * 1000.0,
+            )
+            ch3_step_started = time.perf_counter()
             self._service_channel(
                 "ch3",
                 3,
                 self.irl.c_channel_3_rotor_stepper,
                 detections,
-                gate_open=self._classification_ready(cfg),
+                downstream_ready=classification_ready,
                 cfg=cfg,
             )
+            runtime_stats.observePerfMs(
+                "feeder.go_to_angle.ch3_step_ms",
+                (time.perf_counter() - ch3_step_started) * 1000.0,
+            )
+            # A piece counts as delivered the moment it clears C3's exit zone
+            # (the precise pulses stop on their own once vision no longer sees
+            # it there). Fire the downstream notification + admission window
+            # once on that falling edge, not on every micro-pulse.
+            ch3_exit_check_started = time.perf_counter()
+            ch3_at_exit_now = self._piece_at_exit(3, detections)
+            runtime_stats.observePerfMs(
+                "feeder.go_to_angle.ch3_exit_check_ms",
+                (time.perf_counter() - ch3_exit_check_started) * 1000.0,
+            )
+            if self._ch3_was_at_exit and not ch3_at_exit_now:
+                self._on_ch3_dispense()
+            self._ch3_was_at_exit = ch3_at_exit_now
         if cfg.enable_ch2:
+            ch2_step_started = time.perf_counter()
             self._service_channel(
                 "ch2",
                 2,
                 self.irl.c_channel_2_rotor_stepper,
                 detections,
-                gate_open=not analysis.ch3_dropzone_occupied,
+                downstream_ready=not analysis.ch3_dropzone_occupied,
                 cfg=cfg,
+            )
+            runtime_stats.observePerfMs(
+                "feeder.go_to_angle.ch2_step_ms",
+                (time.perf_counter() - ch2_step_started) * 1000.0,
             )
         if cfg.enable_ch1:
             stepper = self.irl.c_channel_1_rotor_stepper
-            if not analysis.ch2_dropzone_occupied and not self._busy(stepper):
+            ch1_gate_started = time.perf_counter()
+            ch1_can_move = not analysis.ch2_dropzone_occupied and not self._busy(stepper)
+            runtime_stats.observePerfMs(
+                "feeder.go_to_angle.ch1_gate_ms",
+                (time.perf_counter() - ch1_gate_started) * 1000.0,
+            )
+            if ch1_can_move:
+                ch1_step_started = time.perf_counter()
                 self._move(
                     "ch1", stepper, cfg.ch1_advance_output_deg, cfg.ch1_settle_after_move_ms, cfg
+                )
+                runtime_stats.observePerfMs(
+                    "feeder.go_to_angle.ch1_step_ms",
+                    (time.perf_counter() - ch1_step_started) * 1000.0,
                 )
 
         return FeederState.FEEDING

@@ -224,6 +224,7 @@ class VisionManager:
         self._classification_bottom_analysis: ClassificationAnalysisThread | None = None
         self._classification_dynamic_detection_cache: Dict[str, Tuple[float, ClassificationDetectionResult | None]] = {}
         self._feeder_dynamic_detection_cache: Dict[str, Tuple[float, ClassificationDetectionResult | None]] = {}
+        self._feeder_object_detection_cache: Dict[str, Tuple[float, ClassificationDetectionResult | None]] = {}
         self._carousel_dynamic_detection_cache: Tuple[float, ClassificationDetectionResult | None] | None = None
         self._classification_openrouter_model: str = DEFAULT_OPENROUTER_MODEL
         self._gemini_sam_detector: GeminiSamDetector | None = None
@@ -512,9 +513,11 @@ class VisionManager:
                             )
                         )
                         if RAW_DETECTION_OVERLAY_ENABLED or use_raw_detections:
-                            feed.add_overlay(DynamicDetectionOverlay(
-                                lambda r=role: self._getFeederDynamicDetection(r, force=False)
-                            ))
+                            feed.add_overlay(
+                                DynamicDetectionOverlay(
+                                    lambda r=role: self._getFeederObjectDetection(r, force=False)
+                                )
+                            )
                         else:
                             feed.add_overlay(TrackOverlay(_tracks_for))
                 else:
@@ -882,6 +885,7 @@ class VisionManager:
             self._feeder_detection_algorithm = normalized
             for channel_role in self._feederTrackerRoles():
                 self._feeder_detection_algorithm_by_role[channel_role] = normalized
+        self._feeder_object_detection_cache.clear()
         self._feeder_dynamic_detection_cache.clear()
         self._hive_ml_processors.clear()
         self._rknn_role_core_idx.clear(); self._rknn_per_role_processors.clear()
@@ -891,6 +895,7 @@ class VisionManager:
     def setFeederOpenRouterModel(self, model: str) -> str:
         normalized = normalize_openrouter_model(model)
         self._feeder_openrouter_model = normalized
+        self._feeder_object_detection_cache.clear()
         self._feeder_dynamic_detection_cache.clear()
         for detector in self._feeder_gemini_detectors.values():
             detector.setOpenRouterModel(normalized)
@@ -1239,7 +1244,7 @@ class VisionManager:
             get_gray=self.getLatestFeederRaw,
             profiler=self.gc.profiler,
         )
-        self._feeder_analysis.start()
+        self._feeder_analysis.start(name="feeder-analysis-default")
         self.gc.logger.info("Feeder MOG2 detection initialized")
         if self._camera_service is not None:
             self._initOverlays()
@@ -1390,7 +1395,7 @@ class VisionManager:
                 get_gray=_make_frame_getter(capture),
                 profiler=self.gc.profiler,
             )
-            analysis.start()
+            analysis.start(name=f"feeder-analysis-{role}")
             self._per_channel_analysis[role] = analysis
             self.gc.logger.info(f"Split-feeder MOG2 detection initialized for {role} ({cam_w}x{cam_h}, scale={scale_x:.2f}x{scale_y:.2f})")
 
@@ -1532,7 +1537,7 @@ class VisionManager:
                     min_bbox_dimension_px=cfg.min_bbox_dim,
                     min_bbox_area_px=cfg.min_bbox_area,
                 )
-                self._classification_top_analysis.start()
+                self._classification_top_analysis.start(name="classification-analysis-top")
             else:
                 self._classification_bottom_heatmap = heatmap
                 self._classification_bottom_analysis = ClassificationAnalysisThread(
@@ -1544,7 +1549,7 @@ class VisionManager:
                     min_bbox_dimension_px=cfg.min_bbox_dim,
                     min_bbox_area_px=cfg.min_bbox_area,
                 )
-                self._classification_bottom_analysis.start()
+                self._classification_bottom_analysis.start(name="classification-analysis-bottom")
 
             loaded_any = True
 
@@ -3297,12 +3302,27 @@ class VisionManager:
         prof = self.gc.profiler
         prof.hit(f"hive.{role}.calls")
         prof.mark(f"hive.{role}.interval_ms")
+        # Thread-attribution profiling: which threads actually run YOLO?
+        # Coordinator/main thread should be ZERO; aux detection loop and
+        # encoder/preview threads should be the only ones with hits.
+        # Reported as counts AND total ms blocked per (thread, role).
+        thread_name = threading.current_thread().name
+        safe_thread = "".join(
+            ch if ch.isalnum() or ch in "_-" else "_" for ch in thread_name
+        ) or "unknown"
+        prof.hit(f"inference.by_thread.{safe_thread}")
+        prof.hit(f"inference.by_thread.{safe_thread}.{role}")
+        inference_started = time.perf_counter()
         try:
             with prof.timer(f"hive.{role}.infer_ms"):
                 if conf_threshold is not None:
                     detections = processor.infer(crop, conf_threshold=conf_threshold)
                 else:
                     detections = processor.infer(crop)
+            prof.observeDuration(
+                f"inference.by_thread.{safe_thread}.ms",
+                (time.perf_counter() - inference_started) * 1000.0,
+            )
         except Exception as exc:
             if getattr(processor, "_load_failed", False):
                 self._hive_ml_processors[algorithm_id] = False
@@ -3366,6 +3386,44 @@ class VisionManager:
         if cached[0] == frame_timestamp:
             return cached[1]
         return cached[1] if abs(float(frame_timestamp) - float(cached[0])) <= 6.0 else None
+
+    def _getFeederObjectDetection(
+        self,
+        role: str,
+        *,
+        force: bool = False,
+        frame: CameraFrame | None = None,
+    ) -> ClassificationDetectionResult | None:
+        if frame is None:
+            capture = self.getCaptureThreadForRole(role)
+            if capture is None:
+                return None
+            frame = capture.latest_frame
+        if frame is None:
+            return None
+        algorithm = self.getFeederDetectionAlgorithm(role)
+        if not self._isLocalModelDetectionAlgorithm(algorithm):
+            return None
+        cached = self._feeder_object_detection_cache.get(role)
+        now = frame.timestamp
+        if cached is not None and not force:
+            last_ts, last_det = cached
+            if now - float(last_ts) < _hive_inference_min_interval_s_for_role(role):
+                self.gc.profiler.hit(f"hive.{role}.object.throttled")
+                return self._filterFeederDetectionResultToChannel(role, last_det)
+        conf_override = HIVE_CAROUSEL_CONF_THRESHOLD if role == "carousel" else None
+        detection = self._filterFeederDetectionResultToChannel(
+            role,
+            self._runHiveDetection(
+                algorithm,
+                frame.raw,
+                scope="feeder",
+                role=role,
+                conf_threshold=conf_override,
+            ),
+        )
+        self._feeder_object_detection_cache[role] = (now, detection)
+        return detection
 
     def _getFeederDynamicDetection(
         self,
@@ -3836,12 +3894,27 @@ class VisionManager:
             detections: list[ChannelDetection] = []
             for role in self._feederTrackerRoles():
                 algorithm = self.getFeederDetectionAlgorithm(role)
-                if self._isDynamicDetectionAlgorithm(algorithm):
+                if self._isLocalModelDetectionAlgorithm(algorithm):
+                    # HACK 2026-05-26: pure cache read; never run inference
+                    # on the coordinator thread. _feeder_object_detection_cache
+                    # is kept warm by the camera-feed preview overlay path at
+                    # vision_manager.py:518 (which calls
+                    # _getFeederObjectDetection on the encoder thread at ~10
+                    # fps). If the cache is empty (first ticks after startup
+                    # before any preview frame has rendered), we return
+                    # nothing this tick rather than block.
+                    #
+                    # TODO: real refactor — collapse the two caches
+                    # (_feeder_object_detection_cache vs
+                    # _feeder_dynamic_detection_cache) and the
+                    # Heatmap/Object/Dynamic dispatcher tree into one clear
+                    # "latest detection per role" API, owned by a single
+                    # dedicated worker thread so neither overlay nor
+                    # coordinator can stall on inference.
+                    cached = self._feeder_object_detection_cache.get(role)
+                    cached_detection = cached[1] if cached is not None else None
                     detections.extend(
-                        self._channelDetectionsFromDynamicResult(
-                            role,
-                            self._getFeederDynamicDetection(role, force=False),
-                        )
+                        self._channelDetectionsFromDynamicResult(role, cached_detection)
                     )
                     continue
                 analysis = self._per_channel_analysis.get(role)
@@ -4445,7 +4518,16 @@ class VisionManager:
                 self.gc.logger.warning(f"auxiliary detection refresh failed for {label}: {exc}")
 
     def _auxiliaryDetectionLoop(self) -> None:
+        # Thread-attribution: prove this loop is or isn't running by counting
+        # iterations. Cross-reference with run_auxiliary_detection gate at
+        # _buildPathConfig — if zero hits, the loop wasn't started this run.
+        prof = self.gc.profiler
+        t_name = threading.current_thread().name
+        safe_thread = "".join(
+            c if c.isalnum() or c in "_-" else "_" for c in t_name
+        ) or "unknown"
         while not self._aux_detection_stop.is_set():
+            prof.hit(f"aux_detection_loop.iterations.by_thread.{safe_thread}")
             try:
                 self._refreshAuxiliaryDetections()
                 self._processPendingAuxiliaryTeacherCaptures()

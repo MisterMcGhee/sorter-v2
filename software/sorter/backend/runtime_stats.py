@@ -420,6 +420,24 @@ class RuntimeStatsCollector:
         _appendSample(bucket, max(0.0, float(value_ms)))
         self._last_updated_at = time.time()
 
+    def perfSnapshotRows(self) -> list[dict[str, float | int | str | None]]:
+        rows: list[dict[str, float | int | str | None]] = []
+        for metric_name, samples in sorted(self._perf_ms_samples.items()):
+            summary = _calcMsSummary(samples)
+            rows.append(
+                {
+                    "metric_name": metric_name,
+                    "sample_count": int(summary.get("n", 0)),
+                    "avg_ms": summary.get("avg_ms"),
+                    "med_ms": summary.get("med_ms"),
+                    "p90_ms": summary.get("p90_ms"),
+                    "min_ms": summary.get("min_ms"),
+                    "max_ms": summary.get("max_ms"),
+                    "last_ms": summary.get("last_ms"),
+                }
+            )
+        return rows
+
     def clearBinContents(
         self,
         *,

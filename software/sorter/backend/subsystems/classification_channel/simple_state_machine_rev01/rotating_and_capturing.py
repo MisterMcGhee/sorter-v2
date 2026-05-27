@@ -19,7 +19,16 @@ class RotatingAndCapturing(Rev01BaseState):
         now = time.monotonic()
         self.setClassificationReady(False, "rotating_and_capturing")
 
+        bboxes_started = time.perf_counter()
         bboxes = self.cv.bboxesOnChannel()
+        self.gc.runtime_stats.observePerfMs(
+            "classification.rev01.rotate.bboxes_on_channel_ms",
+            (time.perf_counter() - bboxes_started) * 1000.0,
+        )
+        self.gc.profiler.observeValue(
+            "classification.rev01.rotate.bbox_count",
+            float(len(bboxes)),
+        )
         if not self._rotation_started and not bboxes:
             self._empty_streak += 1
             if self._empty_streak >= self.ctx.config.empty_streak_to_abort:
@@ -64,12 +73,27 @@ class RotatingAndCapturing(Rev01BaseState):
             self.stopStepper()
             return ClassificationChannelState.REV01_DISCHARGING
 
+        sample_started = time.perf_counter()
         sample = self.cv.latestRawFrameSample()
+        self.gc.runtime_stats.observePerfMs(
+            "classification.rev01.rotate.latest_frame_sample_ms",
+            (time.perf_counter() - sample_started) * 1000.0,
+        )
+        primary_bbox_started = time.perf_counter()
         primary_bbox = self.cv.primaryBbox(bboxes)
+        self.gc.runtime_stats.observePerfMs(
+            "classification.rev01.rotate.primary_bbox_ms",
+            (time.perf_counter() - primary_bbox_started) * 1000.0,
+        )
         if sample is not None and primary_bbox is not None:
             frame, frame_ts = sample
             if frame_ts > self.ctx.last_capture_frame_ts:
+                crop_started = time.perf_counter()
                 crop = self.cv.cropBbox(frame, primary_bbox, self.ctx.config.crop_padding_px)
+                self.gc.runtime_stats.observePerfMs(
+                    "classification.rev01.rotate.crop_bbox_ms",
+                    (time.perf_counter() - crop_started) * 1000.0,
+                )
                 if crop is not None:
                     self.ctx.captured_crops.append(crop)
                     self.ctx.captured_crop_timestamps.append(frame_ts)
@@ -81,14 +105,24 @@ class RotatingAndCapturing(Rev01BaseState):
                         f"bbox={primary_bbox}, shape={crop.shape})"
                     )
                     if self.ctx.known_object is not None:
+                        encode_started = time.perf_counter()
                         encoded = self.encodeFrame(crop)
+                        self.gc.runtime_stats.observePerfMs(
+                            "classification.rev01.rotate.encode_crop_ms",
+                            (time.perf_counter() - encode_started) * 1000.0,
+                        )
                         if encoded is not None:
                             self.ctx.known_object.latest_captured_crop = encoded
                             self.ctx.known_object.latest_captured_crop_ts = frame_ts
                             self.ctx.known_object.recognition_images.append(encoded)
                         self.emitKnownObject()
 
+        exit_zone_started = time.perf_counter()
         in_exit, angles = self.anyBboxInExitZone(bboxes)
+        self.gc.runtime_stats.observePerfMs(
+            "classification.rev01.rotate.any_bbox_in_exit_ms",
+            (time.perf_counter() - exit_zone_started) * 1000.0,
+        )
         if in_exit and not self._exit_seen:
             self._exit_seen = True
             self.logger.info(

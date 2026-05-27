@@ -7,7 +7,12 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 from local_state import initialize_local_state
 initialize_local_state()
 
-from local_state import get_api_keys, remember_recent_known_object
+from local_state import (
+    get_api_keys,
+    record_profiler_metric_snapshot,
+    record_runtime_perf_metric_snapshot,
+    remember_recent_known_object,
+)
 _saved_api_keys = get_api_keys()
 if _saved_api_keys.get("openrouter"):
     os.environ["OPENROUTER_API_KEY"] = _saved_api_keys["openrouter"]
@@ -217,11 +222,11 @@ def main() -> None:
     # Bring up the API/broadcast threads before the heavier camera + vision
     # startup steps. That way the backend stays reachable even if a camera or
     # inventory subsystem stalls during initialization.
-    server_thread = threading.Thread(target=runServer, daemon=True)
+    server_thread = threading.Thread(target=runServer, daemon=True, name="api-server")
     server_thread.start()
 
     broadcaster_thread = threading.Thread(
-        target=runBroadcaster, args=(gc,), daemon=True
+        target=runBroadcaster, args=(gc,), daemon=True, name="ws-broadcaster"
     )
     broadcaster_thread.start()
 
@@ -236,10 +241,6 @@ def main() -> None:
 
     startup_total_ms = (time.time() - startup_total_start) * 1000
     gc.logger.info(f"standby startup complete in {startup_total_ms:.0f}ms")
-    startup_report = gc.profiler.getReport()
-    if startup_report:
-        print(startup_report)
-
     def _replace_irl(next_irl) -> None:
         nonlocal irl
         with controller_lock:
@@ -528,6 +529,8 @@ def main() -> None:
     last_heartbeat = time.time()
     last_frame_record = time.time()
     last_runtime_stats_broadcast = time.time()
+    last_runtime_perf_snapshot = time.time()
+    last_profiler_snapshot = time.time()
     last_main_loop_started = time.perf_counter()
 
     try:
@@ -584,6 +587,28 @@ def main() -> None:
                 )
                 main_to_server_queue.put(runtime_stats)
                 last_runtime_stats_broadcast = current_time
+
+            if (
+                current_time - last_runtime_perf_snapshot
+                >= RUNTIME_STATS_BROADCAST_INTERVAL_MS / 1000.0
+            ):
+                record_runtime_perf_metric_snapshot(
+                    gc.run_id,
+                    current_time,
+                    gc.runtime_stats.perfSnapshotRows(),
+                )
+                last_runtime_perf_snapshot = current_time
+
+            if (
+                gc.profiler.enabled
+                and current_time - last_profiler_snapshot >= gc.profiler.report_interval_s
+            ):
+                record_profiler_metric_snapshot(
+                    gc.run_id,
+                    current_time,
+                    gc.profiler.snapshotRows(),
+                )
+                last_profiler_snapshot = current_time
 
             with controller_lock:
                 current_controller = controller

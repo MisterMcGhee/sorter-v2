@@ -420,8 +420,16 @@ class Coordinator:
         prof = self.gc.profiler
         prof.hit("coordinator.step.calls")
         prof.mark("coordinator.step.interval_ms")
+        # Thread-attribution: name the thread the coordinator is running on so
+        # we can prove it never does inference work itself. Cross-reference
+        # with inference.by_thread.* counters in vision_manager._runHiveDetection.
+        import threading as _th
+        _t = _th.current_thread().name
+        _safe = "".join(c if c.isalnum() or c in "_-" else "_" for c in _t) or "unknown"
+        prof.hit(f"coordinator.step.by_thread.{_safe}")
 
         with prof.timer("coordinator.step.total_ms"):
+            coordinator_started = time.perf_counter()
             self.bus.begin_tick()
             active_incident = self._active_incident()
             if active_incident is not None:
@@ -439,6 +447,10 @@ class Coordinator:
                         )
                 else:
                     prof.hit("coordinator.step.classification_skipped.active_incident")
+                self.gc.runtime_stats.observePerfMs(
+                    "coordinator.step.total_ms",
+                    (time.perf_counter() - coordinator_started) * 1000.0,
+                )
                 return
             with prof.timer("coordinator.step.distribution_ms"):
                 distribution_started = time.perf_counter()
@@ -464,6 +476,10 @@ class Coordinator:
                     "coordinator.step.feeder_ms",
                     (time.perf_counter() - feeder_started) * 1000.0,
                 )
+            self.gc.runtime_stats.observePerfMs(
+                "coordinator.step.total_ms",
+                (time.perf_counter() - coordinator_started) * 1000.0,
+            )
 
     def cleanup(self) -> None:
         self.feeder.cleanup()
