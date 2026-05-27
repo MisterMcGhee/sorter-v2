@@ -619,6 +619,17 @@ class VisionManager:
         except Exception as exc:
             self.gc.logger.warning(f"reloadPolygons at start failed: {exc}")
         self._initOverlays()
+        # Rev04: when the perception service is active (the new mode pair
+        # GO_TO_ANGLE_REV01 + SIMPLE_STATE_MACHINE_REV01), perception owns
+        # all per-channel detection. VisionManager keeps preview / overlay
+        # / polygon-editor responsibilities but starts no producers, no
+        # aux pool, no trackers. Cameras are shared via CameraService.
+        if getattr(self.gc, "perception_service", None) is not None:
+            self.gc.logger.info(
+                "VisionManager: perception_service active — skipping legacy "
+                "producers / tracker / aux detection."
+            )
+            return
         if getattr(self.gc, "use_new_vision", False):
             self._startNewVisionProducers()
             return

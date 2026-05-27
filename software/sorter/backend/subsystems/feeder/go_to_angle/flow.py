@@ -205,6 +205,10 @@ class GoToAngleFeeding(BaseState):
         if not can_run:
             return FeederState.FEEDING
 
+        perception_service = getattr(self.gc, "perception_service", None)
+        if perception_service is not None:
+            return self._step_perception(cfg, perception_service)
+
         detections_started = time.perf_counter()
         detections = self.vision.getFeederHeatmapDetections()
         runtime_stats.observePerfMs(
@@ -297,6 +301,84 @@ class GoToAngleFeeding(BaseState):
                 )
 
         return FeederState.FEEDING
+
+    # ---------------------------------------------------------------------
+    # Rev04 perception path
+    # ---------------------------------------------------------------------
+
+    def _step_perception(self, cfg: GoToAngleConfig, perception_service) -> Optional[FeederState]:
+        """The new mode-pair flow: read perception state, apply cascade, move.
+
+        No detection list, no analyzeFeederChannels, no per-channel filter,
+        no in-flow tracker/handoff. The cascade is a pure function over
+        ``ChannelState`` booleans; this method just dispatches its output
+        to the existing ``_move`` machinery.
+        """
+        from perception.cascade import Action, cascade
+        from perception.state import EMPTY_STATE
+
+        runtime_stats = self.gc.runtime_stats
+        t0 = time.perf_counter()
+        states = perception_service.read_states()
+        runtime_stats.observePerfMs(
+            "feeder.go_to_angle.read_states_ms",
+            (time.perf_counter() - t0) * 1000.0,
+        )
+        c2 = states.get(2, EMPTY_STATE)
+        c3 = states.get(3, EMPTY_STATE)
+        c4 = states.get(4, EMPTY_STATE)
+        actions = cascade(c2, c3, c4)
+
+        if cfg.enable_ch3:
+            self._apply_action(
+                "ch3", actions.c3, self.irl.c_channel_3_rotor_stepper, cfg
+            )
+        if cfg.enable_ch2:
+            self._apply_action(
+                "ch2", actions.c2, self.irl.c_channel_2_rotor_stepper, cfg
+            )
+        if cfg.enable_ch1:
+            stepper = self.irl.c_channel_1_rotor_stepper
+            if actions.c1 == Action.ADVANCE and not self._busy(stepper):
+                self._move(
+                    "ch1",
+                    stepper,
+                    cfg.ch1_advance_output_deg,
+                    cfg.ch1_settle_after_move_ms,
+                    cfg,
+                )
+
+        return FeederState.FEEDING
+
+    def _apply_action(
+        self,
+        label: str,
+        action,
+        stepper: "StepperMotor",
+        cfg: GoToAngleConfig,
+    ) -> None:
+        from perception.cascade import Action
+
+        if self._busy(stepper):
+            return
+        if action == Action.ADVANCE:
+            self._move(
+                f"{label}_advance",
+                stepper,
+                cfg.advance_output_deg,
+                cfg.settle_after_move_ms,
+                cfg,
+            )
+        elif action == Action.PRECISE:
+            self._move(
+                f"{label}_precise",
+                stepper,
+                cfg.precise_pulse_output_deg,
+                cfg.precise_pulse_pause_ms,
+                cfg,
+                enforce_min=False,
+            )
+        # IDLE / FREEZE: no move.
 
     def cleanup(self) -> None:
         super().cleanup()

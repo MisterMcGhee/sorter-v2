@@ -83,6 +83,12 @@ class GlobalConfig:
         self.use_new_vision = False
         self.disable_video_streams = ["classification_bottom"]
         self.runtime_stats = RuntimeStatsCollector()
+        # Rev04: perception service for the GO_TO_ANGLE_REV01 +
+        # SIMPLE_STATE_MACHINE_REV01 mode pair. None when the mode pair is
+        # not active — the legacy vision path runs in that case. Set in
+        # main.py after camera startup. Not an env-toggle: the mode config
+        # determines whether this is non-None.
+        self.perception_service = None
 
 
 def mkTimeouts() -> Timeouts:

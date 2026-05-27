@@ -38,7 +38,12 @@ from run_recorder import RunRecorder
 from message_queue.handler import handleServerToMainEvent
 from defs.events import HeartbeatEvent, HeartbeatData, MainThreadToServerCommand
 from defs.events import RuntimeStatsEvent, RuntimeStatsData
-from irl.config import ClassificationChannelMode, mkIRLConfig, mkIRLInterface
+from irl.config import (
+    ClassificationChannelMode,
+    FeederMode,
+    mkIRLConfig,
+    mkIRLInterface,
+)
 from subsystems.feeder.calibration import calibrateFeederChannels
 from vision import VisionManager
 from process_guard import acquire_backend_process_guard, ProcessGuardError
@@ -110,6 +115,51 @@ def _checkServoBusHealth(gc: GlobalConfig, irl) -> None:
 
 def _noPowerModeActive(gc: GlobalConfig) -> bool:
     return bool(getattr(gc, "no_power_development_mode", False))
+
+
+def _perceptionModeActive(irl_config) -> bool:
+    """Rev04 mode pair: GO_TO_ANGLE_REV01 feeder + SIMPLE_STATE_MACHINE_REV01
+    classification. The perception package owns detection for this pair only;
+    every other mode pair keeps using the legacy VisionManager paths."""
+    feeder_mode = getattr(getattr(irl_config, "feeder_config", None), "mode", None)
+    cc_mode = getattr(
+        getattr(irl_config, "classification_channel_config", None), "mode", None
+    )
+    return (
+        feeder_mode == FeederMode.GO_TO_ANGLE_REV01
+        and cc_mode == ClassificationChannelMode.SIMPLE_STATE_MACHINE_REV01
+    )
+
+
+def _maybeStartPerception(gc: GlobalConfig, irl_config, camera_service) -> None:
+    if not _perceptionModeActive(irl_config):
+        gc.logger.info(
+            "Perception (rev04) inactive: mode pair is not "
+            "(GO_TO_ANGLE_REV01, SIMPLE_STATE_MACHINE_REV01). Legacy vision owns detection."
+        )
+        return
+
+    from perception import service as perception_service_mod
+    from vision.detection_registry import detection_algorithm_definition
+
+    def _lookup_model(algorithm_id: str):
+        definition = detection_algorithm_definition(algorithm_id)
+        if definition is None or definition.model_path is None:
+            return None
+        return definition.model_path, int(definition.imgsz or 320)
+
+    service = perception_service_mod.build(
+        gc=gc,
+        irl_config=irl_config,
+        camera_service=camera_service,
+        model_path_lookup=_lookup_model,
+    )
+    service.start()
+    gc.perception_service = service
+    gc.logger.info(
+        f"Perception (rev04) started: channels={sorted(service.channels().keys())} "
+        f"workers={sorted(service.workers().keys())}"
+    )
 
 
 def runServer() -> None:
@@ -236,6 +286,13 @@ def main() -> None:
 
     with gc.profiler.timer("startup.camera_service_start_ms"):
         camera_service.start()
+    # Rev04: build the perception service BEFORE vision.start() so the
+    # VisionManager's start path can see gc.perception_service and skip
+    # legacy detection startup in the new mode pair. The build() helper
+    # waits briefly for camera frames so the channel masks can be sized
+    # against the real camera resolution.
+    with gc.profiler.timer("startup.perception_start_ms"):
+        _maybeStartPerception(gc, irl_config, camera_service)
     with gc.profiler.timer("startup.vision_start_ms"):
         vision.start()
     with gc.profiler.timer("startup.waveshare_inventory_ms"):
