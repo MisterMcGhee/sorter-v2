@@ -1,6 +1,7 @@
 from typing import Optional, List, Dict, Tuple, Union, cast, Any
 from pathlib import Path
 import base64
+import enum
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -9,7 +10,15 @@ import cv2
 import numpy as np
 
 from global_config import GlobalConfig, RegionProviderType
-from irl.config import IRLConfig, IRLInterface, CameraColorProfile, CameraPictureSettings, mkCameraConfig
+from irl.config import (
+    IRLConfig,
+    IRLInterface,
+    CameraColorProfile,
+    CameraPictureSettings,
+    ClassificationChannelMode,
+    FeederMode,
+    mkCameraConfig,
+)
 from defs.events import CameraName, FrameEvent, FrameData, FrameResultData
 from defs.channel import ChannelDetection, PolygonChannel
 from blob_manager import (
@@ -76,6 +85,27 @@ class AuxiliaryTeacherCaptureRequest:
     frame_snapshot: np.ndarray | None = None
 
 
+class FeederDetectionPath(enum.Enum):
+    TRACKS = "tracks"
+    OBJECT_DETECTIONS = "object_detections"
+
+
+class FeederDynamicOverlayPath(enum.Enum):
+    TRACKS = "tracks"
+    RAW_DETECTIONS = "raw_detections"
+
+
+@dataclass(frozen=True)
+class VisionPathConfig:
+    feeder_mode: FeederMode
+    classification_mode: ClassificationChannelMode
+    uses_classification_channel_setup: bool
+    feeder_tracker_roles: tuple[str, ...]
+    run_auxiliary_detection: bool
+    feeder_detection_path: FeederDetectionPath
+    feeder_dynamic_overlay_path: FeederDynamicOverlayPath
+
+
 # Minimum seconds between consecutive local model inferences per (scope, role).
 # Live frame-encode runs at ~10 Hz and each ONNX inference is ~30-50 ms on CPU;
 # without this guard the encode thread serializes and the dashboard stream
@@ -129,6 +159,7 @@ class VisionManager:
         self.gc = gc
         self._irl_config = irl_config
         self._irl = irl
+        self._path_config = self._buildPathConfig()
         self._camera_layout = getattr(irl_config, "camera_layout", "default")
         self._disabled_cameras = set(gc.disable_video_streams)
 
@@ -240,18 +271,58 @@ class VisionManager:
 
         self._started = False
 
-    def _usesClassificationChannelSetup(self) -> bool:
+    def _buildPathConfig(self) -> VisionPathConfig:
         irl_config = getattr(self, "_irl_config", None)
         machine_setup = getattr(irl_config, "machine_setup", None)
-        return bool(
+        uses_classification_channel_setup = bool(
             machine_setup is not None
             and getattr(machine_setup, "uses_classification_channel", False)
         )
+        feeder_config = getattr(self._irl_config, "feeder_config", None)
+        feeder_mode = getattr(feeder_config, "mode", FeederMode.DROP_ZONE_REACTIVE_REV01)
+        classification_config = getattr(self._irl_config, "classification_channel_config", None)
+        classification_mode = getattr(
+            classification_config,
+            "mode",
+            ClassificationChannelMode.DYNAMIC,
+        )
+        feeder_tracker_roles = (
+            ("c_channel_2", "c_channel_3", "carousel")
+            if uses_classification_channel_setup
+            else ("c_channel_2", "c_channel_3")
+        )
+        run_auxiliary_detection = (
+            feeder_mode != FeederMode.GO_TO_ANGLE_REV01
+            and classification_mode != ClassificationChannelMode.SIMPLE_STATE_MACHINE_REV01
+        )
+        feeder_detection_path = (
+            FeederDetectionPath.OBJECT_DETECTIONS
+            if feeder_mode == FeederMode.GO_TO_ANGLE_REV01
+            else FeederDetectionPath.TRACKS
+        )
+        feeder_dynamic_overlay_path = (
+            FeederDynamicOverlayPath.RAW_DETECTIONS
+            if not run_auxiliary_detection
+            else FeederDynamicOverlayPath.TRACKS
+        )
+        return VisionPathConfig(
+            feeder_mode=feeder_mode,
+            classification_mode=classification_mode,
+            uses_classification_channel_setup=uses_classification_channel_setup,
+            feeder_tracker_roles=feeder_tracker_roles,
+            run_auxiliary_detection=run_auxiliary_detection,
+            feeder_detection_path=feeder_detection_path,
+            feeder_dynamic_overlay_path=feeder_dynamic_overlay_path,
+        )
+
+    def _usesClassificationChannelSetup(self) -> bool:
+        return self._path_config.uses_classification_channel_setup
+
+    def _shouldRunAuxiliaryDetection(self) -> bool:
+        return self._path_config.run_auxiliary_detection
 
     def _feederTrackerRoles(self) -> tuple[str, ...]:
-        if self._usesClassificationChannelSetup():
-            return ("c_channel_2", "c_channel_3", "carousel")
-        return ("c_channel_2", "c_channel_3")
+        return self._path_config.feeder_tracker_roles
 
     def _channelPolygonKeyForRole(self, role: str) -> str | None:
         if role == "c_channel_2":
@@ -412,6 +483,10 @@ class VisionManager:
                         feed.add_overlay(ChannelRegionOverlay(self._region_provider, poly_key))
                 feeder_algo = self.getFeederDetectionAlgorithm(role)
                 if self._isDynamicDetectionAlgorithm(feeder_algo):
+                    use_raw_detections = (
+                        self._path_config.feeder_dynamic_overlay_path
+                        == FeederDynamicOverlayPath.RAW_DETECTIONS
+                    )
                     # The auxiliary detection loop (_auxiliaryDetectionLoop) runs
                     # _getFeederDynamicDetection at its own cadence in a dedicated
                     # thread pool. The render path previously also triggered
@@ -436,9 +511,9 @@ class VisionManager:
                                 lambda r=role: self.getFeederIgnoredDetectionOverlayData(r)
                             )
                         )
-                        if RAW_DETECTION_OVERLAY_ENABLED:
+                        if RAW_DETECTION_OVERLAY_ENABLED or use_raw_detections:
                             feed.add_overlay(DynamicDetectionOverlay(
-                                lambda r=role: self._feeder_dynamic_detection_cache.get(r, (None, None))[1]
+                                lambda r=role: self._getFeederDynamicDetection(r, force=False)
                             ))
                         else:
                             feed.add_overlay(TrackOverlay(_tracks_for))
@@ -526,6 +601,8 @@ class VisionManager:
         except Exception as exc:
             self.gc.logger.warning(f"reloadPolygons at start failed: {exc}")
         self._initOverlays()
+        if not self._shouldRunAuxiliaryDetection():
+            return
         self._aux_detection_stop.clear()
         if self._aux_detection_pool is None:
             self._aux_detection_pool = ThreadPoolExecutor(
@@ -3725,6 +3802,9 @@ class VisionManager:
         )
 
     def getFeederHeatmapDetections(self) -> list[ChannelDetection]:
+        if self._path_config.feeder_detection_path == FeederDetectionPath.OBJECT_DETECTIONS:
+            return self.getFeederObjectDetections()
+
         if self._camera_layout == "split_feeder":
             detections: list[ChannelDetection] = []
             for role in self._feederTrackerRoles():
@@ -3740,6 +3820,27 @@ class VisionManager:
                         self._channelDetectionsFromTracks(
                             role,
                             self.getFeederTracks(role),
+                        )
+                    )
+                    continue
+                analysis = self._per_channel_analysis.get(role)
+                if analysis is not None:
+                    detections.extend(analysis.getDetections())
+            return detections
+        if self._feeder_analysis is None:
+            return []
+        return self._feeder_analysis.getDetections()
+
+    def getFeederObjectDetections(self) -> list[ChannelDetection]:
+        if self._camera_layout == "split_feeder":
+            detections: list[ChannelDetection] = []
+            for role in self._feederTrackerRoles():
+                algorithm = self.getFeederDetectionAlgorithm(role)
+                if self._isDynamicDetectionAlgorithm(algorithm):
+                    detections.extend(
+                        self._channelDetectionsFromDynamicResult(
+                            role,
+                            self._getFeederDynamicDetection(role, force=False),
                         )
                     )
                     continue
