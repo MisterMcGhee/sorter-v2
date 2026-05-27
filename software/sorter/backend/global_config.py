@@ -52,6 +52,7 @@ class GlobalConfig:
     runtime_stats: "RuntimeStatsCollector"
     brickognize_dump_root: Optional[Path]
     classification_burst_dump_root: Optional[Path]
+    classification_skew_dump_root: Optional[Path]
     def __init__(self):
         from runtime_stats import RuntimeStatsCollector
 
@@ -59,6 +60,7 @@ class GlobalConfig:
         self.should_write_camera_feeds = False
         self.brickognize_dump_root: Optional[Path] = None
         self.classification_burst_dump_root: Optional[Path] = None
+        self.classification_skew_dump_root: Optional[Path] = None
         self.disable_chute = False
         # On the restart branch we explicitly simulate the distributor: the
         # Waveshare layer-servo bus isn't reliably available, but C1-C4 must
@@ -133,6 +135,12 @@ def mkGlobalConfig() -> GlobalConfig:
         gc.brickognize_dump_root = Path(log_dir).resolve() / "brickognize" / gc.run_id
     if os.getenv("CLASSIFICATION_BURST_DUMP_IMAGES", "0") == "1":
         gc.classification_burst_dump_root = Path(log_dir).resolve() / "classification_burst" / gc.run_id
+    # Cheap-but-careful: writes 1 full 4K frame + 1 crop per capture during a
+    # carousel sweep when set. JPEG quality is intentionally moderate (80) and
+    # writes are guarded so the rotation hot path stays cheap. Use a temp dir
+    # under software/logs/ that survives across runs by gc.run_id.
+    if os.getenv("CLASSIFICATION_SKEW_DUMP_IMAGES", "0") == "1":
+        gc.classification_skew_dump_root = Path(log_dir).resolve() / "classification_skew" / gc.run_id
     log_file = os.path.join(log_dir, datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + ".log")
     gc.logger = Logger(gc.debug_level, log_file=log_file)
     gc.profiler = Profiler(
