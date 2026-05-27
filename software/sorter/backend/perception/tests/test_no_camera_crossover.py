@@ -100,6 +100,7 @@ def _build_worker_set(
             section_zero_angle=0.0,
             drop_arc=(75.0, 105.0),
             exit_arc=(255.0, 285.0),
+            precise_arc=None,
         )
         for ch_id in (2, 3, 4)
     }
@@ -130,6 +131,7 @@ def test_constructor_rejects_mismatched_capture_and_channel() -> None:
         section_zero_angle=0.0,
         drop_arc=(75.0, 105.0),
         exit_arc=(255.0, 285.0),
+        precise_arc=None,
     )
     with pytest.raises(ValueError, match="source_id"):
         InferenceWorker(
@@ -156,6 +158,7 @@ def test_runtime_source_id_assertion_fires_if_frame_lies() -> None:
         section_zero_angle=0.0,
         drop_arc=(75.0, 105.0),
         exit_arc=(255.0, 285.0),
+        precise_arc=None,
     )
     runtime = StubRuntime(bboxes=[(40, 40, 60, 60)])
     slot = LatestStateSlot()
@@ -242,6 +245,7 @@ def test_swapping_capture_at_runtime_is_caught_by_source_id_check() -> None:
         section_zero_angle=0.0,
         drop_arc=(75.0, 105.0),
         exit_arc=(255.0, 285.0),
+        precise_arc=None,
     )
     runtime = StubRuntime(bboxes=[(40, 40, 60, 60)])
     slot = LatestStateSlot()

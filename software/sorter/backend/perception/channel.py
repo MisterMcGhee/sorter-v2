@@ -46,6 +46,11 @@ class ChannelDef:
     radius1_angle_image: float
     mask: np.ndarray
     drop_sections: frozenset[int]
+    # The exit verdict (``in_exit``) unions the exit and precise arcs: callers
+    # that "look at the exit" see both as one region. The two arcs are kept
+    # apart in the saved schema and the editor so their behavior can diverge
+    # later, but here — the single place perception turns arcs into the section
+    # set the cascade reads — they are merged.
     exit_sections: frozenset[int]
 
     @property
@@ -109,6 +114,7 @@ def buildChannelDef(
     section_zero_angle: float,
     drop_arc: tuple[float, float] | None,
     exit_arc: tuple[float, float] | None,
+    precise_arc: tuple[float, float] | None,
 ) -> ChannelDef:
     """Pure builder. Used directly by tests; the on-disk loader below is the
     production entry point but defers to this for the actual construction.
@@ -133,6 +139,11 @@ def buildChannelDef(
         if exit_arc is not None
         else frozenset()
     )
+    precise_sections = (
+        _section_set_for_arc(precise_arc[0], precise_arc[1], section_zero_angle)
+        if precise_arc is not None
+        else frozenset()
+    )
 
     return ChannelDef(
         channel_id=channel_id,
@@ -141,7 +152,7 @@ def buildChannelDef(
         radius1_angle_image=float(section_zero_angle),
         mask=mask,
         drop_sections=drop_sections,
-        exit_sections=exit_sections,
+        exit_sections=exit_sections | precise_sections,
     )
 
 
@@ -177,6 +188,7 @@ def loadChannelDefs(
         arc_entry = arc_params.get(polygon_key) or arc_params.get(angle_key)
         drop_arc = _parse_arc(arc_entry, "drop_zone")
         exit_arc = _parse_arc(arc_entry, "exit_zone")
+        precise_arc = _parse_arc(arc_entry, "precise_zone")
         out[channel_id] = buildChannelDef(
             channel_id=channel_id,
             polygon=np.asarray(polygon),
@@ -184,5 +196,6 @@ def loadChannelDefs(
             section_zero_angle=section_zero_angle,
             drop_arc=drop_arc,
             exit_arc=exit_arc,
+            precise_arc=precise_arc,
         )
     return out

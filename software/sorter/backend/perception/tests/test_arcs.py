@@ -56,6 +56,7 @@ def _channel(
     channel_id: int = 3,
     drop_arc: tuple[float, float] = (75.0, 105.0),
     exit_arc: tuple[float, float] = (255.0, 285.0),
+    precise_arc: tuple[float, float] | None = None,
     section_zero: float = 0.0,
 ) -> ChannelDef:
     polygon = _annulus_polygon()
@@ -66,6 +67,7 @@ def _channel(
         section_zero_angle=section_zero,
         drop_arc=drop_arc,
         exit_arc=exit_arc,
+        precise_arc=precise_arc,
     )
 
 
@@ -138,6 +140,7 @@ def test_empty_arcs_attribute_nothing() -> None:
         section_zero_angle=0.0,
         drop_arc=None,
         exit_arc=None,
+        precise_arc=None,
     )
     assert ch.drop_sections == frozenset()
     assert ch.exit_sections == frozenset()
@@ -169,6 +172,28 @@ def test_attribute_bboxes_skips_off_channel() -> None:
     assert any_drop
     assert not any_exit
     assert n_on == 1
+
+
+# --- exit/precise union -----------------------------------------------------
+
+
+def test_exit_sections_union_precise() -> None:
+    # Precise arc adjacent to the exit (255-285) on the CCW/approach side.
+    ch = _channel(precise_arc=(225.0, 255.0))
+    # A bbox in the precise band must read in_exit — the build merges the two
+    # arcs into exit_sections so everything that "looks at the exit" sees both.
+    in_drop, in_exit = attributeBbox(_bbox_at_angle(240.0), ch)
+    assert in_exit
+    assert not in_drop
+    # And the original exit arc still reads in_exit.
+    _, in_exit_orig = attributeBbox(_bbox_at_angle(270.0), ch)
+    assert in_exit_orig
+
+
+def test_exit_sections_no_precise_is_exit_only() -> None:
+    ch = _channel()  # no precise arc
+    _, in_exit_precise_band = attributeBbox(_bbox_at_angle(240.0), ch)
+    assert not in_exit_precise_band
 
 
 # --- forward clearance to exit (advance cap) -------------------------------
