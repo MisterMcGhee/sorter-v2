@@ -26,6 +26,13 @@ class ChannelState:
     in_drop: bool
     in_exit: bool
     n_pieces: int
+    # Forward distance (output degrees) from the most-forward on-channel piece
+    # to the near edge of the exit zone — the largest advance possible without
+    # pushing a piece into the exit zone. ``None`` when there is no on-channel
+    # piece or the channel has no exit arc. The cascade's ADVANCE caps its move
+    # to this so a free drop-zone advance never shoves a leading piece through
+    # the exit, bypassing the downstream-gated exit handling.
+    advance_clearance_deg: float | None = None
 
 
 EMPTY_STATE = ChannelState(ts=EMPTY_STATE_TS, in_drop=False, in_exit=False, n_pieces=0)

@@ -331,11 +331,13 @@ class GoToAngleFeeding(BaseState):
 
         if cfg.enable_ch3:
             self._apply_action(
-                "ch3", actions.c3, self.irl.c_channel_3_rotor_stepper, cfg
+                "ch3", actions.c3, self.irl.c_channel_3_rotor_stepper, cfg,
+                advance_clearance_deg=c3.advance_clearance_deg,
             )
         if cfg.enable_ch2:
             self._apply_action(
-                "ch2", actions.c2, self.irl.c_channel_2_rotor_stepper, cfg
+                "ch2", actions.c2, self.irl.c_channel_2_rotor_stepper, cfg,
+                advance_clearance_deg=c2.advance_clearance_deg,
             )
         if cfg.enable_ch1:
             stepper = self.irl.c_channel_1_rotor_stepper
@@ -356,18 +358,33 @@ class GoToAngleFeeding(BaseState):
         action,
         stepper: "StepperMotor",
         cfg: GoToAngleConfig,
+        advance_clearance_deg: float | None = None,
     ) -> None:
         from perception.cascade import Action
 
         if self._busy(stepper):
             return
         if action == Action.ADVANCE:
+            # Free advance to clear the drop zone, but never push the
+            # most-forward piece into the exit zone: cap the move to its
+            # forward distance to the exit edge. Once the piece reaches the
+            # exit, the PRECISE/FREEZE branch (gated on downstream readiness)
+            # meters it out instead of this ungated advance dumping it through.
+            output_deg = cfg.advance_output_deg
+            enforce_min = True
+            if (
+                advance_clearance_deg is not None
+                and advance_clearance_deg < output_deg
+            ):
+                output_deg = advance_clearance_deg
+                enforce_min = False
             self._move(
                 f"{label}_advance",
                 stepper,
-                cfg.advance_output_deg,
+                output_deg,
                 cfg.settle_after_move_ms,
                 cfg,
+                enforce_min=enforce_min,
             )
         elif action == Action.PRECISE:
             self._move(

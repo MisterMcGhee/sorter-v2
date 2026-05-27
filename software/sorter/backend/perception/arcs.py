@@ -75,6 +75,61 @@ def attributeBbox(bbox: Bbox, channel: ChannelDef) -> tuple[bool, bool]:
     return in_drop, in_exit
 
 
+def _orderedCircularSections(sections: frozenset[int]) -> list[int]:
+    """Sections walked in forward order, starting after the largest gap, so the
+    first entry is the rear (entry) edge and the last is the forward edge.
+    Mirrors ``subsystems.feeder.analysis._orderedCircularSections`` but stays
+    standalone — perception does not import the legacy stack."""
+    if not sections:
+        return []
+    normalized = sorted(int(s) % SECTION_COUNT for s in sections)
+    if len(normalized) <= 1 or len(normalized) >= SECTION_COUNT:
+        return normalized
+    largest_gap_index = 0
+    largest_gap = -1
+    for index, section in enumerate(normalized):
+        next_section = normalized[(index + 1) % len(normalized)]
+        gap = (next_section - section) % SECTION_COUNT
+        if gap > largest_gap:
+            largest_gap = gap
+            largest_gap_index = index
+    start = normalized[(largest_gap_index + 1) % len(normalized)]
+    return sorted(normalized, key=lambda s: (s - start) % SECTION_COUNT)
+
+
+def exitNearEdgeSection(channel: ChannelDef) -> int | None:
+    ordered = _orderedCircularSections(channel.exit_sections)
+    return ordered[0] if ordered else None
+
+
+def forwardClearanceToExitDeg(
+    bboxes: Iterable[Bbox], channel: ChannelDef
+) -> float | None:
+    """Smallest forward distance (output degrees) from any on-channel piece to
+    the near edge of the exit zone, i.e. how far the rotor can advance before
+    the most-forward piece enters the exit zone. ``None`` when no piece is on
+    the channel or the channel has no exit arc.
+
+    Forward is the increasing-relative-angle direction (same convention as the
+    section math and the forward motor sign). With 1°-wide sections the
+    section-index delta is already the angle in degrees.
+    """
+    near = exitNearEdgeSection(channel)
+    if near is None:
+        return None
+    best: int | None = None
+    for bbox in bboxes:
+        if not bboxInsideChannelMask(bbox, channel):
+            continue
+        for section in bboxSections(bbox, channel):
+            dist = (near - section) % SECTION_COUNT
+            if best is None or dist < best:
+                best = dist
+    if best is None:
+        return None
+    return float(best) * SECTION_DEG
+
+
 def attributeBboxes(
     bboxes: Iterable[Bbox], channel: ChannelDef
 ) -> tuple[bool, bool, int]:

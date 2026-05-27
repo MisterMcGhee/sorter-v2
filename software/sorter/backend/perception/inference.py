@@ -18,7 +18,7 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
-from .arcs import attributeBboxes
+from .arcs import attributeBboxes, forwardClearanceToExitDeg
 from .capture import CaptureWorker, PerceptionFrame
 from .channel import ChannelDef
 from .runtime import InferenceRuntime
@@ -209,6 +209,9 @@ class InferenceWorker:
 
                 attribute_t0 = _now_ms()
                 in_drop, in_exit, n_pieces = attributeBboxes(bboxes, self._channel_def)
+                advance_clearance_deg = forwardClearanceToExitDeg(
+                    bboxes, self._channel_def
+                )
                 attribute_ms = _now_ms() - attribute_t0
 
                 state = ChannelState(
@@ -216,6 +219,7 @@ class InferenceWorker:
                     in_drop=in_drop,
                     in_exit=in_exit,
                     n_pieces=n_pieces,
+                    advance_clearance_deg=advance_clearance_deg,
                 )
                 self._slot.write(state)
                 self._maybe_emit_exit_edge(frame.timestamp, in_exit)

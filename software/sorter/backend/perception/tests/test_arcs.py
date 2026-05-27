@@ -14,6 +14,8 @@ from perception.arcs import (
     attributeBboxes,
     bboxInsideChannelMask,
     bboxSections,
+    exitNearEdgeSection,
+    forwardClearanceToExitDeg,
 )
 from perception.channel import ChannelDef, buildChannelDef
 
@@ -167,6 +169,41 @@ def test_attribute_bboxes_skips_off_channel() -> None:
     assert any_drop
     assert not any_exit
     assert n_on == 1
+
+
+# --- forward clearance to exit (advance cap) -------------------------------
+
+
+def test_exit_near_edge_is_entry_section() -> None:
+    ch = _channel()  # exit arc 255-285, section_zero 0
+    assert exitNearEdgeSection(ch) == 255
+
+
+def test_clearance_measures_forward_distance_to_exit_edge() -> None:
+    ch = _channel()
+    # A piece at 200° sits between the drop (75-105) and exit (255-285) arcs.
+    # Forward distance to the exit's near edge (255°) is ~55°.
+    bbox = _bbox_at_angle(200.0)
+    clearance = forwardClearanceToExitDeg([bbox], ch)
+    assert clearance is not None
+    assert 50.0 <= clearance <= 56.0
+
+
+def test_clearance_uses_most_forward_piece() -> None:
+    ch = _channel()
+    # Rear piece in drop (90°, ~165° away) and a leading piece at 200° (~55°).
+    # The cap must follow the leading piece, not the rear one.
+    bboxes = [_bbox_at_angle(90.0), _bbox_at_angle(200.0)]
+    clearance = forwardClearanceToExitDeg(bboxes, ch)
+    assert clearance is not None
+    assert 50.0 <= clearance <= 56.0
+
+
+def test_clearance_none_without_pieces_or_exit() -> None:
+    ch = _channel()
+    assert forwardClearanceToExitDeg([], ch) is None
+    no_exit = _channel(exit_arc=(0.0, 0.0))
+    assert forwardClearanceToExitDeg([_bbox_at_angle(200.0)], no_exit) is None
 
 
 # --- equivalence with legacy section math ----------------------------------
