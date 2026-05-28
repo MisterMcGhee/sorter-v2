@@ -678,6 +678,32 @@
 		};
 	}
 
+	// Glue the precise zone to the exit: it shares the exit's adjacent edge
+	// (no gap), and sits entirely on one side of it (no overlap). Only the
+	// precise zone's far edge is free; the shared edge always tracks the exit.
+	// Applied in setArc so any edit — to either zone — re-establishes the bond.
+	function gluePreciseToExit(exit: ChordZone, precise: ChordZone): ChordZone {
+		const onCcwSide =
+			angularDistance(precise.endOuterAngle, exit.startOuterAngle) <=
+			angularDistance(precise.startOuterAngle, exit.endOuterAngle);
+		if (onCcwSide) {
+			// Just before the exit: precise's END edge is shared with exit's START.
+			return {
+				startOuterAngle: precise.startOuterAngle,
+				startInnerAngle: precise.startInnerAngle,
+				endOuterAngle: normalizeAngle(exit.startOuterAngle),
+				endInnerAngle: normalizeAngle(exit.startInnerAngle)
+			};
+		}
+		// Just after the exit: precise's START edge is shared with exit's END.
+		return {
+			startOuterAngle: normalizeAngle(exit.endOuterAngle),
+			startInnerAngle: normalizeAngle(exit.endInnerAngle),
+			endOuterAngle: precise.endOuterAngle,
+			endInnerAngle: precise.endInnerAngle
+		};
+	}
+
 	function copyArcParams(params: ArcParams): ArcParams {
 		return {
 			center: [params.center[0], params.center[1]],
@@ -1744,6 +1770,9 @@
 			outerRadius,
 			exitOuterRadius
 		});
+		clamped.preciseZone = clampPreciseZone(
+			gluePreciseToExit(clamped.exitZone, clamped.preciseZone)
+		);
 		arcParams[channel] = clamped;
 	}
 
@@ -2523,10 +2552,20 @@
 						endOuterAngle: origZone.endOuterAngle + delta
 					};
 				}
-				setArc(dragState.channel, {
-					...dragState.orig,
-					[zoneKey]: newZone
-				});
+				const nextParams: ArcParams = { ...dragState.orig, [zoneKey]: newZone };
+				// Rotating the exit carries the precise zone rigidly with it (the
+				// glue in setArc keeps the shared edge bonded either way; this
+				// makes the precise zone travel instead of stretch on rotation).
+				if (zoneKey === 'exitZone' && isRotate) {
+					const op = dragState.orig.preciseZone;
+					nextParams.preciseZone = {
+						startInnerAngle: op.startInnerAngle + delta,
+						startOuterAngle: op.startOuterAngle + delta,
+						endInnerAngle: op.endInnerAngle + delta,
+						endOuterAngle: op.endOuterAngle + delta
+					};
+				}
+				setArc(dragState.channel, nextParams);
 				break;
 			}
 			case 'section-zero': {
