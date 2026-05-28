@@ -9,17 +9,21 @@ from irl.config import IRLInterface, IRLConfig
 from global_config import GlobalConfig
 from vision import VisionManager
 
-from subsystems.common.jitter_recovery import JitterParams, JitterPhase, JitterSequence
-
 from ..states import FeederState
 from ..analysis import analyzeFeederChannels
 from .config import GoToAngleConfig
+from .eject import EjectController
 from . import geometry
 
-# Jitter unstick (per-channel, exit-only dwell → up to 3 oscillations) is wired
-# into the Rev04 perception sub-path only — see ``_jitter_tick`` and its calls
-# from ``_step_perception``. The legacy-vision sub-path (``_step_detections``)
-# intentionally does not run the jitter recovery.
+# Exit handling is a per-channel strategy. A channel runs in either:
+#  - precise-pulse mode (default): meter the piece into the exit one small pulse
+#    at a time, gated on downstream readiness (``_apply_action`` PRECISE), or
+#  - fast-eject mode (C3 by default): one quick move that balances the piece's
+#    bbox COM on the exit's fall-off edge, then an explicit watch-for-fall +
+#    jitter recovery (``EjectController`` in eject.py).
+# Jitter now fires ONLY inside the fast-eject fall-recovery procedure — the old
+# exit-dwell jitter has been removed. The perception sub-path (``_step_perception``)
+# is where fast-eject lives; the legacy-vision sub-path keeps precise pulsing only.
 
 if TYPE_CHECKING:
     from hardware.sorter_interface import StepperMotor
@@ -55,12 +59,10 @@ class GoToAngleFeeding(BaseState):
         self._config_loaded_at: float = 0.0
         self._classification_pending_until: float = 0.0
         self._ch3_was_at_exit: bool = False
-        # Per-channel exit-only dwell tracker (when the start condition fires).
-        # The jitter sequence itself lives in ``_jitter_seqs`` and is lazily
-        # constructed on first trigger (steppers may not be ready at __init__
-        # in test contexts).
-        self._exit_only_dwell_started: dict[int, Optional[float]] = {2: None, 3: None}
-        self._jitter_seqs: dict[int, JitterSequence] = {}
+        # Per-channel fast-eject controllers, lazily built on first use (steppers
+        # may not be ready at __init__ in test contexts). Only channels running
+        # in fast-eject mode get one.
+        self._eject_controllers: dict[int, EjectController] = {}
         machine_setup = getattr(irl_config, "machine_setup", None)
         self._classification_setup = bool(
             machine_setup is not None
@@ -93,20 +95,23 @@ class GoToAngleFeeding(BaseState):
     ) -> bool:
         if self._busy(stepper):
             return False
+        speed = int(cfg.move_speed_usteps_per_s)
         output_deg = abs(output_deg)
         if enforce_min:
             output_deg = max(cfg.min_move_output_deg, output_deg)
         output_deg = min(cfg.max_move_output_deg, output_deg)
         sign = 1 if cfg.forward_direction_sign >= 0 else -1
         motor_deg = sign * output_deg * CHANNEL_OUTPUT_GEAR_RATIO
+        # Set the move speed and tell the motor to move to the angle — that's it.
+        # We NEVER set acceleration here; the motor keeps whatever acceleration it
+        # already has.
         try:
-            stepper.set_speed_limits(0, int(cfg.move_speed_usteps_per_s))
-            stepper.set_acceleration(int(cfg.move_acceleration_usteps_per_s2))
+            stepper.set_speed_limits(0, speed)
         except Exception as exc:
-            self.gc.logger.warning(f"GoToAngle: {label} speed/accel set failed: {exc}")
+            self.gc.logger.warning(f"GoToAngle: {label} speed set failed: {exc}")
         success = stepper.move_degrees(motor_deg)
         exec_ms = stepper.estimateMoveDegreesMs(
-            abs(motor_deg), max_speed=int(cfg.move_speed_usteps_per_s) or 5000
+            abs(motor_deg), max_speed=speed or 5000
         )
         cooldown_ms = (max(0, exec_ms) + max(0, settle_ms)) if success else 500
         self._busy_until[stepper._name] = time.monotonic() + cooldown_ms / 1000.0
@@ -204,22 +209,13 @@ class GoToAngleFeeding(BaseState):
         return bool(self.shared.classification_ready)
 
     # ---------------------------------------------------------------------
-    # Jitter unstick — perception path only.
+    # Fast-eject controllers (perception path only).
     #
-    # When a piece sits in the exit-only sub-arc (NOT the precise arc — the
-    # precise zone is the normal hand-off region to the classification
-    # channel and is expected to be occupied during precise pulses) for
-    # ``jitter_exit_dwell_ms`` continuously, oscillate the channel rotor to
-    # unstick it. Up to 3 attempts per continuous dwell, with a short pause
-    # between attempts. If the piece leaves the exit-only zone at any point
-    # the recovery is abandoned and the attempt counter resets on the next
-    # entry. After 3 attempts the channel resumes normal advance/precise
-    # behavior (no extra forward nudge).
-    #
-    # Jitter itself is run-to-completion on the firmware. Python never
-    # re-issues a jitter while ``is_jittering()`` is True, and skips all
-    # normal motion for the channel while jitter or its inter-attempt pause
-    # is active so we don't fight the oscillation.
+    # A channel running in fast-eject mode hands its exit handling to a
+    # per-channel ``EjectController`` (see eject.py) instead of precise pulsing.
+    # Controllers are built lazily on first use because the steppers may not be
+    # ready at __init__ (e.g. in test contexts). Jitter recovery now lives
+    # entirely inside the controller — it is the only place the feeder jitters.
     # ---------------------------------------------------------------------
 
     def _channel_stepper(self, ch: int):
@@ -229,85 +225,62 @@ class GoToAngleFeeding(BaseState):
             return self.irl.c_channel_3_rotor_stepper
         return None
 
-    def _get_jitter_seq(self, ch: int, cfg: GoToAngleConfig) -> Optional[JitterSequence]:
-        seq = self._jitter_seqs.get(ch)
-        if seq is not None:
-            return seq
+    def _fast_eject_enabled(self, ch: int, cfg: GoToAngleConfig) -> bool:
+        if ch == 2:
+            return bool(cfg.ch2_fast_eject_enabled)
+        if ch == 3:
+            return bool(cfg.ch3_fast_eject_enabled)
+        return False
+
+    def _get_eject_controller(
+        self, ch: int, cfg: GoToAngleConfig, perception_service
+    ) -> Optional[EjectController]:
+        ctrl = self._eject_controllers.get(ch)
+        if ctrl is not None:
+            return ctrl
         stepper = self._channel_stepper(ch)
         if stepper is None:
             return None
-        seq = JitterSequence(
-            stepper,
-            JitterParams(
-                amplitude_motor_deg=cfg.jitter_amplitude_motor_deg,
-                cycles=int(cfg.jitter_cycles),
-                speed_usteps_per_s=int(cfg.jitter_speed_usteps_per_s),
-                accel_usteps_per_s2=int(cfg.jitter_accel_usteps_per_s2),
-                pause_ms=int(cfg.jitter_pause_ms),
-                max_attempts=3,
-            ),
-            label=f"GoToAngle: ch{ch}",
+        precise_len = 0.0
+        try:
+            precise_len = float(perception_service.precise_zone_len_deg(ch))
+        except Exception:
+            pass
+
+        def _advance_move(output_deg: float, _stepper=stepper) -> bool:
+            # One closed-loop advance step: just tell the motor to move that many
+            # channel-degrees at the normal move speed. Like every move here, it
+            # never touches acceleration. Completion is detected by polling the
+            # stepper's stopped state (see _is_stopped), not a time estimate.
+            return self._move(
+                f"ch{ch}_eject",
+                _stepper,
+                output_deg,
+                cfg.settle_after_move_ms,
+                cfg,
+                enforce_min=False,
+            )
+
+        def _is_stopped(_stepper=stepper) -> bool:
+            # One cheap firmware round-trip. On any query error, report stopped so
+            # the controller keeps progressing rather than hanging mid-advance.
+            try:
+                return bool(_stepper.stopped)
+            except Exception:
+                return True
+
+        on_success = self._on_ch3_dispense if ch == 3 else (lambda: None)
+        ctrl = EjectController(
+            channel_id=ch,
+            stepper=stepper,
+            is_stopped=_is_stopped,
+            advance_move=_advance_move,
+            on_success=on_success,
+            precise_zone_len_deg=precise_len,
             logger=self.gc.logger,
         )
-        self._jitter_seqs[ch] = seq
-        return seq
-
-    def _jitter_tick(
-        self,
-        ch: int,
-        in_exit_majority: bool,
-        cfg: GoToAngleConfig,
-        now: float,
-    ) -> bool:
-        """Drive the per-channel jitter recovery for one tick.
-
-        ``in_exit_majority`` is True when the piece's bbox has strictly more
-        sample points in the exit-only sub-arc than in the precise arc — i.e.
-        the piece is "mostly in the exit zone, not the precise zone." This is
-        the dwell trigger condition.
-
-        Returns True if the caller must skip normal advance/precise for this
-        channel this tick (firmware is jittering, or we are in the
-        inter-attempt pause, or we just issued a jitter).
-        """
-        seq = self._get_jitter_seq(ch, cfg)
-        if seq is None:
-            return False
-
-        # Majority-in-exit-zone dwell trigger. Reset both the dwell timer AND
-        # the sequence when the piece is no longer majority-in-exit — the next
-        # entry gets a fresh 3 attempts.
-        if not in_exit_majority:
-            self._exit_only_dwell_started[ch] = None
-            if seq.is_active:
-                seq.reset()
-            return False
-
-        dwell_start = self._exit_only_dwell_started.get(ch)
-        if dwell_start is None:
-            dwell_start = now
-            self._exit_only_dwell_started[ch] = dwell_start
-            self.gc.logger.info(
-                f"[jitter ch{ch}] exit-majority dwell timer STARTED "
-                f"(threshold={cfg.jitter_exit_dwell_ms}ms)"
-            )
-        dwell_ms = (now - dwell_start) * 1000.0
-
-        if not seq.is_active and dwell_ms >= cfg.jitter_exit_dwell_ms:
-            self.gc.logger.info(
-                f"[jitter ch{ch}] TRIGGERED — dwell={dwell_ms:.0f}ms "
-                f">= threshold={cfg.jitter_exit_dwell_ms}ms, starting JitterSequence"
-            )
-            seq.start()
-
-        if not seq.is_active:
-            return False
-
-        phase = seq.tick(still_stuck=in_exit_majority, now=now)
-        # CLEARED / EXHAUSTED both leave seq IDLE. After exhaustion the feeder
-        # has no recovery action — the channel just resumes normal motion next
-        # tick, which is what the caller wants when we return False.
-        return phase not in (JitterPhase.IDLE, JitterPhase.CLEARED, JitterPhase.EXHAUSTED)
+        self._eject_controllers[ch] = ctrl
+        return ctrl
 
     def step(self) -> Optional[FeederState]:
         cfg = self._cfg()
@@ -443,7 +416,6 @@ class GoToAngleFeeding(BaseState):
             "feeder.go_to_angle.read_states_ms",
             (time.perf_counter() - t0) * 1000.0,
         )
-        c1 = states.get(1, EMPTY_STATE)
         c2 = states.get(2, EMPTY_STATE)
         c3 = states.get(3, EMPTY_STATE)
         c4 = states.get(4, EMPTY_STATE)
@@ -452,22 +424,21 @@ class GoToAngleFeeding(BaseState):
         now_mono = time.monotonic()
 
         if cfg.enable_ch3:
-            if not self._jitter_tick(
-                3, bool(c3.in_exit_majority), cfg, now_mono
-            ):
-                self._apply_action(
-                    "ch3", actions.c3, self.irl.c_channel_3_rotor_stepper, cfg,
-                    advance_clearance_deg=c3.advance_clearance_deg,
-                )
+            # C3's downstream is the classification channel (C4). Ready = C4
+            # empty AND past the post-dispense admission window.
+            c3_downstream_ready = (
+                c4.n_pieces == 0 and now_mono >= self._classification_pending_until
+            )
+            self._drive_channel(
+                "ch3", 3, actions.c3, c3, c4, c3_downstream_ready,
+                self.irl.c_channel_3_rotor_stepper, cfg, perception_service, now_mono,
+            )
         if cfg.enable_ch2:
-            if not self._jitter_tick(
-                2, bool(c2.in_exit_majority), cfg, now_mono
-            ):
-                self._apply_action(
-                    "ch2", actions.c2, self.irl.c_channel_2_rotor_stepper, cfg,
-                    advance_clearance_deg=c2.advance_clearance_deg,
-                )
-        # C1 has no exit zone of its own — no jitter recovery applies.
+            self._drive_channel(
+                "ch2", 2, actions.c2, c2, c3, not c3.in_drop,
+                self.irl.c_channel_2_rotor_stepper, cfg, perception_service, now_mono,
+            )
+        # C1 has no exit zone of its own — no fast-eject / recovery applies.
         if cfg.enable_ch1:
             stepper = self.irl.c_channel_1_rotor_stepper
             if actions.c1 == Action.ADVANCE and not self._busy(stepper):
@@ -480,6 +451,43 @@ class GoToAngleFeeding(BaseState):
                 )
 
         return FeederState.FEEDING
+
+    def _drive_channel(
+        self,
+        label: str,
+        ch: int,
+        action,
+        state,
+        downstream,
+        downstream_ready: bool,
+        stepper: "StepperMotor",
+        cfg: GoToAngleConfig,
+        perception_service,
+        now: float,
+    ) -> None:
+        """Drive one feeder channel for a perception tick. Fast-eject channels
+        hand their exit handling to the per-channel EjectController; when the
+        controller does not take the tick (piece not near the exit), or for
+        precise-mode channels, fall back to the normal cascade action."""
+        if self._fast_eject_enabled(ch, cfg):
+            ctrl = self._get_eject_controller(ch, cfg, perception_service)
+            if ctrl is not None:
+                consumed = ctrl.tick(
+                    state=state,
+                    downstream=downstream,
+                    downstream_ready=downstream_ready,
+                    cfg=cfg,
+                    now=now,
+                )
+                if consumed:
+                    return
+                # Not consumed ⇒ the controller is idle and the piece isn't near
+                # the exit. Run the normal drop-zone advance/idle. The controller
+                # owns every in-exit case, so ``action`` here is ADVANCE/IDLE,
+                # never PRECISE.
+        self._apply_action(
+            label, action, stepper, cfg, advance_clearance_deg=state.advance_clearance_deg
+        )
 
     def _apply_action(
         self,
@@ -528,6 +536,5 @@ class GoToAngleFeeding(BaseState):
 
     def cleanup(self) -> None:
         super().cleanup()
-        for seq in self._jitter_seqs.values():
-            seq.reset()
-        self._exit_only_dwell_started = {2: None, 3: None}
+        for ctrl in self._eject_controllers.values():
+            ctrl.reset()

@@ -44,6 +44,17 @@ class ChannelState:
     # to this so a free drop-zone advance never shoves a leading piece through
     # the exit, bypassing the downstream-gated exit handling.
     advance_clearance_deg: float | None = None
+    # Signed forward distance (channel-output degrees) from the LEADING on-channel
+    # piece's bbox center-of-mass to the entry edge of the REAL exit region
+    # (the exit arc MINUS the precise arc — see ``arcs.exitOnlySections``; the
+    # precise zone is a separate band the piece crosses first and must NOT trip
+    # the eject). > 0 means the COM is still that many degrees SHORT of the exit
+    # zone (advance it forward this much); <= 0 means the COM has crossed the
+    # entry edge, i.e. the piece is >= 50% into the exit region (COM = centroid).
+    # ``None`` when there is no on-channel piece or the channel has no exit arc.
+    # The eject controller drives this toward 0 in a closed loop, re-reading it
+    # after every move so piece slippage just costs extra iterations.
+    exit_com_forward_deg: float | None = None
 
 
 EMPTY_STATE = ChannelState(ts=EMPTY_STATE_TS, in_drop=False, in_exit=False, n_pieces=0)

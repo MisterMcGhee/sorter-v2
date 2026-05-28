@@ -28,7 +28,7 @@ import numpy as np
 
 from .arcs import bboxInsideChannelMask
 from .capture import CaptureWorker
-from .channel import CHANNEL_REGISTRY, ChannelDef, channelDefFromBlob
+from .channel import CHANNEL_REGISTRY, SECTION_DEG, ChannelDef, channelDefFromBlob
 from .inference import InferenceWorker, OnExitEdge
 from .runtime import InferenceRuntime, RknnYoloRuntime
 from .state import ChannelState, EMPTY_STATE, LatestStateSlot
@@ -336,6 +336,16 @@ class PerceptionService:
         ``None`` if the channel isn't wired in this service instance."""
         ch = self._channels.get(channel_id)
         return ch.center if ch is not None else None
+
+    def precise_zone_len_deg(self, channel_id: int) -> float:
+        """Angular length (output degrees) of this channel's precise sub-arc, or
+        0.0 if the channel isn't wired / has no precise zone. Static per channel
+        (sections are immutable on the ChannelDef). The fast-eject controller
+        uses this as the default trigger distance when the tuning value is 0."""
+        ch = self._channels.get(channel_id)
+        if ch is None:
+            return 0.0
+        return float(len(ch.precise_sections)) * SECTION_DEG
 
     # --- introspection --------------------------------------------------
 

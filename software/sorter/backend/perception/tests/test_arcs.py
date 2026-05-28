@@ -14,6 +14,7 @@ from perception.arcs import (
     attributeBboxes,
     bboxInsideChannelMask,
     bboxSections,
+    exitComForwardDeg,
     exitNearEdgeSection,
     forwardClearanceToExitDeg,
 )
@@ -229,6 +230,81 @@ def test_clearance_none_without_pieces_or_exit() -> None:
     assert forwardClearanceToExitDeg([], ch) is None
     no_exit = _channel(exit_arc=(0.0, 0.0))
     assert forwardClearanceToExitDeg([_bbox_at_angle(200.0)], no_exit) is None
+
+
+# --- exit COM forward distance (fast eject) --------------------------------
+
+
+def test_exit_com_forward_positive_when_behind_edge() -> None:
+    ch = _channel()  # exit near edge at 255°, section_zero 0
+    # A single small bbox centered at 200° — COM is ~55° behind the near edge.
+    bbox = _bbox_at_angle(200.0)
+    com = exitComForwardDeg([bbox], ch)
+    assert com is not None
+    assert 53.0 <= com <= 57.0
+
+
+def test_exit_com_forward_negative_when_past_edge() -> None:
+    ch = _channel()  # exit arc 255-285
+    # COM in the middle of the exit arc (270°) is ~15° past the near edge → negative.
+    bbox = _bbox_at_angle(270.0)
+    com = exitComForwardDeg([bbox], ch)
+    assert com is not None
+    assert -17.0 <= com <= -13.0
+
+
+def test_exit_com_uses_leading_piece() -> None:
+    ch = _channel()
+    # Rear piece in drop (90°) and a leading piece at 240° (~15° from edge).
+    # The smallest forward distance wins.
+    bboxes = [_bbox_at_angle(90.0), _bbox_at_angle(240.0)]
+    com = exitComForwardDeg(bboxes, ch)
+    assert com is not None
+    assert 13.0 <= com <= 17.0
+
+
+def test_exit_com_none_without_pieces_or_exit() -> None:
+    ch = _channel()
+    assert exitComForwardDeg([], ch) is None
+    no_exit = _channel(exit_arc=(0.0, 0.0))
+    assert exitComForwardDeg([_bbox_at_angle(200.0)], no_exit) is None
+
+
+def test_exit_com_rear_arc_piece_is_not_treated_as_past_edge() -> None:
+    """Regression: a piece far around the rear of the channel must read as a
+    LARGE POSITIVE forward distance, never a large negative — otherwise the
+    fast-eject controller mistakes it for 'already at the exit' and jitters
+    forever instead of moving the real leading piece (observed live as
+    com=-157.6°). Exit arc 255-285, near edge 255."""
+    # A piece at image angle 50° is ~205° behind the near edge going forward.
+    rear = _bbox_at_angle(50.0)
+    com_rear = exitComForwardDeg([rear], _channel())
+    assert com_rear is not None
+    assert com_rear > 180.0, f"rear piece must read large positive, got {com_rear}"
+    # With a real leading piece just behind the exit (250°, ~5° behind), the
+    # leading piece — not the rear one — wins the min.
+    leading = _bbox_at_angle(250.0)
+    com = exitComForwardDeg([rear, leading], _channel())
+    assert com is not None
+    assert 3.0 <= com <= 8.0, f"leading piece should win at ~5°, got {com}"
+
+
+def test_exit_com_measures_to_exit_only_not_precise() -> None:
+    """Regression for the live false-trigger: with a precise arc (225-255)
+    drawn BEFORE the exit arc (255-285), a piece sitting in the PRECISE zone
+    (240°) must read a POSITIVE forward gap to the exit-only entry edge (255°),
+    NOT <= 0. <= 0 would mean '>=50% in the exit' and start an eject while the
+    piece never reached the real exit zone."""
+    ch = _channel(precise_arc=(225.0, 255.0))  # exit_only = 255..284, entry 255
+    # Piece centered in the precise band — short of the exit zone by ~15°.
+    com_precise = exitComForwardDeg([_bbox_at_angle(240.0)], ch)
+    assert com_precise is not None
+    assert com_precise > 0.0, f"precise-zone piece must read positive gap, got {com_precise}"
+    assert 13.0 <= com_precise <= 17.0
+    # A piece actually in the exit-only region (270°) reads negative (>=50% in).
+    com_exit = exitComForwardDeg([_bbox_at_angle(270.0)], ch)
+    assert com_exit is not None
+    assert com_exit < 0.0, f"exit-zone piece must read negative gap, got {com_exit}"
 
 
 # --- equivalence with legacy section math ----------------------------------

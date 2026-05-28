@@ -130,6 +130,77 @@ def forwardClearanceToExitDeg(
     return float(best) * SECTION_DEG
 
 
+def exitOnlySections(channel: ChannelDef) -> frozenset[int]:
+    """The REAL exit (fall-off) region: the exit arc with the precise arc removed.
+
+    ``ChannelDef.exit_sections`` is the union of the exit and precise arcs (what
+    the cascade reads as ``in_exit``). But the precise zone is a separate,
+    independently-drawn arc the piece passes through BEFORE the fall-off region.
+    The eject must act on the fall-off region only, so it works against this set.
+    Falls back to the full ``exit_sections`` when no separate exit arc was drawn
+    (i.e. exit == precise), so a single-arc channel still has a target.
+    """
+    exit_only = channel.exit_sections - channel.precise_sections
+    return exit_only if exit_only else channel.exit_sections
+
+
+def exitComForwardDeg(
+    bboxes: Iterable[Bbox], channel: ChannelDef
+) -> float | None:
+    """Signed forward distance (output/channel degrees) from the LEADING
+    on-channel piece's bbox center-of-mass to the entry (near) edge of the REAL
+    exit region (``exitOnlySections`` — exit arc minus precise arc).
+
+    > 0  : the COM is still this many channel-degrees SHORT of the exit zone —
+           advance the rotor forward this much to bring the COM onto the edge.
+    <= 0 : the COM has crossed the exit-zone entry edge. Because the COM is the
+           bbox centroid, crossing the edge means the piece is >= 50% inside the
+           exit region. Magnitude = degrees past the entry edge.
+
+    The "leading" piece is the one with the smallest such value — either the
+    piece closest to the exit from behind, or the piece furthest into the exit.
+    ``None`` when there is no on-channel piece or the channel has no exit arc.
+
+    Sign convention / branch cut (this is the subtle part): the forward distance
+    behind the entry edge is ``(near - relative) % 360`` in ``[0, 360)``. A piece
+    on the FAR/rear arc of the channel therefore reads as a large POSITIVE value
+    (e.g. ~200°), NOT a negative one — it must never be mistaken for "already at
+    the exit." Only a piece whose COM section actually lands inside the exit-only
+    region is folded to a small negative (its degrees past the entry edge). The
+    branch cut thus sits at the exit-only zone, not at ±180° from the edge.
+
+    Cheap — one ``arctan2`` per bbox center (no grid sampling), so it is safe to
+    compute every frame on the inference worker thread alongside the existing
+    attribution.
+    """
+    exit_only = exitOnlySections(channel)
+    ordered = _orderedCircularSections(exit_only)
+    if not ordered:
+        return None
+    near = ordered[0]
+    near_angle = float(near) * SECTION_DEG
+    cx0, cy0 = channel.center
+    r1 = channel.radius1_angle_image
+    best: float | None = None
+    for bbox in bboxes:
+        if not bboxInsideChannelMask(bbox, channel):
+            continue
+        mx, my = bboxCenter(bbox)
+        angle = float(np.degrees(np.arctan2(my - cy0, mx - cx0)))
+        relative = (angle - r1) % 360.0
+        sec = int(relative / SECTION_DEG) % SECTION_COUNT
+        # Degrees the COM sits BEHIND the entry edge, in [0, 360).
+        forward = (near_angle - relative) % 360.0
+        # Only when the COM is genuinely inside the exit-only zone do we express
+        # it as negative (past the entry edge). The ``forward > 180`` guard keeps
+        # a COM exactly on the entry edge at 0 rather than folding it to -360.
+        if sec in exit_only and forward > 180.0:
+            forward -= 360.0
+        if best is None or forward < best:
+            best = forward
+    return best
+
+
 _AREA_GRID_N = 12  # 12x12 = 144 sample points per bbox; ample for area majority
 
 # Per-channel cached region lookup: section_id → 0=none 1=drop 2=exit_only 3=precise.
