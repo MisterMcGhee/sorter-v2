@@ -20,10 +20,10 @@
 
 	const DEFAULTS: JitterSettings = {
 		stepper: 'c_channel_1',
-		amplitudeDeg: 2,
-		cycles: 20,
-		speed: 4000,
-		acceleration: 60000
+		amplitudeDeg: 6,
+		cycles: 12,
+		speed: 5000,
+		acceleration: 100000
 	};
 
 	type JitterPreset = {
@@ -35,22 +35,27 @@
 		acceleration: number;
 	};
 
-	// Amplitude is per-stroke MOTOR degrees (before gear reduction). Speeds in
-	// µsteps/s (firmware caps at 60000); accel in µsteps/s². Higher accel = sharper
-	// jerk; small amplitude keeps total travel tiny.
+	// Amplitude is per-stroke MOTOR degrees (before gear reduction); the big gear
+	// ratio means even "medium" motor amplitudes are a small rotor swing. Speeds
+	// in µsteps/s (firmware caps at 60000); accel in µsteps/s². "Heavy Stuck"
+	// (6° / 12c / 5000 / 100000) is the reference that visibly worked — medium
+	// travel, medium strength, medium length. The others are variants around it:
+	// travel = amplitude, length = cycles, strength = speed + accel.
 	const PRESETS: JitterPreset[] = [
-		{ name: 'Gentle Tap', blurb: 'Soft, low-energy nudge', amplitudeDeg: 1, cycles: 5, speed: 2000, acceleration: 30000 },
-		{ name: 'Default', blurb: 'Balanced starting point', amplitudeDeg: 2, cycles: 20, speed: 4000, acceleration: 60000 },
-		{ name: 'Micro Dither', blurb: 'Tiny, very fast flutter', amplitudeDeg: 0.5, cycles: 30, speed: 3000, acceleration: 60000 },
-		{ name: 'Fast Buzz', blurb: 'High-frequency small strokes', amplitudeDeg: 1, cycles: 40, speed: 5000, acceleration: 80000 },
-		{ name: 'Sharp Snap', blurb: 'Hard jerk, short throw', amplitudeDeg: 1.5, cycles: 15, speed: 4000, acceleration: 120000 },
-		{ name: 'Hard Kick', blurb: 'Aggressive, few strokes', amplitudeDeg: 3, cycles: 8, speed: 6000, acceleration: 150000 },
-		{ name: 'Wide Nudge', blurb: 'Bigger swing, moderate', amplitudeDeg: 5, cycles: 10, speed: 4000, acceleration: 40000 },
-		{ name: 'Slow Rock', blurb: 'Slow, gentle rocking', amplitudeDeg: 4, cycles: 6, speed: 1500, acceleration: 20000 },
-		{ name: 'Quick Triple', blurb: 'Three brisk shakes', amplitudeDeg: 2, cycles: 3, speed: 4000, acceleration: 80000 },
-		{ name: 'Long Shake', blurb: 'Sustained, persistent', amplitudeDeg: 2, cycles: 60, speed: 4000, acceleration: 60000 },
-		{ name: 'Heavy Stuck', blurb: 'For a really jammed piece', amplitudeDeg: 6, cycles: 12, speed: 5000, acceleration: 100000 },
-		{ name: 'Endurance', blurb: 'Long, fast, persistent buzz', amplitudeDeg: 1.5, cycles: 100, speed: 5000, acceleration: 90000 }
+		{ name: 'Heavy Stuck', blurb: 'Reference — medium everything (the one that worked)', amplitudeDeg: 6, cycles: 12, speed: 5000, acceleration: 100000 },
+		{ name: 'Quick Stuck', blurb: 'Same force & travel, shorter', amplitudeDeg: 6, cycles: 6, speed: 5000, acceleration: 100000 },
+		{ name: 'Brief Stuck', blurb: 'Same force & travel, very short burst', amplitudeDeg: 6, cycles: 3, speed: 5000, acceleration: 100000 },
+		{ name: 'Sharp & Short', blurb: 'Stronger jerk, shorter', amplitudeDeg: 6, cycles: 6, speed: 6500, acceleration: 180000 },
+		{ name: 'Hard Snap', blurb: 'Max jerk, tiny burst', amplitudeDeg: 6, cycles: 3, speed: 7000, acceleration: 220000 },
+		{ name: 'Soft & Long', blurb: 'Softer but longer', amplitudeDeg: 5, cycles: 30, speed: 3500, acceleration: 55000 },
+		{ name: 'Gentle Marathon', blurb: 'Very soft, very long', amplitudeDeg: 4, cycles: 50, speed: 3000, acceleration: 45000 },
+		{ name: 'Big Travel', blurb: 'More throw, medium length', amplitudeDeg: 9, cycles: 12, speed: 5000, acceleration: 110000 },
+		{ name: 'Big & Brief', blurb: 'Big throw, short', amplitudeDeg: 9, cycles: 5, speed: 6000, acceleration: 150000 },
+		{ name: 'Big & Hard', blurb: 'Big throw, strong jerk', amplitudeDeg: 9, cycles: 8, speed: 6500, acceleration: 200000 },
+		{ name: 'Max Shake', blurb: 'Largest throw, strong', amplitudeDeg: 13, cycles: 12, speed: 6500, acceleration: 190000 },
+		{ name: 'Wide & Soft', blurb: 'Big throw but gentle, long', amplitudeDeg: 9, cycles: 16, speed: 3500, acceleration: 55000 },
+		{ name: 'Fast Buzz', blurb: 'Medium throw, fast & long', amplitudeDeg: 6, cycles: 24, speed: 6000, acceleration: 150000 },
+		{ name: 'Strong & Long', blurb: 'Strong and persistent', amplitudeDeg: 8, cycles: 30, speed: 6000, acceleration: 140000 }
 	];
 
 	const STORAGE_KEY = 'jitter-test:settings';

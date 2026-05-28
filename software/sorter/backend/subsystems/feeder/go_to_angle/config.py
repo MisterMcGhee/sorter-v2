@@ -34,6 +34,18 @@ class GoToAngleConfig:
     enable_ch2: bool = True
     enable_ch3: bool = True
 
+    # Jitter unstick for a piece lingering in the exit-only sub-arc (precise
+    # zone excluded — pieces parked there are normal hand-offs to C4). After
+    # ``jitter_exit_dwell_ms`` of continuous exit-only dwell, oscillate up to
+    # 3 times with ``jitter_pause_ms`` between attempts. Reset on leave.
+    # Perception path only (see flow.py:_jitter_tick).
+    jitter_exit_dwell_ms: int = 1500
+    jitter_pause_ms: int = 350
+    jitter_amplitude_motor_deg: float = 6.0
+    jitter_cycles: int = 8
+    jitter_speed_usteps_per_s: int = 5000
+    jitter_accel_usteps_per_s2: int = 100000
+
 
 _DEFAULTS = GoToAngleConfig()
 
@@ -53,6 +65,12 @@ FIELD_META: list[dict] = [
     {"key": "enable_ch1", "label": "Enable C1 (bulk)", "type": "bool", "default": _DEFAULTS.enable_ch1},
     {"key": "enable_ch2", "label": "Enable C2", "type": "bool", "default": _DEFAULTS.enable_ch2},
     {"key": "enable_ch3", "label": "Enable C3", "type": "bool", "default": _DEFAULTS.enable_ch3},
+    {"key": "jitter_exit_dwell_ms", "label": "Jitter: exit dwell before trigger (ms)", "type": "int", "default": _DEFAULTS.jitter_exit_dwell_ms},
+    {"key": "jitter_pause_ms", "label": "Jitter: pause between attempts (ms)", "type": "int", "default": _DEFAULTS.jitter_pause_ms},
+    {"key": "jitter_amplitude_motor_deg", "label": "Jitter amplitude (motor deg)", "type": "float", "default": _DEFAULTS.jitter_amplitude_motor_deg},
+    {"key": "jitter_cycles", "label": "Jitter cycles per burst", "type": "int", "default": _DEFAULTS.jitter_cycles},
+    {"key": "jitter_speed_usteps_per_s", "label": "Jitter speed (\u00b5steps/s)", "type": "int", "default": _DEFAULTS.jitter_speed_usteps_per_s},
+    {"key": "jitter_accel_usteps_per_s2", "label": "Jitter accel (\u00b5steps/s\u00b2)", "type": "int", "default": _DEFAULTS.jitter_accel_usteps_per_s2},
 ]
 
 

@@ -26,6 +26,17 @@ class ChannelState:
     in_drop: bool
     in_exit: bool
     n_pieces: int
+    # True when at least one on-channel piece is in the precise sub-arc of the
+    # exit zone. ``in_exit`` (the union of exit + precise) stays the trigger for
+    # the cascade's PRECISE pulse; ``in_precise`` lets callers ask the narrower
+    # "is this piece specifically in the precise zone" question.
+    in_precise: bool = False
+    # True when at least one on-channel piece has strictly more bbox sample
+    # points in the exit-only sub-arc than in the precise arc — i.e. the piece
+    # is "majority in the exit zone, not the precise zone." Jitter unstick uses
+    # this as its trigger so a piece straddling the exit/precise boundary still
+    # starts the dwell timer once it is mostly past the precise zone.
+    in_exit_majority: bool = False
     # Forward distance (output degrees) from the most-forward on-channel piece
     # to the near edge of the exit zone — the largest advance possible without
     # pushing a piece into the exit zone. ``None`` when there is no on-channel

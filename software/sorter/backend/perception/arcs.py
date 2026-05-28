@@ -130,15 +130,95 @@ def forwardClearanceToExitDeg(
     return float(best) * SECTION_DEG
 
 
+_AREA_GRID_N = 12  # 12x12 = 144 sample points per bbox; ample for area majority
+
+# Per-channel cached region lookup: section_id → 0=none 1=drop 2=exit_only 3=precise.
+# Keyed by channel_id; built once on first call and reused. The section sets are
+# immutable after ChannelDef construction so this never goes stale.
+_region_lookup_cache: dict[int, np.ndarray] = {}
+
+
+def _region_lookup(channel: ChannelDef) -> np.ndarray:
+    cached = _region_lookup_cache.get(channel.channel_id)
+    if cached is not None:
+        return cached
+    exit_only = channel.exit_sections - channel.precise_sections
+    lut = np.zeros(SECTION_COUNT, dtype=np.int8)
+    for s in channel.drop_sections:
+        lut[int(s) % SECTION_COUNT] = 1
+    for s in exit_only:
+        lut[int(s) % SECTION_COUNT] = 2
+    for s in channel.precise_sections:
+        lut[int(s) % SECTION_COUNT] = 3
+    _region_lookup_cache[channel.channel_id] = lut
+    return lut
+
+
+def _bboxRegionCounts(
+    bbox: Bbox, channel: ChannelDef
+) -> tuple[int, int, int, int]:
+    """``(n_drop, n_exit_only, n_precise, n_on_channel)`` — count of grid sample
+    points whose section falls in each region. Samples a uniform NxN grid
+    across the bbox AREA (not just its boundary) so counts reflect true area
+    overlap. Off-channel-mask points are skipped. Fully vectorized via numpy:
+    ~0.1 ms per call vs ~10 ms for the old Python for-loop.
+    """
+    x1, y1, x2, y2 = bbox
+    cx0, cy0 = channel.center
+    r1 = channel.radius1_angle_image
+    h, w = channel.mask.shape[:2]
+
+    dx = (x2 - x1) / float(_AREA_GRID_N)
+    dy = (y2 - y1) / float(_AREA_GRID_N)
+    xs = x1 + (np.arange(_AREA_GRID_N, dtype=np.float64) + 0.5) * dx
+    ys = y1 + (np.arange(_AREA_GRID_N, dtype=np.float64) + 0.5) * dy
+    xx, yy = np.meshgrid(xs, ys)  # (N, N)
+
+    ix = xx.astype(np.int32)
+    iy = yy.astype(np.int32)
+    in_bounds = (ix >= 0) & (ix < w) & (iy >= 0) & (iy < h)
+    ix_safe = np.clip(ix, 0, w - 1)
+    iy_safe = np.clip(iy, 0, h - 1)
+    on_mask = in_bounds & (channel.mask[iy_safe, ix_safe] > 0)
+
+    n_on_channel = int(on_mask.sum())
+    if n_on_channel == 0:
+        return 0, 0, 0, 0
+
+    angles = np.degrees(np.arctan2(yy - cy0, xx - cx0))
+    relative = (angles - r1) % 360.0
+    sec = (relative / SECTION_DEG).astype(np.int32) % SECTION_COUNT
+
+    codes = _region_lookup(channel)[sec[on_mask]]
+    n_drop = int((codes == 1).sum())
+    n_exit_only = int((codes == 2).sum())
+    n_precise = int((codes == 3).sum())
+    return n_drop, n_exit_only, n_precise, n_on_channel
+
+
 def attributeBboxes(
     bboxes: Iterable[Bbox], channel: ChannelDef
-) -> tuple[bool, bool, int]:
-    """Aggregate over multiple bboxes. Returns ``(any_in_drop, any_in_exit,
-    n_on_channel)`` so the slot can carry a simple count for debugging /
-    UI without leaking bbox coordinates to the coordinator."""
+) -> tuple[bool, bool, bool, bool, int, list[tuple[int, int, int, int, Bbox]]]:
+    """Aggregate over multiple bboxes. Returns
+    ``(any_in_drop, any_in_exit, any_in_precise, any_exit_majority,
+       n_on_channel, per_bbox_counts)``.
+
+    - ``any_in_exit`` keeps the union semantics (exit + precise arcs).
+    - ``any_in_precise`` is precise-arc-only.
+    - ``any_exit_majority`` is True when at least one on-channel bbox has
+      strictly more grid-area points in the exit-only sub-arc than in the
+      precise arc. Trigger for jitter unstick.
+    - ``per_bbox_counts`` is a list of
+      ``(n_drop, n_exit_only, n_precise, n_in_mask, bbox)`` tuples for each
+      on-channel bbox, for diagnostics/logging. Only on-channel bboxes are
+      included.
+    """
     any_drop = False
     any_exit = False
+    any_precise = False
+    any_exit_majority = False
     n_on_channel = 0
+    per_bbox_counts: list[tuple[int, int, int, int, Bbox]] = []
     for bbox in bboxes:
         if not bboxInsideChannelMask(bbox, channel):
             continue
@@ -148,4 +228,10 @@ def attributeBboxes(
             any_drop = True
         if not any_exit and sections & channel.exit_sections:
             any_exit = True
-    return any_drop, any_exit, n_on_channel
+        if not any_precise and sections & channel.precise_sections:
+            any_precise = True
+        nd, ne, np_, nm = _bboxRegionCounts(bbox, channel)
+        per_bbox_counts.append((nd, ne, np_, nm, bbox))
+        if not any_exit_majority and ne > np_ and ne > 0:
+            any_exit_majority = True
+    return any_drop, any_exit, any_precise, any_exit_majority, n_on_channel, per_bbox_counts

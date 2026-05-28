@@ -46,10 +46,16 @@ def test_rev01_config_parses_capture_sweep_output_deg() -> None:
     assert cfg.capture_sweep_output_deg == 135.5
 
 
-def test_rev01_config_parses_kick_off_output_deg() -> None:
-    cfg = configFromDict({"kick_off_output_deg": 72.0})
+def test_rev01_config_parses_verify_discharge_fields() -> None:
+    cfg = configFromDict(
+        {
+            "verify_discharge_wait_ms": 750,
+            "verify_discharge_max_jitter_attempts": 5,
+        }
+    )
 
-    assert cfg.kick_off_output_deg == 72.0
+    assert cfg.verify_discharge_wait_ms == 750
+    assert cfg.verify_discharge_max_jitter_attempts == 5
 
 
 class _Logger:
@@ -86,12 +92,19 @@ class _Vision:
         return [[0, 0], [1, 0], [1, 1], [0, 1]]
 
 
-def test_rev01_discharging_uses_forward_kick_off_move() -> None:
+def test_rev01_discharging_falls_back_when_no_bbox_and_transitions_to_verify() -> None:
+    # _Vision returns no detections, so the discharge path takes the
+    # "lost the piece" fallback: a fixed forward move of
+    # 2 * drop_tolerance_deg output degrees. Verifies the transition target
+    # is the new verifier state, not IDLE.
     stepper = _Stepper()
     state = Discharging(
         irl=SimpleNamespace(carousel_stepper=stepper),
         irl_config=SimpleNamespace(
-            classification_channel_config=SimpleNamespace(),
+            classification_channel_config=SimpleNamespace(
+                drop_angle_deg=30.0,
+                drop_tolerance_deg=14.0,
+            ),
         ),
         gc=SimpleNamespace(logger=_Logger()),
         shared=SimpleNamespace(),
@@ -100,7 +113,6 @@ def test_rev01_discharging_uses_forward_kick_off_move() -> None:
         event_queue=SimpleNamespace(put=lambda *args, **kwargs: None),
         context=SimpleNamespace(
             config=Rev01Config(
-                kick_off_output_deg=72.0,
                 discharge_speed_usteps_per_s=3000,
                 post_discharge_pause_ms=0.0,
             ),
@@ -111,5 +123,8 @@ def test_rev01_discharging_uses_forward_kick_off_move() -> None:
 
     next_state = state.step()
 
-    assert next_state == ClassificationChannelState.IDLE
-    assert stepper.moves == [3467]
+    # Fallback output_deg = 2 * 14.0 = 28.0°. With default C4 platter
+    # (200 steps/rev * 8 microsteps * 130/12 gear ratio = 17333.33 µsteps/output_rev),
+    # 28°/360 * 17333.33 ≈ 1348 microsteps.
+    assert next_state == ClassificationChannelState.REV01_VERIFYING_DISCHARGE
+    assert stepper.moves == [1348]

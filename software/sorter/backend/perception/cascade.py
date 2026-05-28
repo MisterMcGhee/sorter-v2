@@ -5,6 +5,11 @@ Pure function. Read the doc at
 canonical channel behavior. C4 is consumed here (to gate C3) but its own
 motion belongs to the classification-channel state machine, not this
 function.
+
+THIS IS THE CORE DECISION SOURCE FOR THE PURE REV04 / GO_TO_ANGLE_REV01
+PERCEPTION PATH (when perception_service is active). The go-to-angle jitter
+logic reads ChannelState.in_exit etc. that ultimately come from the
+inference workers feeding these slots.
 """
 
 from __future__ import annotations

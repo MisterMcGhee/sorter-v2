@@ -112,6 +112,12 @@ class InferenceWorker:
         self._last_frame_ts: float = -1.0
         self._was_in_exit: bool = False
 
+        # Latest raw inference result — GIL-atomic tuple ref, same pattern as
+        # LatestStateSlot. Written after every successful inference so the
+        # classification channel state machine can read bboxes + the exact
+        # frame they were computed against without triggering a new inference.
+        self._latest_raw: Optional[tuple] = None
+
         # Public counters — read by the smoke test.
         self.iterations: int = 0
         self.inferences: int = 0
@@ -131,6 +137,12 @@ class InferenceWorker:
     @property
     def source_id(self) -> str:
         return self._channel_def.camera_source_id
+
+    @property
+    def latest_raw(self) -> Optional[tuple]:
+        """Latest ``(bboxes, PerceptionFrame)`` pair from the last successful
+        inference. GIL-atomic read — no lock required."""
+        return self._latest_raw
 
     def start(self) -> None:
         self._stop.clear()
@@ -173,6 +185,53 @@ class InferenceWorker:
                 pass
         self._was_in_exit = in_exit_now
 
+    def _maybe_log_attribution(
+        self,
+        in_exit: bool,
+        in_precise: bool,
+        in_exit_majority: bool,
+        per_bbox_counts: list,
+    ) -> None:
+        """Log every frame where the piece is anywhere in the exit-union (so
+        we capture both the "should jitter" and "should NOT jitter" cases).
+        Each on-channel bbox is reported with n_drop / n_exit_only / n_precise
+        / n_in_mask grid-point counts — these are the actual area-overlap
+        numbers driving the in_exit_majority trigger. Channel section set
+        sizes are appended so it's obvious if precise_sections is empty
+        (which would silently degrade exit_only → full exit union).
+        """
+        if self._logger is None:
+            return
+        if not in_exit and not in_exit_majority:
+            return
+        ch = self._channel_def
+        exit_only_size = len(ch.exit_sections - ch.precise_sections)
+        bbox_strs = []
+        for nd, ne, np_, nm, bbox in per_bbox_counts:
+            x1, y1, x2, y2 = bbox
+            total_grid = nd + ne + np_
+            pct_e = (100.0 * ne / total_grid) if total_grid else 0.0
+            pct_p = (100.0 * np_ / total_grid) if total_grid else 0.0
+            bbox_strs.append(
+                f"bbox=({x1},{y1},{x2},{y2}) n_drop={nd} n_exit_only={ne} "
+                f"n_precise={np_} n_in_mask={nm} "
+                f"({pct_e:.0f}%E/{pct_p:.0f}%P of regions)"
+            )
+        bbox_summary = " | ".join(bbox_strs) if bbox_strs else "(no on-channel bboxes)"
+        try:
+            self._logger.info(
+                f"[perception ch={ch.channel_id} src={ch.camera_source_id}] "
+                f"in_exit={in_exit} in_precise={in_precise} "
+                f"in_exit_majority={in_exit_majority} | "
+                f"section_sizes drop={len(ch.drop_sections)} "
+                f"exit_union={len(ch.exit_sections)} "
+                f"precise={len(ch.precise_sections)} "
+                f"exit_only={exit_only_size} | "
+                f"{bbox_summary}"
+            )
+        except Exception:
+            pass
+
     def _loop(self) -> None:
         while not self._stop.is_set():
             self.iterations += 1
@@ -208,7 +267,9 @@ class InferenceWorker:
                 infer_ms = _now_ms() - infer_t0
 
                 attribute_t0 = _now_ms()
-                in_drop, in_exit, n_pieces = attributeBboxes(bboxes, self._channel_def)
+                in_drop, in_exit, in_precise, in_exit_majority, n_pieces, per_bbox_counts = attributeBboxes(
+                    bboxes, self._channel_def
+                )
                 advance_clearance_deg = forwardClearanceToExitDeg(
                     bboxes, self._channel_def
                 )
@@ -219,10 +280,16 @@ class InferenceWorker:
                     in_drop=in_drop,
                     in_exit=in_exit,
                     n_pieces=n_pieces,
+                    in_precise=in_precise,
+                    in_exit_majority=in_exit_majority,
                     advance_clearance_deg=advance_clearance_deg,
                 )
                 self._slot.write(state)
+                self._latest_raw = (list(bboxes), frame)
                 self._maybe_emit_exit_edge(frame.timestamp, in_exit)
+                self._maybe_log_attribution(
+                    in_exit, in_precise, in_exit_majority, per_bbox_counts
+                )
                 self._last_frame_ts = frame.timestamp
                 self.inferences += 1
 

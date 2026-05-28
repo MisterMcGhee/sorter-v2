@@ -46,12 +46,13 @@ class ChannelDef:
     radius1_angle_image: float
     mask: np.ndarray
     drop_sections: frozenset[int]
-    # The exit verdict (``in_exit``) unions the exit and precise arcs: callers
-    # that "look at the exit" see both as one region. The two arcs are kept
-    # apart in the saved schema and the editor so their behavior can diverge
-    # later, but here — the single place perception turns arcs into the section
-    # set the cascade reads — they are merged.
+    # ``exit_sections`` unions the exit and precise arcs — this is what the
+    # cascade reads as "in_exit" and what gates the precise-pulse decision.
+    # ``precise_sections`` is the precise sub-arc on its own, kept separate so
+    # callers that need "exit but not precise" (e.g. jitter-unstick dwell) can
+    # tell the two apart.
     exit_sections: frozenset[int]
+    precise_sections: frozenset[int] = frozenset()
 
     @property
     def has_zones(self) -> bool:
@@ -101,6 +102,25 @@ def _parse_arc(
     return float(start), float(end)
 
 
+def _parse_arc_center(
+    arc_params_entry: Mapping[str, Any] | None,
+) -> tuple[float, float] | None:
+    """The arc center from the saved blob — the radial pivot the saved angles
+    are measured from. THIS is the angle reference, not the polygon centroid.
+    The UI's zone overlay (``handdrawn_region_provider._channelMask``) uses
+    ``arc.center`` for the exact same reason; perception must match or its
+    section→pixel mapping silently drifts."""
+    if not isinstance(arc_params_entry, Mapping):
+        return None
+    raw = arc_params_entry.get("center")
+    if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+        return None
+    cx, cy = raw[0], raw[1]
+    if not isinstance(cx, (int, float)) or not isinstance(cy, (int, float)):
+        return None
+    return float(cx), float(cy)
+
+
 # ---------------------------------------------------------------------------
 # ChannelDef construction
 # ---------------------------------------------------------------------------
@@ -115,9 +135,19 @@ def buildChannelDef(
     drop_arc: tuple[float, float] | None,
     exit_arc: tuple[float, float] | None,
     precise_arc: tuple[float, float] | None,
+    arc_center: tuple[float, float] | None = None,
 ) -> ChannelDef:
     """Pure builder. Used directly by tests; the on-disk loader below is the
     production entry point but defers to this for the actual construction.
+
+    ``arc_center`` is the radial pivot the saved arc start/end angles are
+    measured from — the carousel/channel rotation center in image space. The
+    UI overlay draws zones using this same point, so passing it here keeps
+    perception's section→pixel mapping in lock-step with the UI. If omitted,
+    the polygon centroid is used as a fallback (kept for unit tests that
+    don't load arc_params), but production callers MUST pass arc_center; an
+    empty/missing arc_center on the loader path is logged loudly and is the
+    most common silent-drift footgun for this subsystem.
     """
     if channel_id not in CHANNEL_REGISTRY:
         raise ValueError(f"unknown perception channel_id={channel_id}")
@@ -127,7 +157,12 @@ def buildChannelDef(
     mask = np.zeros((h, w), dtype=np.uint8)
     if polygon is not None and len(polygon) >= 3:
         cv2.fillPoly(mask, [polygon.astype(np.int32)], 255)
-    center = tuple(np.mean(polygon, axis=0).tolist()) if polygon is not None and len(polygon) >= 3 else (w / 2.0, h / 2.0)
+    if arc_center is not None:
+        center = (float(arc_center[0]), float(arc_center[1]))
+    elif polygon is not None and len(polygon) >= 3:
+        center = tuple(np.mean(polygon, axis=0).tolist())
+    else:
+        center = (w / 2.0, h / 2.0)
 
     drop_sections = (
         _section_set_for_arc(drop_arc[0], drop_arc[1], section_zero_angle)
@@ -153,6 +188,7 @@ def buildChannelDef(
         mask=mask,
         drop_sections=drop_sections,
         exit_sections=exit_sections | precise_sections,
+        precise_sections=precise_sections,
     )
 
 
@@ -189,6 +225,7 @@ def loadChannelDefs(
         drop_arc = _parse_arc(arc_entry, "drop_zone")
         exit_arc = _parse_arc(arc_entry, "exit_zone")
         precise_arc = _parse_arc(arc_entry, "precise_zone")
+        arc_center = _parse_arc_center(arc_entry)
         out[channel_id] = buildChannelDef(
             channel_id=channel_id,
             polygon=np.asarray(polygon),
@@ -197,5 +234,6 @@ def loadChannelDefs(
             drop_arc=drop_arc,
             exit_arc=exit_arc,
             precise_arc=precise_arc,
+            arc_center=arc_center,
         )
     return out

@@ -105,6 +105,19 @@ class PerceptionService:
         slot = self._slots.get(channel_id)
         return slot.read() if slot is not None else EMPTY_STATE
 
+    def read_bboxes_and_frame(self, channel_id: int):
+        """Latest ``(bboxes, PerceptionFrame)`` from the last inference cycle
+        for this channel. Returns ``None`` if the worker hasn't completed a
+        cycle yet. GIL-atomic — no lock. Callers must not mutate the list."""
+        worker = self._workers.get(channel_id)
+        return worker.latest_raw if worker is not None else None
+
+    def channel_center(self, channel_id: int):
+        """Center pixel of the channel's rotation arc as ``(cx, cy)``, or
+        ``None`` if the channel isn't wired in this service instance."""
+        ch = self._channels.get(channel_id)
+        return ch.center if ch is not None else None
+
     # --- introspection --------------------------------------------------
 
     def channels(self) -> Dict[int, ChannelDef]:
@@ -112,6 +125,12 @@ class PerceptionService:
 
     def workers(self) -> Dict[int, InferenceWorker]:
         return dict(self._workers)
+
+    def captures(self) -> Dict[int, CaptureWorker]:
+        return dict(self._captures)
+
+    def runtimes(self) -> Dict[int, InferenceRuntime]:
+        return dict(self._runtimes)
 
     def source_id_assertion_count(self) -> int:
         return sum(w.source_id_assertions for w in self._workers.values())
@@ -256,6 +275,59 @@ def build(
         arc_params=arc_params,
         frame_shape_by_role=frame_shape_by_role,
     )
+    # Diagnostic: dump per-channel section set sizes + arc_center used + raw
+    # arc_params keys. Hard-fails if the arc_center is missing on a built
+    # channel — without it, perception's section→pixel mapping silently drifts
+    # from the UI's (sections are stored as image-frame angles measured from
+    # arc_params.center; using the polygon centroid as the angle reference
+    # rotates every zone).
+    try:
+        for ch_id, ch_def in channels.items():
+            exit_only = ch_def.exit_sections - ch_def.precise_sections
+            polygon = saved_polygons.get(CHANNEL_REGISTRY[ch_id][1])
+            polygon_centroid = (
+                tuple(np.mean(polygon, axis=0).tolist())
+                if polygon is not None and len(polygon) >= 3
+                else None
+            )
+            angle_key = CHANNEL_REGISTRY[ch_id][2]
+            polygon_key = CHANNEL_REGISTRY[ch_id][1]
+            arc_entry = arc_params.get(polygon_key) or arc_params.get(angle_key)
+            arc_keys = list(arc_entry.keys()) if isinstance(arc_entry, dict) else None
+            arc_center_raw = (
+                arc_entry.get("center") if isinstance(arc_entry, dict) else None
+            )
+            centers_agree = (
+                polygon_centroid is not None
+                and arc_center_raw is not None
+                and abs(ch_def.center[0] - float(arc_center_raw[0])) < 1e-3
+                and abs(ch_def.center[1] - float(arc_center_raw[1])) < 1e-3
+            )
+            gc.logger.info(
+                f"[perception loadChannelDefs] ch={ch_id} src={ch_def.camera_source_id} "
+                f"section_zero_angle={ch_def.radius1_angle_image:.2f} | "
+                f"|drop|={len(ch_def.drop_sections)} "
+                f"|exit_union|={len(ch_def.exit_sections)} "
+                f"|precise|={len(ch_def.precise_sections)} "
+                f"|exit_only|={len(exit_only)} | "
+                f"used_center={ch_def.center} "
+                f"arc_center={arc_center_raw} "
+                f"polygon_centroid={polygon_centroid} "
+                f"matches_arc_center={centers_agree} | "
+                f"arc_entry_keys={arc_keys}"
+            )
+            if arc_center_raw is None:
+                gc.logger.error(
+                    f"[perception loadChannelDefs] ch={ch_id}: arc_params has NO 'center' key. "
+                    f"Falling back to polygon centroid — section→pixel mapping WILL be wrong "
+                    f"(rotated) and will not match the UI overlay. Fix the saved arc_params blob "
+                    f"in local_state and reload."
+                )
+        gc.logger.info(
+            f"[perception loadChannelDefs] top-level arc_params keys={list(arc_params.keys())}"
+        )
+    except Exception as exc:
+        gc.logger.warning(f"[perception loadChannelDefs] diagnostic log failed: {exc}")
 
     # 3. Per-channel algorithm IDs from config → (model_path, imgsz).
     feeder_config = getFeederDetectionConfig()

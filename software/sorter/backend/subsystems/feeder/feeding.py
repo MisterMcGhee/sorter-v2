@@ -1,3 +1,18 @@
+# =============================================================================
+# LEGACY FEEDER PATH (DROP_ZONE_REACTIVE_REV01) — IGNORE FOR GO-TO-ANGLE / REV04 WORK
+# =============================================================================
+# This entire file + everything it imports (subsystems/channels/*, feeder/strategies/*,
+# DropzoneStuckIncidentManager, C1JamRecoveryStrategy, the pulse/admission/incident
+# machinery, etc.) is ONLY active when FeederMode == DROP_ZONE_REACTIVE_REV01.
+#
+# For the current Rev04 effort (jitter unstick on exit regions, perception cascade,
+# go-to-angle precise/advance logic) the ONLY relevant feeder code is:
+#   subsystems/feeder/go_to_angle/flow.py  (and its config + geometry)
+#   + the state_machine.py selection for GO_TO_ANGLE_REV01
+#
+# Do not add jitter, dwell tracking, or Rev04 perception logic here.
+# =============================================================================
+
 import time
 from typing import Optional, TYPE_CHECKING
 import server.shared_state as shared_state

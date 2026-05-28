@@ -7,6 +7,27 @@ from irl.config import IRLInterface, IRLConfig, FeederMode
 from global_config import GlobalConfig
 from vision import VisionManager
 
+# =============================================================================
+# FEEDER CONTROL PATHS — ONLY ONE MATTERS FOR CURRENT WORK
+# =============================================================================
+# GO_TO_ANGLE_REV01  (the only path Spencer cares about right now for jitter,
+#                    Rev04 perception, exit-region dwell logic, etc.)
+#   - Instantiates GoToAngleFeeding for the FEEDING state.
+#   - This is completely separate from the legacy reactive system.
+#   - Paired (for full Rev04) with ClassificationChannelMode.SIMPLE_STATE_MACHINE_REV01
+#     + the perception service owning detections.
+#
+# DROP_ZONE_REACTIVE_REV01  (legacy — do not touch for go-to-angle / Rev04 jitter work)
+#   - Instantiates the big Feeding class (pulses, C1/C2/C3 stations, jam recovery,
+#     dropzone incidents, ch2 separation, etc.).
+#   - All the old subsystems/channels/* , feeder/strategies/* , feeder/dropzone_incidents.py
+#     etc. are ONLY used by this path.
+#
+# The mode comes from machine.toml [feeder] mode = "go_to_angle_rev01"
+# (or the IRLConfig default). See also main.py:_perceptionModeActive and
+# vision_manager.py for the wider Rev04 pair guards.
+# =============================================================================
+
 
 class FeederStateMachine(BaseSubsystem):
     def __init__(

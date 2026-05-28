@@ -8,6 +8,13 @@ from .constants import LOG_TAG
 
 
 class Idle(Rev01BaseState):
+    """Part of the SIMPLE_STATE_MACHINE_REV01 path — the classification half of the
+    GO_TO_ANGLE_REV01 + SIMPLE_STATE_MACHINE_REV01 Rev04 pair.
+
+    The other (legacy) classification paths do not use this file or package.
+    When adding C4 exit jitter unstick later, this is the file + the rev01_config
+    jitter_* fields to focus on (symmetric to GoToAngleFeeding).
+    """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._presence_streak = 0
@@ -56,7 +63,10 @@ class Idle(Rev01BaseState):
 
         # Only an "actionable" piece (outside the exit zone) advances the
         # presence streak that triggers the capture sweep. A piece parked
-        # in the exit zone holds Idle indefinitely.
+        # in the exit zone holds Idle indefinitely. Jitter unstick (using
+        # ctx.config.jitter_* fields + dwell tracking + carousel_stepper.jitter)
+        # can be wired here symmetrically to GoToAngleFeeding when a C4 exit
+        # piece exceeds jitter_exit_dwell_ms.
         if state.in_drop or (state.n_pieces > 0 and not state.in_exit):
             self._presence_streak += 1
         else:
@@ -107,6 +117,8 @@ class Idle(Rev01BaseState):
         if not actionable:
             self._presence_streak = 0
             self.setClassificationReady(False, f"{len(bboxes)} piece(s) in exit zone")
+            # TODO: wire jitter unstick using self.ctx.config.jitter_* when
+            # exit-only dwell exceeds threshold (see GoToAngleFeeding for pattern).
             return None
 
         self._presence_streak += 1

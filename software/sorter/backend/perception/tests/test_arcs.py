@@ -156,7 +156,7 @@ def test_attribute_bboxes_aggregates_correctly() -> None:
         _bbox_at_angle(0.0),    # neither (on channel, off arcs)
         _bbox_at_angle(270.0),  # exit
     ]
-    any_drop, any_exit, n_on = attributeBboxes(bboxes, ch)
+    any_drop, any_exit, _any_precise, _any_majority, n_on, _per_bbox = attributeBboxes(bboxes, ch)
     assert any_drop
     assert any_exit
     assert n_on == 3
@@ -168,7 +168,7 @@ def test_attribute_bboxes_skips_off_channel() -> None:
     # Bbox far above the annulus — center not in mask.
     off = (10, 10, 22, 22)
     assert not bboxInsideChannelMask(off, ch)
-    any_drop, any_exit, n_on = attributeBboxes([on, off], ch)
+    any_drop, any_exit, _any_precise, _any_majority, n_on, _per_bbox2 = attributeBboxes([on, off], ch)
     assert any_drop
     assert not any_exit
     assert n_on == 1

@@ -1,7 +1,6 @@
 import time
 from typing import Optional
 
-from defs.known_object import PieceStage
 from subsystems.classification_channel.states import ClassificationChannelState
 
 from .base import Rev01BaseState
@@ -20,18 +19,19 @@ class Discharging(Rev01BaseState):
         if not self._kickoff_started:
             self.ctx.discharging_started_at = time.monotonic()
             cfg = self.ctx.config
+            output_deg = self._planDischargeOutputDeg()
             if not self.startOutputMove(
-                cfg.kick_off_output_deg,
+                output_deg,
                 cfg.discharge_speed_usteps_per_s,
             ):
                 self.logger.error(
-                    f"{LOG_TAG} could not start kick-off move — abort to IDLE"
+                    f"{LOG_TAG} could not start discharge move — abort to IDLE"
                 )
                 return ClassificationChannelState.IDLE
             self._kickoff_started = True
             self.logger.info(
-                f"{LOG_TAG} DISCHARGING kick-off started "
-                f"(output={cfg.kick_off_output_deg:.1f}°, "
+                f"{LOG_TAG} DISCHARGING move-to-exit started "
+                f"(output={output_deg:.1f}°, "
                 f"speed={cfg.discharge_speed_usteps_per_s} µsteps/s)"
             )
 
@@ -46,21 +46,41 @@ class Discharging(Rev01BaseState):
         if time.monotonic() - self._stepper_done_at < pause_s:
             return None
 
-        self._stampDistributed()
         elapsed = time.monotonic() - self.ctx.discharging_started_at
         self.logger.info(
-            f"{LOG_TAG} DISCHARGING -> IDLE (kick-off complete after {elapsed:.2f}s)"
+            f"{LOG_TAG} DISCHARGING -> VERIFYING_DISCHARGE (move complete after {elapsed:.2f}s)"
         )
-        return ClassificationChannelState.IDLE
+        return ClassificationChannelState.REV01_VERIFYING_DISCHARGE
 
-    def _stampDistributed(self) -> None:
-        obj = self.ctx.known_object
-        if obj is None:
-            return
-        obj.stage = PieceStage.distributed
-        obj.distributed_at = time.time()
-        obj.destination_bin = (0, 0, 0)
-        self.emitKnownObject()
+    def _planDischargeOutputDeg(self) -> float:
+        fallback = max(2.0, 2.0 * float(self.cc_config.drop_tolerance_deg))
+        perception_service = getattr(self.gc, "perception_service", None)
+        if perception_service is not None:
+            raw = perception_service.read_bboxes_and_frame(4)
+            bboxes = [(int(b[0]), int(b[1]), int(b[2]), int(b[3])) for b in raw[0]] if raw else []
+            center = perception_service.channel_center(4)
+        else:
+            bboxes = self.cv.bboxesOnChannel()
+            center = self.cv.channelCenter()
+        primary = self.cv.primaryBbox(bboxes)
+        if primary is None:
+            self.logger.warning(
+                f"{LOG_TAG} discharge: no bbox visible — falling back to fixed "
+                f"{fallback:.1f}° forward move"
+            )
+            return fallback
+        if center is None:
+            self.logger.warning(
+                f"{LOG_TAG} discharge: no carousel center geometry — falling back to "
+                f"{fallback:.1f}°"
+            )
+            return fallback
+        piece_angle = self.cv.bboxAngleDeg(primary, center)
+        target_angle = (
+            float(self.cc_config.drop_angle_deg) + float(self.cc_config.drop_tolerance_deg)
+        ) % 360.0
+        delta = (target_angle - piece_angle) % 360.0
+        return max(2.0, min(delta, 270.0))
 
     def cleanup(self) -> None:
         super().cleanup()
