@@ -54,10 +54,6 @@ except ImportError:
 STAMP_DIR = Path("/var/lib/sorteros")
 CONFIG_PATH = Path("/etc/sorteros-config.toml")
 STATUS_PORT = 80
-# Split so the patcher (which scans the raw .img) doesn't find these
-# occurrences instead of the real placeholder in /etc/sorteros-config.toml.
-CFG_START_MARKER = "__SORTEROS_CFG" + "_START__"
-CFG_END_MARKER = "__SORTEROS_CFG" + "_END__"
 REPO_DIR = Path("/home/orangepi/sorter-v2")
 SOFTWARE_DIR = REPO_DIR / "software"
 POLL_INTERVAL = 60
@@ -320,17 +316,17 @@ def stage_grow_rootfs() -> None:
 def stage_apply_config_toml() -> None:
     """Read /etc/sorteros-config.toml and apply it.
 
-    Keys honored — keep in sync with sorteros-setup/src/lib/img-patch.ts:
+    Written by sorteros-portal (AP captive portal) when the user submits
+    their Wi-Fi credentials. Keys honored:
       hostname              → set system hostname
       [wifi].ssid           → write NM connection (autoconnect=true)
       [wifi].password       → wpa-psk for the above
       [ssh].authorized_key  → append to orangepi user's authorized_keys
+      [tailscale].auth_key  → stored for stage_tailscale_up
     """
     cfg: dict = {}
     if CONFIG_PATH.exists():
         raw = CONFIG_PATH.read_text("utf-8", errors="replace")
-        if CFG_END_MARKER in raw:
-            raw = raw[:raw.index(CFG_END_MARKER)]
         try:
             cfg = tomllib.loads(raw)
         except Exception as e:

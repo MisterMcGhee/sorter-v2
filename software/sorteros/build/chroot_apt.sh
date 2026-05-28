@@ -34,7 +34,22 @@ apt-get install "${APT_OPTS[@]}" \
     git-lfs \
     cloud-guest-utils \
     figlet \
-    systemd-timesyncd
+    systemd-timesyncd \
+    qrencode
+
+log "installing sorteros-portal python deps"
+# Onboarding portal runs before the repo is cloned and before uv pulls the
+# backend's venv — needs its own system-wide install of fastapi+uvicorn+
+# pydantic. They land in /usr/local/lib/python3.* so `python3 portal.py`
+# works straight from the overlay'd /usr/local/sbin/.
+python3 -m pip install --no-cache-dir --break-system-packages \
+    fastapi==0.115.4 \
+    'uvicorn[standard]==0.32.0' \
+    pydantic==2.9.2 || \
+    python3 -m pip install --no-cache-dir \
+        fastapi==0.115.4 \
+        'uvicorn[standard]==0.32.0' \
+        pydantic==2.9.2
 
 # Without an enabled NTP client the system boots with a stale RTC, TLS certs
 # fail "not yet valid", and clone-repo/uv-sync/pnpm-install all bail with
@@ -58,6 +73,9 @@ rm -rf /var/lib/apt/lists/*
 # Enable the v3 services (they're installed by the overlay step).
 log "enabling sorteros-firstboot"
 systemctl enable sorteros-firstboot.service || true
+
+log "enabling sorteros-onboarding (portal)"
+systemctl enable sorteros-onboarding.service || true
 
 # NM pulls in dnsmasq as a dependency, but systemd-resolved already owns
 # port 53. Mask it so it never starts and pollutes the boot log.

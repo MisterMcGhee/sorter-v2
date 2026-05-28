@@ -118,15 +118,21 @@ written.
 
 ## Not done yet (next PRs)
 
-- **Phase 3**: `sorteros-onboarding.service` systemd unit that brings the
-  AP up at boot when `wifi-configured` is missing, with the `dnsmasq`
-  DNS-hijack override and the `nmcli con add … mode ap` profile.
-- **Phase 4**: drop the `sorteros-setup/` Vercel customizer and the
-  marker-block patching in `build/`.
-- **Phase 5**: optional reset-GPIO / factory-reset file handler that
-  drops `wifi-configured` and re-enters AP mode.
-- **Phase 6**: Tailscale-auth field in the portal frontend so a fresh
-  image can join the org tailnet without ever touching SSH first.
+- **First-hardware-boot validation**: full end-to-end test on a fresh
+  CM5 — flash → AP → smartphone captive-portal sheet → submit → handoff
+  → firstboot stages → sorter-ui. Backend can be retuned (timeouts,
+  switchover delay) based on what the real Wi-Fi chip does.
+- **Reset-GPIO / factory-reset**: long-press handler that deletes
+  `/var/lib/sorteros/wifi-configured` and reboots so the device falls
+  back into AP mode without re-flashing.
+- **Tailscale auth in portal**: optional field so a fresh image joins
+  the org tailnet without ever touching SSH first. Already plumbed in
+  `/etc/sorteros-config.toml` by firstboot's `stage_tailscale_up` —
+  just needs the input on the portal form.
+- **Hardened captive-portal probe responses**: today every probe gets a
+  302, which works but logs as "captive portal" forever. A friendlier
+  exit experience is to flip the probes to "success" responses once
+  `wifi-configured` exists so devices on the AP don't get stuck loops.
 
 ## QR / mDNS handoff
 
