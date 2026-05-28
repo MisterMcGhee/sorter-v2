@@ -136,6 +136,14 @@ class InferenceWorker:
         # GIL-atomic dict ref; never read on the hot path.
         self._latest_debug: Optional[dict] = None
 
+        # On-demand full-frame debug inference. When a request bumps this
+        # timestamp, the loop ALSO runs the model on the WHOLE frame (no crop)
+        # for the next few seconds, so the debug page can compare cropped
+        # (production) vs full-frame detections — two inferences per cycle while
+        # someone is watching, zero extra cost otherwise. Run on the worker
+        # thread because the RKNN runtime is single-owner (one NPU context).
+        self._full_frame_debug_until: float = 0.0
+
         # Public counters — read by the smoke test.
         self.iterations: int = 0
         self.inferences: int = 0
@@ -167,6 +175,12 @@ class InferenceWorker:
         """Latest debug record (raw + on-channel bboxes, crop rect, frame,
         timing) for the perception-debug overlay. GIL-atomic read."""
         return self._latest_debug
+
+    def request_full_frame_debug(self, ttl_s: float = 10.0) -> None:
+        """Ask the loop to ALSO run a full-frame (uncropped) inference for the
+        next ``ttl_s`` seconds. Self-expiring so the extra inference stops as
+        soon as the debug page is closed. GIL-atomic float write — no lock."""
+        self._full_frame_debug_until = time.time() + ttl_s
 
     def start(self) -> None:
         self._stop.clear()
@@ -393,14 +407,36 @@ class InferenceWorker:
                 )
                 self._slot.write(state)
                 self._latest_raw = (list(bboxes), frame)
-                self._latest_debug = {
+                debug_rec = {
                     "raw_bboxes": raw_bboxes_full,
                     "on_channel_bboxes": list(bboxes),
                     "crop_rect": self._crop_rect,
                     "frame": frame,
                     "infer_ms": infer_ms,
                     "conf_threshold": self._conf_threshold,
+                    "full_frame_bboxes": None,
+                    "full_frame_infer_ms": None,
                 }
+                # On-demand: also infer on the WHOLE frame so the debug page can
+                # show what the model would produce without the polygon crop.
+                # If there's no crop, the production inference already used the
+                # full frame — reuse it instead of running a duplicate.
+                if self._crop_rect is None:
+                    debug_rec["full_frame_bboxes"] = list(raw_bboxes_full)
+                    debug_rec["full_frame_infer_ms"] = infer_ms
+                elif time.time() < self._full_frame_debug_until:
+                    try:
+                        ff_t0 = _now_ms()
+                        ff = self._runtime.infer(
+                            frame.bgr, conf_threshold=self._conf_threshold
+                        )
+                        debug_rec["full_frame_bboxes"] = [
+                            (int(b[0]), int(b[1]), int(b[2]), int(b[3])) for b in ff
+                        ]
+                        debug_rec["full_frame_infer_ms"] = _now_ms() - ff_t0
+                    except Exception:
+                        pass
+                self._latest_debug = debug_rec
                 self._maybe_emit_exit_edge(frame.timestamp, in_exit)
                 self._maybe_log_attribution(
                     in_exit, in_precise, in_exit_majority, per_bbox_counts

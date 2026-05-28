@@ -354,6 +354,16 @@ class PerceptionService:
     def source_id_assertion_count(self) -> int:
         return sum(w.source_id_assertions for w in self._workers.values())
 
+    def request_full_frame_debug(self, channel_id: int, ttl_s: float = 10.0) -> bool:
+        """Turn on the worker's on-demand full-frame (uncropped) inference for a
+        few seconds. Returns False if the channel isn't wired. Self-expires so
+        the extra inference stops once the debug page stops polling."""
+        worker = self._workers.get(channel_id)
+        if worker is None:
+            return False
+        worker.request_full_frame_debug(ttl_s=ttl_s)
+        return True
+
     def channel_debug_info(self, channel_id: int) -> Optional[dict]:
         """Everything the perception-debug overlay needs for one channel: the
         last frame the worker inferred against, the RAW (pre-filter) bboxes and
@@ -393,6 +403,8 @@ class PerceptionService:
             "core_mask_name": getattr(runtime, "core_mask_name", None),
             "raw_bboxes": debug.get("raw_bboxes") or [],
             "on_channel_bboxes": debug.get("on_channel_bboxes") or [],
+            "full_frame_bboxes": debug.get("full_frame_bboxes"),
+            "full_frame_infer_ms": debug.get("full_frame_infer_ms"),
             "crop_rect": debug.get("crop_rect"),
             "infer_ms": debug.get("infer_ms"),
             "frame": debug.get("frame"),

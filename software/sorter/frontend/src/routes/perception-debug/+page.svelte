@@ -26,13 +26,34 @@
 	let base = $derived(baseUrl());
 	let failed = $state<Record<number, boolean>>({});
 
+	// Which inference to view per channel:
+	//  - 'cropped'   : production — model runs on the polygon-bounding-rect crop.
+	//  - 'fullframe' : debug — same model on the whole frame (a 2nd inference per
+	//                  cycle, enabled on demand on the backend, self-expiring).
+	let mode = $state<'cropped' | 'fullframe'>('cropped');
+	const endpoint = $derived(mode === 'fullframe' ? 'fullframe' : 'annotated');
+
+	// In full-frame mode the first fetch can 425 ("warming up") for one cycle
+	// while the worker produces the first uncropped result; auto-refresh shortly
+	// after so the image appears without the user clicking.
+	let timer: ReturnType<typeof setTimeout> | undefined;
 	function srcFor(id: number): string {
-		return `${base}/api/perception/debug/annotated/${id}?t=${token}`;
+		return `${base}/api/perception/debug/${endpoint}/${id}?t=${token}`;
 	}
 
 	function refresh(): void {
 		failed = {};
 		token = Date.now();
+	}
+
+	function setMode(next: 'cropped' | 'fullframe'): void {
+		mode = next;
+		refresh();
+		clearTimeout(timer);
+		if (next === 'fullframe') {
+			// Pull again after the worker has had a cycle to run the full-frame pass.
+			timer = setTimeout(refresh, 800);
+		}
 	}
 </script>
 
@@ -46,16 +67,43 @@
 	<div class="mb-4 flex items-center justify-between gap-4">
 		<div>
 			<h1 class="text-lg font-semibold">Perception debug — annotated frames</h1>
-			<p class="text-sm text-neutral-500">
-				The exact cached frame each perception worker last inferred against.
-				<span class="text-success-dark">Green</span> = detections the mask filter kept (these drive
-				the machine); <span style="color:#cc7a00">orange</span> = raw model detections the filter
-				rejected; cyan = channel polygon mask; white rect = the crop region the model actually saw;
-				magenta dot = rotation center. The panel stamps the camera, resolution, and the exact model
-				that produced these. Refresh to pull the current frame.
-			</p>
+			{#if mode === 'cropped'}
+				<p class="text-sm text-neutral-500">
+					<span class="font-semibold">Cropped (production)</span> — exactly what perception infers
+					and decides on. <span class="text-success-dark">Green</span> = detections the mask filter
+					kept (these drive the machine); <span style="color:#cc7a00">orange</span> = raw model
+					detections the filter rejected; cyan = channel polygon mask; white rect = the crop region
+					the model actually saw; magenta dot = rotation center. The panel stamps the camera,
+					resolution, and the exact model that produced these.
+				</p>
+			{:else}
+				<p class="text-sm text-neutral-500">
+					<span class="font-semibold">Full-frame (debug)</span> — the same model run on the WHOLE
+					frame, no polygon crop, as a second inference per cycle. Use it to tell "the crop is
+					excluding pieces" from "the model isn't detecting them."
+					<span class="text-success-dark">Green</span> = full-frame detections whose center lands in
+					the channel mask; <span style="color:#cc7a00">orange</span> = outside it. The panel
+					compares full-frame vs cropped-production counts.
+				</p>
+			{/if}
 		</div>
-		<Button variant="primary" size="md" onclick={refresh}>Refresh</Button>
+		<div class="flex items-center gap-2">
+			<div class="flex border border-neutral-400/40">
+				<button
+					class="px-3 py-1.5 text-sm {mode === 'cropped'
+						? 'bg-primary text-white'
+						: 'text-neutral-500'}"
+					onclick={() => setMode('cropped')}>Cropped (production)</button
+				>
+				<button
+					class="px-3 py-1.5 text-sm {mode === 'fullframe'
+						? 'bg-primary text-white'
+						: 'text-neutral-500'}"
+					onclick={() => setMode('fullframe')}>Full-frame (debug)</button
+				>
+			</div>
+			<Button variant="primary" size="md" onclick={refresh}>Refresh</Button>
+		</div>
 	</div>
 
 	<div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
