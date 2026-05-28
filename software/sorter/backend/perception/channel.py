@@ -121,6 +121,28 @@ def _parse_arc_center(
     return float(cx), float(cy)
 
 
+def _parse_resolution(
+    arc_params_entry: Mapping[str, Any] | None,
+) -> tuple[float, float] | None:
+    """The (width, height) the polygon + arc were drawn against in the UI
+    zone editor. The saved pixel coordinates are in this space; perception
+    (like ``handdrawn_region_provider._scaleForFrame``) must rescale them to
+    the live capture resolution or every zone lands off-frame when the camera
+    delivers a different size than the editor used (e.g. zones saved at 4K,
+    camera now streaming 720p)."""
+    if not isinstance(arc_params_entry, Mapping):
+        return None
+    raw = arc_params_entry.get("resolution")
+    if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+        return None
+    w, h = raw[0], raw[1]
+    if not isinstance(w, (int, float)) or not isinstance(h, (int, float)):
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return float(w), float(h)
+
+
 # ---------------------------------------------------------------------------
 # ChannelDef construction
 # ---------------------------------------------------------------------------
@@ -136,6 +158,7 @@ def buildChannelDef(
     exit_arc: tuple[float, float] | None,
     precise_arc: tuple[float, float] | None,
     arc_center: tuple[float, float] | None = None,
+    saved_resolution: tuple[float, float] | None = None,
 ) -> ChannelDef:
     """Pure builder. Used directly by tests; the on-disk loader below is the
     production entry point but defers to this for the actual construction.
@@ -148,19 +171,42 @@ def buildChannelDef(
     don't load arc_params), but production callers MUST pass arc_center; an
     empty/missing arc_center on the loader path is logged loudly and is the
     most common silent-drift footgun for this subsystem.
+
+    ``saved_resolution`` is the (width, height) the polygon + arc_center were
+    drawn against in the zone editor. When it differs from ``frame_shape`` the
+    pixel coordinates are rescaled by ``(frame_w/saved_w, frame_h/saved_h)`` —
+    the same transform ``handdrawn_region_provider._scaleForFrame`` applies on
+    the legacy preview path. Section angles are resolution-independent, so only
+    the polygon mask and the center pivot are scaled. Tests that already pass
+    frame-space coordinates omit it and get the identity transform.
     """
     if channel_id not in CHANNEL_REGISTRY:
         raise ValueError(f"unknown perception channel_id={channel_id}")
     camera_source_id, _polygon_key, _angle_key = CHANNEL_REGISTRY[channel_id]
 
     h, w = frame_shape
+    scale_x = scale_y = 1.0
+    if saved_resolution is not None:
+        saved_w, saved_h = saved_resolution
+        if saved_w > 0 and saved_h > 0:
+            scale_x = float(w) / float(saved_w)
+            scale_y = float(h) / float(saved_h)
+
     mask = np.zeros((h, w), dtype=np.uint8)
+    polygon_centroid: tuple[float, float] | None = None
     if polygon is not None and len(polygon) >= 3:
-        cv2.fillPoly(mask, [polygon.astype(np.int32)], 255)
+        scaled_polygon = np.asarray(polygon, dtype=np.float64).copy()
+        scaled_polygon[:, 0] *= scale_x
+        scaled_polygon[:, 1] *= scale_y
+        cv2.fillPoly(mask, [scaled_polygon.astype(np.int32)], 255)
+        polygon_centroid = (
+            float(np.mean(scaled_polygon[:, 0])),
+            float(np.mean(scaled_polygon[:, 1])),
+        )
     if arc_center is not None:
-        center = (float(arc_center[0]), float(arc_center[1]))
-    elif polygon is not None and len(polygon) >= 3:
-        center = tuple(np.mean(polygon, axis=0).tolist())
+        center = (float(arc_center[0]) * scale_x, float(arc_center[1]) * scale_y)
+    elif polygon_centroid is not None:
+        center = polygon_centroid
     else:
         center = (w / 2.0, h / 2.0)
 
@@ -192,6 +238,42 @@ def buildChannelDef(
     )
 
 
+def channelDefFromBlob(
+    channel_id: int,
+    *,
+    saved_polygons: Mapping[str, np.ndarray],
+    channel_angles: Mapping[str, float],
+    arc_params: Mapping[str, Mapping[str, Any]],
+    frame_shape: tuple[int, int] | None,
+) -> ChannelDef | None:
+    """Build one channel's ChannelDef from the saved blobs, or ``None`` when
+    the polygon or the live frame shape is unavailable.
+
+    Single-channel entry point shared by the boot loader (``loadChannelDefs``)
+    and the runtime reconciler in ``service.py`` — both must produce identical
+    defs so a channel rewired live matches one wired at boot.
+    """
+    if channel_id not in CHANNEL_REGISTRY:
+        return None
+    _camera_source_id, polygon_key, angle_key = CHANNEL_REGISTRY[channel_id]
+    polygon = saved_polygons.get(polygon_key)
+    if polygon is None or len(polygon) < 3 or frame_shape is None:
+        return None
+    section_zero_angle = float(channel_angles.get(angle_key, 0.0))
+    arc_entry = arc_params.get(polygon_key) or arc_params.get(angle_key)
+    return buildChannelDef(
+        channel_id=channel_id,
+        polygon=np.asarray(polygon),
+        frame_shape=frame_shape,
+        section_zero_angle=section_zero_angle,
+        drop_arc=_parse_arc(arc_entry, "drop_zone"),
+        exit_arc=_parse_arc(arc_entry, "exit_zone"),
+        precise_arc=_parse_arc(arc_entry, "precise_zone"),
+        arc_center=_parse_arc_center(arc_entry),
+        saved_resolution=_parse_resolution(arc_entry),
+    )
+
+
 def loadChannelDefs(
     *,
     saved_polygons: Mapping[str, np.ndarray],
@@ -215,25 +297,14 @@ def loadChannelDefs(
     regression guard against silently running with empty section sets.
     """
     out: dict[int, ChannelDef] = {}
-    for channel_id, (camera_source_id, polygon_key, angle_key) in CHANNEL_REGISTRY.items():
-        polygon = saved_polygons.get(polygon_key)
-        frame_shape = frame_shape_by_role.get(camera_source_id)
-        if polygon is None or len(polygon) < 3 or frame_shape is None:
-            continue
-        section_zero_angle = float(channel_angles.get(angle_key, 0.0))
-        arc_entry = arc_params.get(polygon_key) or arc_params.get(angle_key)
-        drop_arc = _parse_arc(arc_entry, "drop_zone")
-        exit_arc = _parse_arc(arc_entry, "exit_zone")
-        precise_arc = _parse_arc(arc_entry, "precise_zone")
-        arc_center = _parse_arc_center(arc_entry)
-        out[channel_id] = buildChannelDef(
-            channel_id=channel_id,
-            polygon=np.asarray(polygon),
-            frame_shape=frame_shape,
-            section_zero_angle=section_zero_angle,
-            drop_arc=drop_arc,
-            exit_arc=exit_arc,
-            precise_arc=precise_arc,
-            arc_center=arc_center,
+    for channel_id, (camera_source_id, _polygon_key, _angle_key) in CHANNEL_REGISTRY.items():
+        cd = channelDefFromBlob(
+            channel_id,
+            saved_polygons=saved_polygons,
+            channel_angles=channel_angles,
+            arc_params=arc_params,
+            frame_shape=frame_shape_by_role.get(camera_source_id),
         )
+        if cd is not None:
+            out[channel_id] = cd
     return out

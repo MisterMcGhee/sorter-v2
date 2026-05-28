@@ -4073,6 +4073,17 @@ def assign_cameras(assignment: CameraAssignment) -> Dict[str, Any]:
     }
     shared_state.publishCamerasConfig(assignment)
 
+    # Perception (rev04 mode pair) binds each channel to a camera role's
+    # capture thread. A reassignment swaps which physical camera (and which
+    # resolution) backs a role; poke the reconciler so it rebinds the affected
+    # channels within a couple seconds instead of needing a restart.
+    _ps = getattr(shared_state.gc_ref, "perception_service", None)
+    if _ps is not None:
+        try:
+            _ps.request_reconcile()
+        except Exception:
+            pass
+
     return {
         "ok": True,
         "assignment": assignment,

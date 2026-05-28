@@ -825,4 +825,13 @@ def save_polygons(body: Dict[str, Any]) -> Dict[str, Any]:
         setClassificationPolygons(body["classification"])
     if "channel" in body and shared_state.vision_manager is not None:
         shared_state.vision_manager.reloadPolygons()
+    # Perception (rev04 mode pair) is driven by these same zones but owns its
+    # own immutable per-channel stacks; poke its reconciler so a zone edit is
+    # picked up within a fraction of a second instead of waiting a restart.
+    _ps = getattr(shared_state.gc_ref, "perception_service", None)
+    if _ps is not None:
+        try:
+            _ps.request_reconcile()
+        except Exception:
+            pass
     return {"ok": True}
