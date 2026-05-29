@@ -72,10 +72,55 @@ def _validate_id(rendezvous_id: str) -> str:
     return rendezvous_id
 
 
+# Browser-side public keys (SPKI DER, base64) are small; RSA-2048 ≈ 400 chars.
+MAX_PUBKEY_LEN = 2048
+
+
+def _entry(rendezvous_id: str) -> dict:
+    """Get-or-create the store entry for an id (caller holds _lock)."""
+    entry = _store.get(rendezvous_id)
+    if entry is None:
+        if len(_store) >= MAX_ENTRIES:
+            raise APIError(503, "Rendezvous store is full, retry shortly", "RENDEZVOUS_FULL")
+        entry = {"pubkey": None, "ciphertext": None, "expires_at": _now() + TTL_SECONDS}
+        _store[rendezvous_id] = entry
+    return entry
+
+
+class PubkeyPayload(BaseModel):
+    # Browser's RSA-OAEP public key, SPKI DER as base64. The sorter fetches
+    # this to encrypt its LAN IP; the matching private key never leaves the
+    # browser, so Hive stays zero-knowledge.
+    pubkey: str = Field(min_length=1, max_length=MAX_PUBKEY_LEN)
+
+
 class PublishPayload(BaseModel):
     # Base64 ciphertext of the JSON {ip, hostname, port} blob, RSA-OAEP
     # encrypted with the browser's public key. Opaque to Hive.
     ciphertext: str = Field(min_length=1, max_length=MAX_CIPHERTEXT_LEN)
+
+
+@router.post("/{rendezvous_id}/pubkey")
+@limiter.limit("30/minute")
+def put_pubkey(rendezvous_id: str, payload: PubkeyPayload, request: Request) -> dict:
+    """Browser (on the https lookup page) uploads its public key."""
+    _validate_id(rendezvous_id)
+    with _lock:
+        _prune_locked()
+        entry = _entry(rendezvous_id)
+        entry["pubkey"] = payload.pubkey
+    return {"ok": True}
+
+
+@router.get("/{rendezvous_id}/pubkey")
+@limiter.limit("120/minute")
+def get_pubkey(rendezvous_id: str, request: Request) -> dict:
+    """Sorter fetches the browser's public key to encrypt its LAN IP."""
+    _validate_id(rendezvous_id)
+    with _lock:
+        _prune_locked()
+        entry = _store.get(rendezvous_id)
+        return {"pubkey": entry["pubkey"] if entry else None}
 
 
 @router.post("/{rendezvous_id}")
@@ -85,14 +130,8 @@ def publish_ip(rendezvous_id: str, payload: PublishPayload, request: Request) ->
     _validate_id(rendezvous_id)
     with _lock:
         _prune_locked()
-        # Refuse new ids once we're at capacity, but always allow refreshing
-        # an existing id (the same sorter re-announcing a changed IP).
-        if rendezvous_id not in _store and len(_store) >= MAX_ENTRIES:
-            raise APIError(503, "Rendezvous store is full, retry shortly", "RENDEZVOUS_FULL")
-        _store[rendezvous_id] = {
-            "ciphertext": payload.ciphertext,
-            "expires_at": _now() + TTL_SECONDS,
-        }
+        entry = _entry(rendezvous_id)
+        entry["ciphertext"] = payload.ciphertext
     return {"ok": True}
 
 
@@ -104,6 +143,5 @@ def poll_ip(rendezvous_id: str, request: Request) -> dict:
     with _lock:
         _prune_locked()
         entry = _store.get(rendezvous_id)
-        if entry is None:
-            return {"ready": False, "ciphertext": None}
-        return {"ready": True, "ciphertext": entry["ciphertext"]}
+        ciphertext = entry["ciphertext"] if entry else None
+        return {"ready": ciphertext is not None, "ciphertext": ciphertext}

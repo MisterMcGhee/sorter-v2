@@ -25,15 +25,6 @@
 	const TIMEOUT_S = 600;
 	const POLL_MS = 2000;
 
-	function b64urlToBytes(s: string): Uint8Array {
-		const b64 = s.replace(/-/g, '+').replace(/_/g, '/');
-		const pad = b64.length % 4 ? '='.repeat(4 - (b64.length % 4)) : '';
-		const bin = atob(b64 + pad);
-		const out = new Uint8Array(bin.length);
-		for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-		return out;
-	}
-
 	function b64ToBytes(s: string): Uint8Array {
 		const bin = atob(s);
 		const out = new Uint8Array(bin.length);
@@ -41,14 +32,23 @@
 		return out;
 	}
 
-	function parseFragment(): { id: string; key: string } | null {
+	function bytesToB64(buf: ArrayBuffer): string {
+		const arr = new Uint8Array(buf);
+		let bin = '';
+		for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+		return btoa(bin);
+	}
+
+	// Only the id travels in the fragment now. The keypair is generated here
+	// (this page is https, so WebCrypto is available) — the portal runs on
+	// plain http where crypto.subtle is disabled, so it can't make keys.
+	function parseFragment(): { id: string } | null {
 		const hash = window.location.hash.replace(/^#/, '');
 		if (!hash) return null;
 		const params = new URLSearchParams(hash);
 		const id = params.get('id') ?? '';
-		const key = params.get('k') ?? '';
-		if (!id || !key) return null;
-		return { id, key };
+		if (!id) return null;
+		return { id };
 	}
 
 	function sorterUrl(): string {
@@ -57,15 +57,30 @@
 		return `http://${info.ip}${port}/`;
 	}
 
-	async function importPrivateKey(b64url: string): Promise<CryptoKey> {
-		const der = b64urlToBytes(b64url);
-		return crypto.subtle.importKey(
-			'pkcs8',
-			der as BufferSource,
-			{ name: 'RSA-OAEP', hash: 'SHA-256' },
-			false,
-			['decrypt']
+	// Generate the keypair here, hand the public half to Hive (the sorter
+	// fetches it to encrypt its IP), keep the private half in memory only.
+	async function generateAndPublishKey(id: string): Promise<boolean> {
+		const pair = await crypto.subtle.generateKey(
+			{
+				name: 'RSA-OAEP',
+				modulusLength: 2048,
+				publicExponent: new Uint8Array([1, 0, 1]),
+				hash: 'SHA-256'
+			},
+			true,
+			['encrypt', 'decrypt']
 		);
+		privKey = pair.privateKey;
+		const spki = await crypto.subtle.exportKey('spki', pair.publicKey);
+		const res = await fetch(
+			`${getApiBaseUrl()}/api/machine-ip-lookup/${encodeURIComponent(id)}/pubkey`,
+			{
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ pubkey: bytesToB64(spki) })
+			}
+		);
+		return res.ok;
 	}
 
 	async function tryDecrypt(ciphertextB64: string): Promise<SorterInfo | null> {
@@ -122,7 +137,7 @@
 		}
 		rendezvousId = frag.id;
 		try {
-			privKey = await importPrivateKey(frag.key);
+			await generateAndPublishKey(rendezvousId);
 		} catch {
 			phase = 'invalid';
 			return;
@@ -157,9 +172,8 @@
 
 	{#if phase === 'invalid'}
 		<Alert variant="danger" title="Link incomplete">
-			This page needs the one-time key that the sorter's setup screen puts in the link. Re-open the
-			"Find my sorter" link from the sorter's Wi-Fi setup page, or use the
-			<span class="font-mono">.local</span> address it showed instead.
+			This page needs the one-time id the sorter's setup screen puts in the link. Open the
+			"Find my sorter" link from the sorter's Wi-Fi setup page again.
 		</Alert>
 	{:else if phase === 'waiting'}
 		<div

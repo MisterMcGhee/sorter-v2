@@ -319,6 +319,22 @@ def _encrypt_for_pubkey(pubkey_b64: str, plaintext: bytes) -> str | None:
         return None
 
 
+def _fetch_pubkey(hive_url: str, rendezvous_id: str) -> str | None:
+    """Fetch the browser's public key from Hive (base64 SPKI). Returns None
+    until the user has opened the lookup page (which uploads the key)."""
+    url = f"{hive_url.rstrip('/')}/api/machine-ip-lookup/{rendezvous_id}/pubkey"
+    try:
+        with urllib.request.urlopen(url, timeout=ANNOUNCE_HTTP_TIMEOUT) as resp:
+            if not (200 <= resp.status < 300):
+                return None
+            data = json.loads(resp.read().decode("utf-8"))
+            pubkey = data.get("pubkey")
+            return pubkey if isinstance(pubkey, str) and pubkey else None
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as e:
+        log.info("pubkey fetch failed (will retry): %s", e)
+        return None
+
+
 def _post_ciphertext(hive_url: str, rendezvous_id: str, ciphertext_b64: str) -> bool:
     url = f"{hive_url.rstrip('/')}/api/machine-ip-lookup/{rendezvous_id}"
     body = json.dumps({"ciphertext": ciphertext_b64}).encode("utf-8")
@@ -347,13 +363,18 @@ def _maybe_reannounce_ip() -> None:
             log.info("ip-announce window elapsed — stopping re-announce")
             return
         rid = data.get("rendezvous_id")
-        pubkey = data.get("public_key")
         hive_url = data.get("hive_url")
-        if not (rid and pubkey and hive_url):
+        if not (rid and hive_url):
             ANNOUNCE_STATE_FILE.unlink(missing_ok=True)
             return
         ip = _current_lan_ip()
         if not ip:
+            return
+        # The keypair lives in the user's browser on the Hive lookup page; we
+        # fetch the public key from Hive. It's absent until the user opens that
+        # page, so a None here just means "retry next loop".
+        pubkey = _fetch_pubkey(hive_url, rid)
+        if pubkey is None:
             return
         payload = json.dumps({
             "ip": ip,

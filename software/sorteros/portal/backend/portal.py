@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import json
 import logging
 import re
@@ -37,8 +36,6 @@ import shutil
 import socket
 import subprocess
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -73,13 +70,12 @@ AP_TEARDOWN_DELAY_S = 5.0
 CONNECT_TIMEOUT_S = 30.0
 
 # Where the encrypted LAN-IP rendezvous lives. The browser carries the
-# matching private key; Hive only ever stores opaque ciphertext.
+# matching private key; Hive only ever stores opaque ciphertext. The portal
+# only persists the rendezvous id + hive url; sorteros-firstboot does the
+# actual announce (it fetches the browser's public key from Hive and encrypts
+# the LAN IP with it), because the pubkey isn't on Hive until the user opens
+# the lookup page — long after this portal process is gone.
 DEFAULT_HIVE_URL = "https://hive.basically.website"
-# Best-effort announce: try a few times over ~30s in case Hive or the fresh
-# Wi-Fi link is briefly flaky, then give up so onboarding still completes.
-ANNOUNCE_ATTEMPTS = 6
-ANNOUNCE_RETRY_S = 5.0
-ANNOUNCE_HTTP_TIMEOUT_S = 8.0
 
 # Mock data — only used in --mode=mock.
 MOCK_NETWORKS = [
@@ -203,99 +199,17 @@ def _nmcli_teardown_ap() -> None:
         log.warning("ap teardown returned %d: %s", r.returncode, r.stderr.strip())
 
 
-def _nmcli_lan_ip() -> str | None:
-    """Read wlan0's IPv4 address (e.g. '192.168.1.42') after STA connect."""
-    r = _run(["nmcli", "-t", "-f", "IP4.ADDRESS", "device", "show", AP_IFACE])
-    if r.returncode != 0:
-        return None
-    for line in r.stdout.splitlines():
-        # Format: IP4.ADDRESS[1]:192.168.1.42/24
-        _, _, value = line.partition(":")
-        value = value.strip()
-        if value:
-            return value.split("/")[0]
-    return None
+# ─── IP-announce handoff to firstboot ──────────────────────────────────────
 
+def _write_announce_state(state: "PortalState", rendezvous_id: str) -> None:
+    """Persist the rendezvous so sorteros-firstboot can announce the LAN IP.
 
-# ─── encrypted IP announce (rendezvous) ────────────────────────────────────
-
-def _encrypt_for_pubkey(pubkey_b64: str, plaintext: bytes) -> str:
-    """RSA-OAEP-SHA256 encrypt with the browser's exported SPKI public key.
-
-    Returns standard base64 ciphertext. Raises on any crypto/parse error so
-    the caller can decide whether to retry or give up.
-    """
-    # Imported lazily — keeps the portal importable on dev machines without
-    # `cryptography`, and only the real on-device announce path needs it.
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import padding
-
-    der = base64.b64decode(pubkey_b64)
-    pub = serialization.load_der_public_key(der)
-    ciphertext = pub.encrypt(
-        plaintext,
-        padding.OAEP(
-            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-            algorithm=hashes.SHA256(),
-            label=None,
-        ),
-    )
-    return base64.b64encode(ciphertext).decode("ascii")
-
-
-def _post_ciphertext(hive_url: str, rendezvous_id: str, ciphertext_b64: str) -> bool:
-    url = f"{hive_url.rstrip('/')}/api/machine-ip-lookup/{rendezvous_id}"
-    body = json.dumps({"ciphertext": ciphertext_b64}).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=body, method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=ANNOUNCE_HTTP_TIMEOUT_S) as resp:
-            return 200 <= resp.status < 300
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
-        log.warning("announce POST failed: %s", e)
-        return False
-
-
-def _announce_ip(state: "PortalState", rendezvous_id: str, pubkey_b64: str) -> None:
-    """Read the LAN IP, encrypt it for the browser, and drop it at Hive.
-
-    Best-effort with bounded retries. Never raises — onboarding completes
-    whether or not the announce lands; the .local address is the fallback.
-    """
-    for attempt in range(1, ANNOUNCE_ATTEMPTS + 1):
-        ip = _nmcli_lan_ip()
-        if ip:
-            payload = json.dumps({
-                "ip": ip,
-                "hostname": f"{_hostname()}.local",
-                "port": 80,
-            }).encode("utf-8")
-            try:
-                ciphertext = _encrypt_for_pubkey(pubkey_b64, payload)
-            except Exception as e:
-                log.warning("announce encrypt failed (giving up): %s", e)
-                return
-            if _post_ciphertext(state.hive_url, rendezvous_id, ciphertext):
-                log.info("announced LAN IP %s to %s (id=%s)", ip, state.hive_url, rendezvous_id)
-                return
-        else:
-            log.info("announce: no LAN IP yet (attempt %d/%d)", attempt, ANNOUNCE_ATTEMPTS)
-        if attempt < ANNOUNCE_ATTEMPTS:
-            time.sleep(ANNOUNCE_RETRY_S)
-    log.warning("announce: gave up after %d attempts", ANNOUNCE_ATTEMPTS)
-
-
-def _write_announce_state(state: "PortalState", rendezvous_id: str, pubkey_b64: str) -> None:
-    """Persist the rendezvous so sorteros-firstboot can keep re-announcing
-    after this portal process is gone. Best-effort — failure just means no
-    re-announce safety net, the immediate announce still ran."""
+    Only the id + hive url — no key material. firstboot fetches the browser's
+    public key from Hive and does the encrypting. Best-effort write."""
     try:
         ANNOUNCE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         ANNOUNCE_STATE_FILE.write_text(json.dumps({
             "rendezvous_id": rendezvous_id,
-            "public_key": pubkey_b64,
             "hive_url": state.hive_url,
             "created_at": time.time(),
         }))
@@ -402,11 +316,9 @@ class WifiConnectPayload(BaseModel):
     hidden: bool = False
     hostname: str | None = None
     ssh_key: str | None = Field(default=None, alias="sshKey")
-    # Rendezvous: the browser-generated id and its RSA-OAEP public key
-    # (base64 SPKI DER). The Pi encrypts its LAN IP with this and drops the
-    # ciphertext at Hive under the id so the browser can find it.
+    # Rendezvous: just the browser-generated id. The keypair lives on the Hive
+    # lookup page (https); the Pi fetches the public key from Hive by this id.
     rendezvous_id: str | None = Field(default=None, alias="rendezvousId")
-    public_key: str | None = Field(default=None, alias="publicKey")
 
     class Config:
         populate_by_name = True
@@ -415,23 +327,15 @@ class WifiConnectPayload(BaseModel):
 _RENDEZVOUS_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 
 
-def _validate_rendezvous(rendezvous_id: str | None, public_key: str | None) -> tuple[str, str] | None:
-    """Return (id, pubkey) iff both are present and well-formed, else None.
-
-    Onboarding works without these (the user just falls back to the .local
-    address), so a malformed pair is dropped rather than rejected.
-    """
-    if not rendezvous_id or not public_key:
+def _validate_rendezvous(rendezvous_id: str | None) -> str | None:
+    """Return the id iff present and well-formed, else None. Onboarding works
+    without it (the user just falls back to the .local address)."""
+    if not rendezvous_id:
         return None
     if not _RENDEZVOUS_ID_RE.match(rendezvous_id):
         log.warning("ignoring malformed rendezvous id")
         return None
-    try:
-        base64.b64decode(public_key, validate=True)
-    except Exception:
-        log.warning("ignoring malformed public key")
-        return None
-    return rendezvous_id, public_key
+    return rendezvous_id
 
 
 def create_app(state: PortalState) -> FastAPI:
@@ -472,7 +376,7 @@ def create_app(state: PortalState) -> FastAPI:
         password = _validate_password(payload.password)
         hostname = _validate_hostname(payload.hostname)
         ssh_key = (payload.ssh_key or "").strip() or None
-        rendezvous = _validate_rendezvous(payload.rendezvous_id, payload.public_key)
+        rendezvous = _validate_rendezvous(payload.rendezvous_id)
 
         attempt: dict[str, Any] = {
             "ssid": ssid,
@@ -489,7 +393,7 @@ def create_app(state: PortalState) -> FastAPI:
             attempt["result"] = "ok"
             attempt["next_url"] = _suggested_url()
             if rendezvous:
-                log.info("mock: would announce LAN IP to %s (id=%s)", state.hive_url, rendezvous[0])
+                log.info("mock: firstboot would announce LAN IP to %s (id=%s)", state.hive_url, rendezvous)
             return {
                 "ok": True,
                 "next_url": _suggested_url(),
@@ -510,12 +414,12 @@ def create_app(state: PortalState) -> FastAPI:
             raise HTTPException(status_code=503, detail=str(e))
 
         if rendezvous:
-            # Persist before switchover so the re-announce survives even if
-            # the portal crashes mid-connect.
-            _write_announce_state(state, rendezvous[0], rendezvous[1])
+            # Persist before switchover so firstboot can announce the LAN IP
+            # even if the portal crashes mid-connect.
+            _write_announce_state(state, rendezvous)
 
         asyncio.get_event_loop().create_task(
-            _delayed_switchover(state, ssid, rendezvous),
+            _delayed_switchover(state, ssid),
         )
         return {
             "ok": True,
@@ -558,12 +462,23 @@ def create_app(state: PortalState) -> FastAPI:
     if state.static_dir and state.static_dir.exists():
         index = state.static_dir / "index.html"
         app.mount("/_app", StaticFiles(directory=state.static_dir / "_app"), name="app")
-        # Mount everything else under /static so we don't shadow API routes.
-        @app.get("/", response_class=HTMLResponse)
-        def root() -> HTMLResponse:
+
+        def _spa() -> HTMLResponse:
+            # SPA shell (ssr=false): the client router renders the right route
+            # from the URL, so the same index.html serves / and /setup.
             if index.exists():
                 return HTMLResponse(index.read_text("utf-8"))
             return HTMLResponse(_fallback_index())
+
+        @app.get("/", response_class=HTMLResponse)
+        def root() -> HTMLResponse:
+            return _spa()
+
+        # The captive landing (/) sends users here in a real browser; serve the
+        # SPA so /setup loads its own route instead of getting probe-302'd.
+        @app.get("/setup", response_class=HTMLResponse)
+        def setup_page() -> HTMLResponse:
+            return _spa()
     else:
         @app.get("/", response_class=HTMLResponse)
         def root_fallback() -> HTMLResponse:
@@ -607,27 +522,16 @@ def _fallback_index() -> str:
 
 # ─── switchover background task ────────────────────────────────────────────
 
-async def _delayed_switchover(
-    state: PortalState,
-    ssid: str,
-    rendezvous: tuple[str, str] | None,
-) -> None:
-    """Wait briefly so the HTTP response reaches the client, then try to
-    bring the requested SSID up. If it works, announce the LAN IP to Hive
-    (best-effort), mark onboarding done, and tear down the AP profile. If
-    association fails, leave the AP up so the user can retry."""
+async def _delayed_switchover(state: PortalState, ssid: str) -> None:
+    """Wait briefly so the HTTP response reaches the client, then bring the
+    requested SSID up. On success, mark onboarding done and tear down the AP
+    (firstboot announces the LAN IP from here on, using the persisted
+    rendezvous). On failure, leave the AP up so the user can retry."""
     await asyncio.sleep(AP_TEARDOWN_DELAY_S)
     attempt = state.last_attempt or {}
     try:
         ok = _nmcli_bring_up(ssid, timeout=CONNECT_TIMEOUT_S)
         if ok:
-            # Announce BEFORE marking configured — the onboarding orchestrator
-            # kills this process once the gate file appears, so the encrypted
-            # IP drop has to finish (or time out) first. Runs in a thread so
-            # the retry sleeps don't block the event loop.
-            if rendezvous:
-                rid, pubkey = rendezvous
-                await asyncio.to_thread(_announce_ip, state, rid, pubkey)
             _mark_configured()
             _nmcli_teardown_ap()
             attempt["result"] = "connected"

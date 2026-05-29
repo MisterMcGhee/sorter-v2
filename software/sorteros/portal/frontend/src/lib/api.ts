@@ -30,7 +30,6 @@ export type ConnectPayload = {
 	hostname?: string | null;
 	sshKey?: string | null;
 	rendezvousId?: string | null;
-	publicKey?: string | null;
 };
 
 export type ConnectResponse = {
