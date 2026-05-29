@@ -20,7 +20,7 @@
 	import CalibrationStep from '$lib/components/setup/steps/CalibrationStep.svelte';
 	import HiveStep from '$lib/components/setup/steps/HiveStep.svelte';
 	import AdvancedStep from '$lib/components/setup/steps/AdvancedStep.svelte';
-	import { beginHiveLink, completeReturnedHiveLink } from '$lib/hive/link-flow';
+	import { beginHiveLink, completeReturnedHiveLink, DEFAULT_HIVE_URL } from '$lib/hive/link-flow';
 	import { RefreshCcw } from 'lucide-svelte';
 	import {
 		loadStoredConfirmations as loadStoredConfirmationsFromStorage,
@@ -214,7 +214,8 @@
 	let verifiedSteppers = $state<Record<string, boolean>>({});
 	let showStepperWiringHelp = $state(false);
 
-	const DEFAULT_HIVE_URL = 'https://hive.neuhaus.nrw';
+	// DEFAULT_HIVE_URL is the single source of truth in link-flow.ts
+	// (https://hive.basically.website) — don't redeclare it here.
 
 	let hiveLoading = $state(false);
 	let hiveTargets = $state<HiveSetupTarget[]>([]);
