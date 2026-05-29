@@ -9,7 +9,14 @@
 	// the portal backend's DEFAULT_HIVE_URL and the sorter's DEFAULT_HIVE_URL.
 	const HIVE_URL = 'https://hive.basically.website';
 
-	type Stage = 'loading' | 'pick' | 'auth' | 'submitting' | 'handoff' | 'error';
+	type Stage = 'launch' | 'loading' | 'pick' | 'auth' | 'submitting' | 'handoff' | 'error';
+
+	// The captive-portal pop-up (CNA) is a throwaway mini-window: it closes the
+	// moment the AP drops, taking the handoff screen with it. So `/` is a
+	// launcher — it pushes the user into a real browser tab (which survives the
+	// network switch) before any real work. The opened tab carries ?go=1 to
+	// skip the launcher. The portal IP is fixed by sorteros-ap-up.sh.
+	const PORTAL_URL = 'http://10.42.0.1/';
 
 	let stage = $state<Stage>('loading');
 	let status = $state<StatusResponse | null>(null);
@@ -112,6 +119,19 @@
 		}
 	}
 
+	function startSetup() {
+		// Try to hop into a real browser tab (survives the AP teardown that
+		// kills the captive-portal mini-window). On Android this usually opens
+		// Chrome; in a desktop/iOS captive sheet it may be blocked — so we also
+		// advance in-place and show the plain URL as the reliable fallback.
+		try {
+			window.open(`${PORTAL_URL}?go=1`, '_blank');
+		} catch {
+			// ignore — fallback below
+		}
+		stage = 'pick';
+	}
+
 	onMount(async () => {
 		// Kick off keypair generation immediately — it's ready long before the
 		// user finishes picking a network. Failure (e.g. no WebCrypto on a
@@ -121,8 +141,12 @@
 		});
 		await refreshStatus();
 		await rescan();
+		// ?go=1 means we're the real browser tab the launcher opened (or the
+		// user came back to it) — skip the launcher and go straight to setup.
+		const skipLauncher =
+			typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('go');
 		if (stage === 'loading') {
-			stage = 'pick';
+			stage = skipLauncher ? 'pick' : 'launch';
 		}
 	});
 </script>
@@ -159,6 +183,30 @@
 		<div class="flex flex-1 items-center justify-center text-[var(--color-text-muted)]">
 			Loading…
 		</div>
+	{:else if stage === 'launch'}
+		<section class="flex flex-1 flex-col items-center justify-center gap-6 text-center">
+			<div>
+				<div class="text-sm tracking-wider text-[var(--color-text-muted)] uppercase">Welcome</div>
+				<h2 class="mt-1 text-2xl font-bold">Set up your sorter</h2>
+			</div>
+			<p class="max-w-sm text-[var(--color-text-muted)]">
+				This connects your sorter to your Wi-Fi. It works best in a normal browser tab — the small
+				setup pop-up some devices show closes itself as soon as the sorter switches networks.
+			</p>
+
+			<button
+				type="button"
+				onclick={startSetup}
+				class="w-full max-w-xs border border-[var(--color-accent)] bg-[var(--color-accent)] px-5 py-4 text-lg font-semibold text-black hover:bg-[var(--color-accent-dark)]"
+			>
+				Start setup →
+			</button>
+
+			<div class="text-sm text-[var(--color-text-muted)]">
+				If nothing opens, open your browser and go to<br />
+				<span class="font-mono text-base text-[var(--color-text)]">http://10.42.0.1</span>
+			</div>
+		</section>
 	{:else if stage === 'pick'}
 		<section class="flex flex-1 flex-col gap-2">
 			<p class="mb-2 text-sm text-[var(--color-text-muted)]">
