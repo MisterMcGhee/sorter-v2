@@ -1060,10 +1060,14 @@ def save_servo_hardware_config(
     close_speed = max(_SPEED_RANGE[0], min(_SPEED_RANGE[1], int(payload.close_speed))) if payload.close_speed is not None else None
     homing_speed = max(_SPEED_RANGE[0], min(_SPEED_RANGE[1], int(payload.homing_speed))) if payload.homing_speed is not None else None
     port = payload.port.strip() if isinstance(payload.port, str) and payload.port.strip() else None
-    layer_count = _distribution_layer_count()
     available_pca_channels = _pca_available_servo_channels()
     layout = getBinLayout()
     current_storage_layers = _storage_layer_settings_from_layout(layout)["layers"]
+    # Validate against the persisted layout we actually index into below, not the
+    # live distribution layout. After a layer add/remove the storage-layers save
+    # has already rewritten the config, but the running hardware still carries the
+    # old layer count until a restart — trusting it here rejected valid saves.
+    layer_count = len(current_storage_layers)
 
     if len(payload.channels) != layer_count:
         raise HTTPException(

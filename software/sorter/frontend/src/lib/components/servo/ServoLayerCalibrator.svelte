@@ -58,6 +58,19 @@
 	let jogStep = $state(5);
 	let selectedIndex = $state<number | null>(null);
 
+	// Signature of everything the "Save servo layers" button persists (layer
+	// add/remove, channel, invert, bin count, max/bin, active). Captured at load
+	// and after each save; `dirty` flags the form whenever the two diverge. Open/
+	// closed angles and speeds persist through their own endpoints, so they're
+	// deliberately left out — they don't dirty this form.
+	let savedSignature = $state('');
+	function layerSignature(list: LayerDraft[]): string {
+		return JSON.stringify(
+			list.map((l) => [l.enabled, l.channel, l.invert, l.binCount, l.maxPiecesPerBin.trim()])
+		);
+	}
+	let dirty = $derived(layerSignature(layers) !== savedSignature);
+
 	// Global servo speeds (°/s). null = not overridden (firmware default applies).
 	let openSpeed = $state<number | null>(null);
 	let closeSpeed = $state<number | null>(null);
@@ -144,6 +157,7 @@
 				});
 			}
 			layers = next;
+			savedSignature = layerSignature(next);
 			if (selectedIndex !== null && selectedIndex >= layers.length) selectedIndex = null;
 		} catch (e: any) {
 			errorMsg = e.message ?? 'Failed to load servo layers';
@@ -292,6 +306,23 @@
 		}
 	}
 
+	function nextChannel(): string {
+		// Auto-assign the next channel after the highest one already used, so a
+		// fresh layer lands on an unused channel without manual picking. Falls back
+		// to the first available choice (or blank) when nothing is assigned yet.
+		const used = layers
+			.map((l) => (l.channel.trim().length > 0 ? Number(l.channel) : null))
+			.filter((n): n is number => n !== null && Number.isInteger(n));
+		if (used.length > 0) {
+			const candidate = Math.max(...used) + 1;
+			if (channelChoices.length === 0 || channelChoices.includes(candidate)) {
+				return String(candidate);
+			}
+		}
+		const firstFree = channelChoices.find((c) => !used.includes(c));
+		return firstFree !== undefined ? String(firstFree) : '';
+	}
+
 	function addLayer() {
 		const nextIndex = layers.length;
 		layers = [
@@ -300,7 +331,7 @@
 				layerIndex: nextIndex,
 				label: `Layer ${nextIndex + 1}`,
 				enabled: true,
-				channel: '',
+				channel: nextChannel(),
 				invert: false,
 				binCount: String(allowedCounts[0] ?? 12),
 				maxPiecesPerBin: '',
@@ -315,7 +346,6 @@
 	}
 
 	function removeLayer(layerIndex: number) {
-		if (!window.confirm(`Remove Layer ${layerIndex + 1}? Save to apply.`)) return;
 		layers = layers
 			.filter((l) => l.layerIndex !== layerIndex)
 			.map((l, i) => ({ ...l, layerIndex: i, label: `Layer ${i + 1}` }));
@@ -628,6 +658,11 @@
 			<Button variant="secondary" size="sm" onclick={loadSettings} disabled={loading || saving}>
 				<RotateCcw size={14} /> Reload
 			</Button>
+			{#if dirty}
+				<span class="inline-flex items-center gap-1 bg-warning/15 px-2 py-0.5 text-xs font-medium text-warning">
+					Unsaved changes — save to apply
+				</span>
+			{/if}
 		</div>
 	{/if}
 
