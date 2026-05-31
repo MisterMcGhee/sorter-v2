@@ -603,7 +603,6 @@ def stage_write_env() -> None:
         "export DEBUG_LEVEL=2\n"
         "export PYTHONUNBUFFERED=1\n"
         'export MACHINE_SPECIFIC_PARAMS_PATH="../machine.toml"\n'
-        f'export SORTING_PROFILE_PATH="{SOFTWARE_DIR}/sorter/backend/sorting_profile.json"\n'
         "export SORTER_API_HOST=0.0.0.0\n"
         # Headless LAN device: the user reaches it by IP, hostname, or .local —
         # whichever resolves for them. The local API is unauthenticated and not
