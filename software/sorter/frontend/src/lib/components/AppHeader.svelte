@@ -654,22 +654,15 @@
 		</div>
 	</Modal>
 
-	{#if restartingBackend}
-		<div
-			class="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm"
-		>
+	<Modal open={restartingBackend} title="Restarting backend..." dismissible={false}>
+		<div class="flex flex-col items-center gap-4 py-4">
 			<div
-				class="flex flex-col items-center gap-4 border border-border bg-surface px-10 py-8 shadow-lg"
-			>
-				<div
-					class="h-6 w-6 animate-spin border-2 border-primary border-t-transparent"
-					style="border-radius: 50%;"
-				></div>
-				<div class="text-sm font-medium text-text">Restarting backend...</div>
-				<div class="text-xs text-text-muted">Waiting for the service to come back online.</div>
-			</div>
+				class="h-6 w-6 animate-spin border-2 border-primary border-t-transparent"
+				style="border-radius: 50%;"
+			></div>
+			<div class="text-sm text-text-muted">Waiting for the service to come back online.</div>
 		</div>
-	{/if}
+	</Modal>
 
 	<Modal bind:open={homingDetailsOpen} title="Hardware Homing">
 		<div class="flex flex-col gap-4">
