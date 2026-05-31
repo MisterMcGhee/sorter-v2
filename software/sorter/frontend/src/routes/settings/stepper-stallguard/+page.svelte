@@ -69,6 +69,23 @@
 	let running = $state(false);
 	let savingThreshold = $state(false);
 
+	// Pair-based threshold suggestion for the selected motor — pooled from the
+	// motor's recent unloaded floor + loaded stall dip (server-computed), placed
+	// at the geometric midpoint of the gap. This, not any single run, drives Save.
+	type Suggestion = {
+		stepper: string;
+		cruise_tstep: number;
+		unloaded_floor: number | null;
+		loaded_dip: number | null;
+		trigger_level: number | null;
+		suggested_sgthrs: number | null;
+		enough_data: boolean;
+		unloaded_runs: number;
+		loaded_runs: number;
+		detail: string;
+	};
+	let suggestion = $state<Suggestion | null>(null);
+
 	const base = () => getBackendHttpBase();
 
 	function defaultProfileFor(stepper: string): Profile {
@@ -110,11 +127,23 @@
 		}
 	}
 
+	async function loadSuggestion(motor: string) {
+		suggestion = null;
+		try {
+			const res = await fetch(`${base()}/stepper/${motor}/stallguard-suggestion`);
+			if (!res.ok) return;
+			suggestion = await res.json();
+		} catch {
+			suggestion = null;
+		}
+	}
+
 	async function selectRun(run: Run) {
 		selectedRun = run;
 		loadingSamples = true;
 		points = [];
 		error = null;
+		if (run.stepper_name) loadSuggestion(run.stepper_name);
 		try {
 			const res = await fetch(`${base()}/api/stepper-telemetry/runs/${run.id}/samples`);
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -172,6 +201,7 @@
 			await loadSummary();
 			const fresh = runs.find((r) => r.id === data.run_id);
 			if (fresh) await selectRun(fresh);
+			else await loadSuggestion(swStepper);
 		} catch (e: any) {
 			error = e.message ?? 'Sweep failed';
 		} finally {
@@ -180,25 +210,23 @@
 	}
 
 	async function saveThreshold() {
-		if (!selectedRun?.stepper_name || selectedRun.suggested_sgthrs == null) return;
+		const motor = suggestion?.stepper;
+		if (!motor || suggestion?.suggested_sgthrs == null) return;
 		savingThreshold = true;
 		error = null;
 		notice = null;
 		try {
-			const res = await fetch(
-				`${base()}/stepper/${selectedRun.stepper_name}/stallguard-config`,
-				{
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({
-						sgthrs: selectedRun.suggested_sgthrs,
-						// Save the cruise floor as the enforcement TCOOLTHRS so DIAG only
-						// acts at cruise (matching where the threshold was tuned).
-						tcoolthrs: selectedRun.params?.cruise_tstep ?? swCruiseTstep,
-						enabled: true,
-					}),
-				}
-			);
+			const res = await fetch(`${base()}/stepper/${motor}/stallguard-config`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					sgthrs: suggestion.suggested_sgthrs,
+					// The cruise velocity floor is the enforcement TCOOLTHRS so DIAG only
+					// acts at cruise (matching where the threshold was tuned).
+					tcoolthrs: suggestion.cruise_tstep,
+					enabled: true,
+				}),
+			});
 			if (!res.ok) {
 				const body = await res.json().catch(() => ({}));
 				throw new Error(body.detail ?? `HTTP ${res.status}`);
@@ -231,8 +259,15 @@
 		}
 	}
 
+	// Trigger line on the chart prefers the pair-based suggestion (the level we'd
+	// actually save); falls back to the selected run's own suggestion if there's
+	// not yet a loaded run to pair with.
 	const triggerLevel = $derived(
-		selectedRun?.suggested_sgthrs != null ? selectedRun.suggested_sgthrs * 2 : null
+		suggestion?.trigger_level != null
+			? suggestion.trigger_level
+			: selectedRun?.suggested_sgthrs != null
+				? selectedRun.suggested_sgthrs * 2
+				: null
 	);
 
 	$effect(() => {
@@ -516,11 +551,40 @@
 						/>
 					{/if}
 
-					{#if selectedRun.suggested_sgthrs != null && selectedRun.stepper_name}
-						<div class="mt-4">
-							<Button variant="secondary" onclick={saveThreshold} loading={savingThreshold}>
-								Save SGTHRS={selectedRun.suggested_sgthrs} to machine.toml
-							</Button>
+					{#if suggestion}
+						<div class="mt-4 border border-border bg-bg px-4 py-4">
+							<div class="text-base font-semibold text-text">
+								Threshold suggestion for {suggestion.stepper}
+							</div>
+							<div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+								<span class="text-text-muted">Unloaded floor:</span>
+								<span class="text-text">{suggestion.unloaded_floor ?? '—'}</span>
+								<span class="text-text-muted">Loaded dip:</span>
+								<span class="text-text">{suggestion.loaded_dip ?? '—'}</span>
+								<span class="text-text-muted">→ Trigger ≤:</span>
+								<span class="text-text">{suggestion.trigger_level ?? '—'}</span>
+								<span class="text-text-muted">Cruise TSTEP:</span>
+								<span class="text-text">{suggestion.cruise_tstep}</span>
+							</div>
+							<div class="mt-1 text-sm text-text-muted">
+								Geometric midpoint of the measured gap, from the latest unloaded + loaded test for this
+								motor.
+							</div>
+							{#if !suggestion.enough_data}
+								<Alert variant="warning">{suggestion.detail}</Alert>
+							{/if}
+							{#if suggestion.suggested_sgthrs != null}
+								<div class="mt-3">
+									<Button
+										variant={suggestion.enough_data ? 'secondary' : 'ghost'}
+										onclick={saveThreshold}
+										loading={savingThreshold}
+									>
+										Save{suggestion.enough_data ? '' : ' provisional'} SGTHRS={suggestion.suggested_sgthrs}
+										to machine.toml
+									</Button>
+								</div>
+							{/if}
 						</div>
 					{/if}
 				{:else}

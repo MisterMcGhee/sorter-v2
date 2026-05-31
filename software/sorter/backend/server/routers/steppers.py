@@ -1529,6 +1529,144 @@ def set_stallguard_config(stepper: str, body: StallGuardConfigBody) -> StallGuar
     )
 
 
+# ---------------------------------------------------------------------------
+# Threshold suggestion — pair-based, from the measured unloaded/loaded gap
+#
+# A single run can't set an accurate SGTHRS: an unloaded run only shows the floor
+# (the ceiling the trigger must stay under) and a loaded run only shows the stall
+# dip (the level the trigger must clear). The accurate trigger sits in the gap
+# between the two, so we take cruise samples from the LATEST run of BOTH kinds for
+# the motor and place the trigger at the geometric midpoint — equal ratio margin
+# above the stall dip and below the normal floor. SGTHRS = trigger / 2 because
+# DIAG fires at SG_RESULT <= 2*SGTHRS.
+#
+# Deliberately the *latest* run of each kind, not a pool of recent ones: pooling
+# sweeps in stale runs at other speeds or from a since-changed driver config
+# (e.g. the old SpreadCycle-hybrid runs whose floor collapsed to ~6), which drags
+# the pooled floor down and yields a uselessly low threshold. The freshest run is
+# the one tuned to the current config. Percentiles within that run still guard
+# against single-sample outliers.
+# ---------------------------------------------------------------------------
+
+_FLOOR_PERCENTILE = 0.05   # unloaded: worst-case normal cruise (low end of floor)
+_DIP_PERCENTILE = 0.10     # loaded: representative stall dip (low end)
+
+
+class StallGuardSuggestionResponse(BaseModel):
+    success: bool
+    stepper: str
+    cruise_tstep: int
+    unloaded_floor: Optional[int]
+    loaded_dip: Optional[int]
+    trigger_level: Optional[int]
+    suggested_sgthrs: Optional[int]
+    enough_data: bool
+    unloaded_runs: int
+    loaded_runs: int
+    detail: str
+
+
+def _percentile(sorted_vals: List[int], q: float) -> Optional[int]:
+    if not sorted_vals:
+        return None
+    idx = int(round(q * (len(sorted_vals) - 1)))
+    return sorted_vals[max(0, min(len(sorted_vals) - 1, idx))]
+
+
+def _cruise_sg(run: Optional[Dict[str, Any]], cruise_tstep: int) -> List[int]:
+    if run is None:
+        return []
+    out: List[int] = []
+    for s in stepper_telemetry.getRunSamples(run["id"]):
+        sg = s.get("sg_result")
+        ts = s.get("tstep")
+        if (
+            isinstance(sg, int)
+            and sg >= 0
+            and isinstance(ts, int)
+            and 0 <= ts <= cruise_tstep
+        ):
+            out.append(sg)
+    return sorted(out)
+
+
+@router.get(
+    "/stepper/{stepper}/stallguard-suggestion",
+    response_model=StallGuardSuggestionResponse,
+)
+def stallguard_suggestion(
+    stepper: str, cruise_tstep: Optional[int] = None
+) -> StallGuardSuggestionResponse:
+    """Pure DB analysis — no hardware. Takes cruise SG from the latest unloaded
+    (sweep) and latest loaded (stall_test) run for this motor and returns the
+    geometric-midpoint trigger between the normal floor and the stall dip."""
+    if stepper not in _STEPPER_API_TO_TOML_NAME:
+        raise HTTPException(status_code=400, detail=f"Unknown stepper '{stepper}'")
+
+    def _latest(source: str) -> Optional[Dict[str, Any]]:
+        rows = stepper_telemetry.listRuns(
+            stepper_name=stepper, source=source, limit=50
+        )
+        for r in rows:  # listRuns is newest-first
+            if r.get("status") == stepper_telemetry.RUN_STATUS_COMPLETED:
+                return r
+        return None
+
+    unloaded_run = _latest(stepper_telemetry.SOURCE_SWEEP)
+    loaded_run = _latest(stepper_telemetry.SOURCE_STALL_TEST)
+
+    if cruise_tstep is None:
+        latest_params = unloaded_run["params"] if unloaded_run else None
+        ct = int(latest_params.get("cruise_tstep", 150)) if isinstance(latest_params, dict) else 150
+    else:
+        ct = cruise_tstep
+    ct = max(1, ct)
+
+    floor = _percentile(_cruise_sg(unloaded_run, ct), _FLOOR_PERCENTILE)
+    dip = _percentile(_cruise_sg(loaded_run, ct), _DIP_PERCENTILE)
+
+    trigger: Optional[int] = None
+    sgthrs: Optional[int] = None
+    enough = False
+    if floor is not None and dip is not None:
+        # Geometric midpoint of the gap. Clamp dip to >=1 so a stall floor that
+        # reaches 0 doesn't collapse the geo-mean to 0.
+        trigger = int(round(math.sqrt(float(floor) * float(max(1, dip)))))
+        sgthrs = max(1, min(255, round(trigger / 2)))
+        enough = True
+        detail = (
+            f"Balanced trigger {trigger} = geo-mean(floor {floor}, dip {dip}) "
+            "from the latest unloaded + latest loaded run."
+        )
+    elif floor is not None:
+        # Provisional: no loaded stall test yet, so we can't see the dip. Fall
+        # back to a fraction of the floor and flag it as unvalidated.
+        trigger = int(round(floor * 0.4))
+        sgthrs = max(1, min(255, round(trigger / 2)))
+        detail = (
+            "No loaded stall test for this motor yet — provisional SGTHRS from the "
+            "unloaded floor only. Run a loaded (held/resisted) sweep to validate."
+        )
+    elif dip is not None:
+        detail = "Only loaded runs found — run an unloaded sweep to measure the normal floor."
+    else:
+        detail = "No completed cruise samples for this motor yet — run an unloaded and a loaded sweep."
+
+    return StallGuardSuggestionResponse(
+        success=True,
+        stepper=stepper,
+        cruise_tstep=ct,
+        unloaded_floor=floor,
+        loaded_dip=dip,
+        trigger_level=trigger,
+        suggested_sgthrs=sgthrs,
+        enough_data=enough,
+        unloaded_runs=1 if unloaded_run else 0,
+        loaded_runs=1 if loaded_run else 0,
+        detail=detail,
+    )
+
+
 @router.post("/stall-incident/clear")
 def clear_stall_incident() -> Dict[str, Any]:
     """Operator-acknowledge a stall. Clears the blocking incident; the stall
