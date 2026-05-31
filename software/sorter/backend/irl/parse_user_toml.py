@@ -945,11 +945,14 @@ def applyStepperStallguard(
     configs: dict[str, tuple[int, int, bool]],
     gc: GlobalConfig,
 ) -> None:
-    """Stamp [stepper_stallguard.*] onto the stepper and write SGTHRS/TCOOLTHRS.
+    """Stamp [stepper_stallguard.*] onto the stepper, write SGTHRS/TCOOLTHRS, and
+    turn DIAG detection ON.
 
-    This does NOT arm DIAG detection — the stall monitor does that on entering
-    RUNNING (and re-writes the registers then, so they survive sweeps/coolstep
-    toggles). Steppers with no entry, or enabled=false, are simply never armed.
+    Simple rule: if a stepper has an enabled entry, detection is on for every
+    move — there is no per-move or per-state arming. It's switched on once here at
+    hardware init and stays on. (Homing doesn't false-trip because it runs far
+    slower than cruise, below the TCOOLTHRS velocity floor where DIAG is inactive.)
+    Steppers with no entry, or enabled=false, are simply left off.
     """
     config = configs.get(stepper_name)
     if config is None:
@@ -986,8 +989,17 @@ def applyStepperStallguard(
             )
             time.sleep(HARDWARE_INIT_RETRY_DELAY_S)
 
+    try:
+        stepper.clear_stall()
+        stepper.enable_stall_detection(True)
+    except (MCUBusError, OSError, DecodeError) as e:
+        gc.logger.warning(
+            f"Wrote StallGuard regs for '{stepper_name}' but failed to arm DIAG "
+            f"detection: {e}. The stall monitor will retry on its next poll."
+        )
+
     gc.logger.info(
-        f"Stepper '{stepper_name}' StallGuard config applied: "
+        f"Stepper '{stepper_name}' StallGuard armed: "
         f"sgthrs={sgthrs}, tcoolthrs={tcoolthrs:#x}, enabled={enabled}"
     )
 

@@ -1346,6 +1346,14 @@ def stallguard_sweep(
     )
 
     try:
+        # The sweep deliberately stalls the motor (loaded test) and opens the
+        # velocity floor wide — so turn live stall detection OFF for the duration,
+        # or an enabled motor would trip its own incident mid-sweep. This is the
+        # ONE place detection is suppressed; it's restored in the finally.
+        try:
+            target.enable_stall_detection(False)
+        except Exception:
+            pass
         # Measure with SG reported across the whole speed range; the cruise_tstep
         # filter is applied at analysis time so we still see the transients in the
         # chart but don't let them set the threshold.
@@ -1422,8 +1430,17 @@ def stallguard_sweep(
             _halt_stepper(target, force=True)
         except Exception:
             pass
+        # Restore the motor's resting state. If it has live stall detection
+        # configured, put its enforcement velocity floor back and re-enable
+        # detection (we turned it off above); otherwise just zero the floor so the
+        # sweep leaves nothing half-configured.
         try:
-            target.write_driver_register(TMC_REG_TCOOLTHRS, 0)
+            if getattr(target, "stallguard_enabled", False) and target.stallguard_sgthrs is not None:
+                target.write_driver_register(TMC_REG_TCOOLTHRS, target.stallguard_tcoolthrs)
+                target.clear_stall()
+                target.enable_stall_detection(True)
+            else:
+                target.write_driver_register(TMC_REG_TCOOLTHRS, 0)
         except Exception:
             pass
         # chute_random retunes the chute stepper's speed limits; restore them to

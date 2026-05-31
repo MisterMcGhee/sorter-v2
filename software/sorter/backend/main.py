@@ -623,18 +623,14 @@ def main() -> None:
     setHardwareResetFn(lambda: _cleanup_runtime_hardware("system reset"))
 
     # StallGuard stall detection: a daemon thread polls the firmware DIAG latch
-    # while RUNNING and raises a blocking `stepper_stall` incident on a stall.
-    # Off the main loop so the UART reads never hitch operation.
+    # for every stepper that has an enabled threshold and raises a blocking
+    # `stepper_stall` incident on a stall. Detection is on for all moves (armed at
+    # hardware init), so this watcher needs no machine-state gating. Off the main
+    # loop so the UART reads never hitch operation.
     if not _noPowerModeActive(gc):
         stall_monitor = StepperStallMonitor(gc)
-
-        def _get_controller():
-            with controller_lock:
-                return controller
-
         threading.Thread(
             target=stall_monitor.run,
-            args=(_get_controller,),
             daemon=True,
             name="stall-monitor",
         ).start()
