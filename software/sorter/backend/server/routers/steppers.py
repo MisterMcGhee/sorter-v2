@@ -26,6 +26,7 @@ from irl.parse_user_toml import (
     DEFAULT_STEPPER_IHOLD,
     DEFAULT_STEPPER_IHOLD_DELAY,
     DEFAULT_STEPPER_IRUN,
+    DEFAULT_STEPPER_STALLGUARD,
 )
 from server import shared_state
 
@@ -1558,16 +1559,24 @@ DEFAULT_STALLGUARD_ENFORCE_TCOOLTHRS = 150
 
 
 def _stallguard_payload_from_persisted_config(name: str) -> Dict[str, Any]:
-    result: Dict[str, Any] = {
-        "sgthrs": DEFAULT_STALLGUARD_SGTHRS,
-        "tcoolthrs": DEFAULT_STALLGUARD_ENFORCE_TCOOLTHRS,
-        "enabled": False,
-    }
+    toml_name = _STEPPER_API_TO_TOML_NAME.get(name, name)
+    # Seed from the motor's built-in default (chute/carousel have tuned ones), so a
+    # fresh machine with no TOML entry still shows its real applied config rather
+    # than a generic placeholder. Motors with no built-in default fall back to the
+    # generic disabled placeholder.
+    builtin = DEFAULT_STEPPER_STALLGUARD.get(toml_name)
+    if builtin is not None:
+        result: Dict[str, Any] = {"sgthrs": builtin[0], "tcoolthrs": builtin[1], "enabled": builtin[2]}
+    else:
+        result = {
+            "sgthrs": DEFAULT_STALLGUARD_SGTHRS,
+            "tcoolthrs": DEFAULT_STALLGUARD_ENFORCE_TCOOLTHRS,
+            "enabled": False,
+        }
     try:
         _, config = _read_machine_params_config()
     except Exception:
         return result
-    toml_name = _STEPPER_API_TO_TOML_NAME.get(name, name)
     section = config.get("stepper_stallguard", {})
     entry = section.get(toml_name, {}) if isinstance(section, dict) else {}
     if isinstance(entry, dict):

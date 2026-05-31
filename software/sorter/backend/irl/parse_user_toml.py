@@ -282,19 +282,31 @@ def _parseStepperCurrentOverrides(
     return overrides
 
 
+# Built-in StallGuard defaults so a fresh machine gets working stall detection on
+# the chute and carousel without any machine.toml [stepper_stallguard.*] block.
+# Keyed by canonical (physical) stepper name; (sgthrs, tcoolthrs, enabled). A
+# machine.toml entry for the same motor overrides its default; other motors get
+# nothing unless their TOML adds them. These were tuned on the rev04 bring-up.
+DEFAULT_STEPPER_STALLGUARD: dict[str, tuple[int, int, bool]] = {
+    "carousel": (148, 150, True),
+    "chute_stepper": (55, 150, True),
+}
+
+
 def _parseStepperStallguard(
     gc: GlobalConfig,
     raw: dict[str, object],
 ) -> dict[str, tuple[int, int, bool]]:
     table: object = raw.get("stepper_stallguard")
     if table is None:
-        return {}
+        return dict(DEFAULT_STEPPER_STALLGUARD)
 
     if not isinstance(table, dict):
         gc.logger.warning("stepper_stallguard must be an object. Ignoring StallGuard config.")
-        return {}
+        return dict(DEFAULT_STEPPER_STALLGUARD)
 
-    configs: dict[str, tuple[int, int, bool]] = {}
+    # Start from the built-in defaults; TOML entries below override per motor.
+    configs: dict[str, tuple[int, int, bool]] = dict(DEFAULT_STEPPER_STALLGUARD)
     for stepper_name, value in table.items():
         if not isinstance(stepper_name, str):
             gc.logger.warning(
