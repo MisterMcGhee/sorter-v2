@@ -24,6 +24,9 @@ class InterfaceCommandCode(BaseCommandCode):
     STEPPER_HOME = 0x17
     STEPPER_JITTER = 0x18
     STEPPER_IS_JITTERING = 0x19
+    STEPPER_ENABLE_STALL_DETECTION = 0x1A
+    STEPPER_GET_STALL_STATUS = 0x1B  # channel ignored; returns a per-board stall bitmask
+    STEPPER_CLEAR_STALL = 0x1C
     # Stepper driver commands
     STEPPER_DRV_SET_ENABLED = 0x20
     STEPPER_DRV_SET_MICROSTEPS = 0x21
@@ -97,6 +100,12 @@ class StepperMotor:
         self._last_set_current: dict[str, int] | None = None
         self._gc = gc
         self.software_disabled = False
+        # StallGuard config, stamped from [stepper_stallguard.*] at init by
+        # applyStepperStallguard. The stall monitor reads these to decide which
+        # steppers to arm and at what threshold. sgthrs is None => unconfigured.
+        self.stallguard_sgthrs: int | None = None
+        self.stallguard_tcoolthrs: int = 0xFFFFF
+        self.stallguard_enabled: bool = False
         # Per-stepper default acceleration, set from StepperConfig at init. Every
         # move re-asserts it (see _ensure_move_acceleration) so a move never runs
         # on a stale acceleration left behind by a prior operation. None means
@@ -364,6 +373,13 @@ class StepperMotor:
         payload = struct.pack("<BI", address, value) # 1 byte for address, 4 bytes for value
         self._dev.send_command(InterfaceCommandCode.STEPPER_DRV_WRITE_REGISTER, self._channel, payload)
 
+    def enable_stall_detection(self, enable: bool) -> None:
+        payload = struct.pack("<?", enable)
+        self._dev.send_command(InterfaceCommandCode.STEPPER_ENABLE_STALL_DETECTION, self._channel, payload)
+
+    def clear_stall(self) -> None:
+        self._dev.send_command(InterfaceCommandCode.STEPPER_CLEAR_STALL, self._channel, b'')
+
     @property
     def steps_per_revolution(self):
         return self._steps_per_revolution
@@ -393,6 +409,10 @@ class StepperMotor:
     def total_steps_per_rev(self) -> int:
         """Get the total microsteps per revolution (considering microsteps)."""
         return self._steps_per_revolution * self._microsteps
+
+    @property
+    def name(self) -> str:
+        return self._name
 
     def set_name(self, name: str) -> None:
         """Set a human-readable name for this stepper."""
@@ -468,7 +488,11 @@ class ServoMotor:
         self._dev = device
         self._channel = channel
         self._name = f"servo_{channel}"
-        self._current_angle = 0
+        # What we think the servo's angle is. None means "unknown" — we have
+        # not commanded a move since boot, so we cannot claim to know where it
+        # is. Set on every move_to / move_to_and_release (so it tracks open,
+        # close, jog, and homing) and surfaced anywhere the servo is reported.
+        self._current_angle: int | None = None
         # No factory defaults: a PWM servo must be calibrated (its open and
         # closed angles locked in via the UI) before it is allowed to move.
         # None means "uncalibrated" — open()/close()/toggle() no-op until both
@@ -476,6 +500,13 @@ class ServoMotor:
         # angle that might be mechanically unsafe.
         self._open_angle: int | None = None
         self._closed_angle: int | None = None
+        # Configured motion speeds (°/s, None = firmware default). Speed is
+        # sticky firmware state, so callers apply the right one before a move:
+        # sorting uses open/close speed (apply_open_speed/apply_close_speed),
+        # homing and jog use the standard speed (apply_homing_speed).
+        self._open_speed: int | None = None
+        self._close_speed: int | None = None
+        self._homing_speed: int | None = None
         # Track enabled state locally; the firmware does not provide a GET for enabled.
         self._enabled = False
         self._gc = gc
@@ -611,6 +642,34 @@ class ServoMotor:
         payload = struct.pack("<HH", min_speed, max_speed) # 4 bytes, two little-endian unsigned integers
         self._dev.send_command(InterfaceCommandCode.SERVO_SET_SPEED_LIMITS, self._channel, payload)
 
+    def set_motion_speeds(
+        self,
+        open_speed: int | None,
+        close_speed: int | None,
+        homing_speed: int | None,
+    ) -> None:
+        """Store the configured open/close/homing speeds (°/s). These are not
+        pushed to the firmware here — a caller applies the relevant one with
+        apply_open_speed/apply_close_speed/apply_homing_speed before its move."""
+        self._open_speed = open_speed
+        self._close_speed = close_speed
+        self._homing_speed = homing_speed
+
+    def _apply_speed_deg_s(self, speed_deg_s: int | None) -> None:
+        if speed_deg_s is None:
+            return
+        # Floor of 10 (1°/s) matches _SERVO_SPEED_FLOOR_TENTHS in the router.
+        self.set_speed_limits(10, speed_deg_s * 10)
+
+    def apply_open_speed(self) -> None:
+        self._apply_speed_deg_s(self._open_speed)
+
+    def apply_close_speed(self) -> None:
+        self._apply_speed_deg_s(self._close_speed)
+
+    def apply_homing_speed(self) -> None:
+        self._apply_speed_deg_s(self._homing_speed)
+
     def set_acceleration(self, acceleration: int) -> None:
         """Set the acceleration for the servo in tenths of degrees per second squared."""
         self._gc.logger.info(f"Servo '{self._name}' ch{self._channel}: set_acceleration={acceleration} 0.1°/s²")
@@ -671,8 +730,9 @@ class ServoMotor:
         return self._open_angle is not None and self._closed_angle is not None
 
     @property
-    def angle(self) -> int:
-        """Get the current servo angle."""
+    def angle(self) -> int | None:
+        """What we think the current servo angle is, or None if unknown
+        (no move commanded since boot)."""
         return self._current_angle
 
     @property
@@ -726,6 +786,13 @@ class SorterInterface(MCUDevice):
     @property
     def board_info(self) -> dict:
         return dict(self._board_info)
+
+    def get_stall_status(self) -> int:
+        """Return this board's stall bitmask: bit i set => stepper channel i is
+        latched-stalled. One bus round-trip covers every channel on the board.
+        Channel arg is ignored by the firmware, so we send 0."""
+        res = self.send_command(InterfaceCommandCode.STEPPER_GET_STALL_STATUS, 0, b"")
+        return res.payload[0] if res.payload else 0
 
     def get_observability_info(self, *, force_refresh: bool = False) -> dict:
         if self._observability_info is not None and not force_refresh:

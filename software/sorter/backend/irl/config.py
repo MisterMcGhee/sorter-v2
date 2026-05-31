@@ -61,6 +61,7 @@ from .parse_user_toml import (
     loadCameraLayoutConfig,
     loadGpioLedsConfig,
     applyStepperCurrentOverride,
+    applyStepperStallguard,
 )
 from blob_manager import getBinCategories
 from local_state import get_servo_states, set_servo_states
@@ -1459,6 +1460,7 @@ def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
             )
 
         applyStepperCurrentOverride(stepper, canonical_name, stepper_current_overrides, gc)
+        applyStepperStallguard(stepper, canonical_name, machine_config.stepper_stallguard, gc)
         logical_name = logical_name_for_attr_base.get(attr_base)
         stepper.set_direction_inverted(
             stepper_direction_inverts.get(logical_name, False) if logical_name is not None else False
@@ -1512,11 +1514,17 @@ def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
                 continue
             layer_open = bin_layout.layers[layer_index].servo_open_angle if layer_index < len(bin_layout.layers) else None
             layer_closed = bin_layout.layers[layer_index].servo_closed_angle if layer_index < len(bin_layout.layers) else None
-            # Servos only ever get angles that were explicitly locked in per
-            # layer via the UI. There is no global default to fall back on, so an
-            # uncalibrated layer stays None and will not move.
             if layer_open is not None and layer_closed is not None:
                 servo.set_preset_angles(layer_open, layer_closed)
+            if hasattr(servo, "set_motion_speeds"):
+                servo.set_motion_speeds(
+                    machine_config.servo_open_speed,
+                    machine_config.servo_close_speed,
+                    machine_config.servo_homing_speed,
+                )
+                # Start at the standard speed; sorting re-applies open/close
+                # speed per move and homing re-applies the standard speed.
+                servo.apply_homing_speed()
         restore_servo_states(irl_interface.servos, gc)
 
     irl_interface.machine_profile = build_machine_profile(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -25,6 +26,7 @@ from irl.parse_user_toml import (
     DEFAULT_STEPPER_IHOLD,
     DEFAULT_STEPPER_IHOLD_DELAY,
     DEFAULT_STEPPER_IRUN,
+    DEFAULT_STEPPER_STALLGUARD,
 )
 from server import shared_state
 
@@ -271,6 +273,7 @@ TMC_REG_IHOLD_IRUN = 0x10
 TMC_REG_TSTEP = 0x12
 TMC_REG_TCOOLTHRS = 0x14
 TMC_REG_COOLCONF = 0x42
+TMC_REG_SGTHRS = 0x40
 TMC_REG_SG_RESULT = 0x41
 TMC_REG_MSCNT = 0x6A
 TMC_REG_MSCURACT = 0x6B
@@ -916,14 +919,45 @@ def stop_all_steppers() -> StepperStopAllResponse:
 
 @router.get("/api/stepper/{name}/tmc")
 def get_tmc_settings(name: str) -> Dict[str, Any]:
-    stepper = _resolve_stepper(name)
+    if name not in _STEPPER_API_TO_TOML_NAME:
+        raise HTTPException(status_code=400, detail=f"Unknown stepper '{name}'")
+
+    # Configured values (currents, StallGuard) live in machine.toml and don't need
+    # live hardware to read — so serve them even at standby, when there's no IRL
+    # yet. Only the register read-outs (microsteps, chopper mode, DRV_STATUS,
+    # SG_RESULT) require a live driver; those come back null until hardware is up.
+    try:
+        stepper = _resolve_stepper(name)
+    except HTTPException:
+        stepper = None
+
+    if stepper is None:
+        persisted_current = _current_payload_from_persisted_config(name)
+        return {
+            "hardware_ready": False,
+            "irun": persisted_current["irun"],
+            "ihold": persisted_current["ihold"],
+            "ihold_delay": persisted_current["ihold_delay"],
+            "stallguard": _stallguard_payload_from_persisted_config(name),
+            "capabilities": {
+                "tmc_uart_available": False,
+                "queryable_fields": list(TMC_QUERYABLE_FIELDS),
+            },
+            "registers": None,
+            "microsteps": None,
+            "stealthchop": None,
+            "coolstep": None,
+            "drv_status": None,
+            "sg_result": None,
+        }
+
     registers = _tmc_register_snapshot(stepper)
     gconf_raw = registers["gconf"]
     chopconf_raw = registers["chopconf"]
     coolconf_raw = registers["coolconf"]
     drv_status_raw = registers["drv_status"]
 
-    result: Dict[str, Any] = {}
+    result: Dict[str, Any] = {"hardware_ready": True}
     current_payload = _desired_stepper_current_payload(name, stepper)
     result["irun"] = current_payload["irun"]
     result["ihold"] = current_payload["ihold"]
@@ -963,6 +997,10 @@ def get_tmc_settings(name: str) -> Dict[str, Any]:
         result["sg_result"] = registers["sg_result"]
     else:
         result["sg_result"] = None
+
+    # Persisted StallGuard stall-detection config (or defaults) so the driver
+    # settings UI can show/edit it alongside the other TMC settings.
+    result["stallguard"] = _stallguard_payload_from_persisted_config(name)
 
     return result
 
@@ -1063,6 +1101,178 @@ def _suggested_sgthrs(sg_min: int) -> int:
     return max(1, int(sg_min * 0.4) // 2)
 
 
+# ---------------------------------------------------------------------------
+# Sweep motion profiles
+#
+# A constant-speed spin is a poor stand-in for how a motor is actually loaded in
+# service: the chute aims to angles and reverses (a constant spin just rams its
+# endstop and reads SG_RESULT=0), and the rotors/carousel run in discrete pulses
+# with dwells and the odd unstick jitter — not a steady cruise. These profiles
+# reproduce that so the recorded SG_RESULT reflects real operating load.
+#
+# Each profile models its own timeline from estimated move durations and exposes
+# moving(now): the sampler only records load-bearing motion phases and ignores
+# idle dwells, so dwell zeros don't pollute the threshold. No extra UART status
+# reads — the sample loop is already bus-bound.
+# ---------------------------------------------------------------------------
+
+SWEEP_PROFILES = ("constant", "chute_random", "pulsed")
+
+# Defaults for the unstick jitter folded into the pulsed profile, matching the
+# feeder's real fall-recovery values (go_to_angle config).
+_PULSED_JITTER_AMPLITUDE_DEG = 6.0
+_PULSED_JITTER_CYCLES = 8
+_PULSED_JITTER_SPEED = 6500
+_PULSED_JITTER_ACCEL = 180000
+
+
+class _SweepMotion:
+    def start(self, now: float) -> None: ...
+    def tick(self, now: float) -> None: ...
+    def moving(self, now: float) -> bool:
+        return True
+
+
+class _ConstantMotion(_SweepMotion):
+    def __init__(self, target: Any, signed_speed: int) -> None:
+        self._target = target
+        self._signed_speed = signed_speed
+
+    def start(self, now: float) -> None:
+        if not bool(self._target.move_at_speed(self._signed_speed, force=True)):
+            raise RuntimeError("move_at_speed was not acknowledged")
+
+
+# The chute hits HARD STOPS at 0 and 360 deg of output travel (it can cross
+# neither). Stay well inside that with the same cap the stress test uses.
+CHUTE_SAFE_MAX_DEG = 345.0
+
+
+class _ChuteRandomMotion(_SweepMotion):
+    """Random go-to-angle with immediate turnaround on the real chute, like the
+    chute stress test. Operates on the homed Chute object in ABSOLUTE output
+    degrees clamped to [min_deg, max_deg] within [0, CHUTE_SAFE_MAX_DEG], so it
+    can never reach an endstop. Homes first if the chute lacks a reference —
+    without that, "0 deg" is wherever it powered on and the clamp is meaningless.
+    Targets are at least min_delta_deg apart so every move is a real excursion."""
+
+    def __init__(self, chute: Any, speed: int, min_delta_deg: float, min_deg: float, max_deg: float) -> None:
+        self._chute = chute
+        self._speed = speed
+        self._min_delta = max(1.0, min_delta_deg)
+        self._min = max(0.0, min(min_deg, CHUTE_SAFE_MAX_DEG))
+        self._max = max(self._min, min(max_deg, CHUTE_SAFE_MAX_DEG))
+        # Don't re-check stopped for a beat after issuing a move, so we don't read
+        # a stale "stopped" before the firmware has started the move.
+        self._next_check_at = 0.0
+
+    def _home_if_needed(self) -> None:
+        if bool(getattr(self._chute, "homed", False)):
+            return
+        from subsystems.distribution.chute import HOME_SPEED_MICROSTEPS_PER_SEC, HOME_TIMEOUT_MS
+
+        st = self._chute.stepper
+        st.enabled = True
+        st.home(
+            HOME_SPEED_MICROSTEPS_PER_SEC,
+            self._chute.home_pin,
+            home_pin_active_high=self._chute.endstop_active_high,
+        )
+        deadline = time.monotonic() + HOME_TIMEOUT_MS / 1000.0 + 5.0
+        while time.monotonic() < deadline:
+            try:
+                if st.stopped:
+                    break
+            except Exception:
+                break
+            time.sleep(0.02)
+
+    def _pick(self, current: float) -> float:
+        for _ in range(20):
+            cand = random.uniform(self._min, self._max)
+            if abs(cand - current) >= self._min_delta:
+                return cand
+        mid = (self._min + self._max) / 2.0
+        return self._max if current < mid else self._min
+
+    def _go(self, now: float) -> None:
+        current = float(self._chute.current_angle)
+        target_deg = self._pick(current)
+        self._chute.moveToAngle(target_deg)  # absolute, clamps to [0,360]
+        self._next_check_at = now + 0.05
+
+    def start(self, now: float) -> None:
+        self._chute.stepper.set_speed_limits(0, self._speed)
+        self._home_if_needed()
+        self._go(now)
+
+    def tick(self, now: float) -> None:
+        # Issue the next target only once the previous move has actually finished.
+        # Re-issuing on a guessed timer floods the chute with overlapping reversals
+        # it can't follow (it stalls in place); waiting for a real stop gives clean
+        # go-to-angle moves. Immediate turnaround on stop = the quick reversal.
+        if now < self._next_check_at:
+            return
+        try:
+            if self._chute.stepper.stopped:
+                self._go(now)
+        except Exception:
+            pass
+
+
+class _PulsedMotion(_SweepMotion):
+    """Discrete forward pulses with a dwell between (how the rotors and carousel
+    actually run), with an unstick jitter folded in every jitter_every pulses.
+    moving() is true only during the move/jitter phase, not the dwell."""
+
+    def __init__(
+        self,
+        target: Any,
+        speed: int,
+        pulse_deg: float,
+        dwell_ms: float,
+        jitter_every: int,
+        sign: int,
+    ) -> None:
+        self._target = target
+        self._speed = speed
+        self._pulse_deg = abs(pulse_deg) * (1 if sign >= 0 else -1)
+        self._dwell = max(0.0, dwell_ms) / 1000.0
+        self._jitter_every = max(0, jitter_every)
+        self._count = 0
+        self._phase_end = 0.0
+        self._dwell_end = 0.0
+
+    def _next(self, now: float) -> None:
+        self._count += 1
+        if self._jitter_every and self._count % self._jitter_every == 0:
+            self._target.jitter_degrees(
+                _PULSED_JITTER_AMPLITUDE_DEG,
+                _PULSED_JITTER_CYCLES,
+                _PULSED_JITTER_SPEED,
+                _PULSED_JITTER_ACCEL,
+                force=True,
+            )
+            # Rough upper bound on jitter duration; only gates sampling, not motion.
+            dur_ms = max(200, _PULSED_JITTER_CYCLES * 60)
+        else:
+            self._target.set_speed_limits(0, self._speed)
+            self._target.move_degrees(self._pulse_deg, force=True)
+            dur_ms = self._target.estimateMoveDegreesMs(abs(self._pulse_deg), max_speed=self._speed)
+        self._phase_end = now + max(dur_ms, 1) / 1000.0
+        self._dwell_end = self._phase_end + self._dwell
+
+    def start(self, now: float) -> None:
+        self._next(now)
+
+    def tick(self, now: float) -> None:
+        if now >= self._dwell_end:
+            self._next(now)
+
+    def moving(self, now: float) -> bool:
+        return now < self._phase_end
+
+
 @router.post("/stepper/stallguard-sweep", response_model=StallGuardSweepResponse)
 def stallguard_sweep(
     stepper: str,
@@ -1072,14 +1282,28 @@ def stallguard_sweep(
     sample_interval_s: float = 0.02,
     spin_up_s: float = 0.3,
     tcoolthrs: int = DEFAULT_STALLGUARD_TCOOLTHRS,
+    cruise_tstep: int = 150,
     loaded: bool = False,
     label: Optional[str] = None,
+    profile: str = "constant",
+    chute_min_deg: float = 10.0,
+    chute_max_deg: float = 340.0,
+    min_delta_deg: float = 30.0,
+    pulse_deg: float = 30.0,
+    dwell_ms: float = 250.0,
+    jitter_every: int = 5,
 ) -> StallGuardSweepResponse:
     _ensure_manual_motion_allowed("run a StallGuard sweep")
     if speed <= 0:
         raise HTTPException(status_code=400, detail="speed must be > 0")
     if direction not in ("cw", "ccw"):
         raise HTTPException(status_code=400, detail="direction must be 'cw' or 'ccw'")
+    if profile not in SWEEP_PROFILES:
+        raise HTTPException(
+            status_code=400, detail=f"profile must be one of {', '.join(SWEEP_PROFILES)}"
+        )
+    if cruise_tstep <= 0:
+        raise HTTPException(status_code=400, detail="cruise_tstep must be > 0")
     if duration_s <= 0 or duration_s > MAX_STALLGUARD_SWEEP_DURATION_S:
         raise HTTPException(
             status_code=400,
@@ -1095,14 +1319,39 @@ def stallguard_sweep(
         raise HTTPException(status_code=409, detail=f"Stepper '{stepper}' is busy")
 
     signed_speed = speed if direction == "cw" else -speed
+    sign = 1 if direction == "cw" else -1
     samples: List[StallGuardSample] = []
     telemetry_rows: List[Dict[str, Any]] = []
+
+    chute_restore_speed: Optional[int] = None
+    if profile == "chute_random":
+        # The chute has hard endstops, so its motion must run on the homed Chute
+        # object (absolute, clamped angles) — never a raw open-loop spin.
+        irl = shared_state.getActiveIRL()
+        chute = getattr(irl, "chute", None) if irl is not None else None
+        if chute is None:
+            lock.release()
+            raise HTTPException(
+                status_code=409,
+                detail="chute_random needs the initialized chute; initialize hardware first.",
+            )
+        chute_restore_speed = int(getattr(chute, "operating_speed_microsteps_per_second", speed))
+        motion: _SweepMotion = _ChuteRandomMotion(
+            chute, speed, min_delta_deg, chute_min_deg, chute_max_deg
+        )
+    elif profile == "pulsed":
+        motion = _PulsedMotion(target, speed, pulse_deg, dwell_ms, jitter_every, sign)
+    else:
+        motion = _ConstantMotion(target, signed_speed)
 
     # Static per-run context, captured once (these don't change mid-sweep).
     channel_ctx = getattr(target, "channel", None)
     microsteps_ctx = getattr(target, "_microsteps", None)
     last_current = getattr(target, "last_set_current", None)
     irun_ctx = last_current.get("irun") if isinstance(last_current, dict) else None
+    # Acceleration the sweep runs at: move_at_speed re-asserts the stepper's
+    # configured default acceleration, so that's the value in effect per sample.
+    accel_ctx = getattr(target, "default_acceleration", None)
     gconf = _safe_read_register(target, TMC_REG_GCONF)
     stealth_ctx = (not bool(gconf & (1 << 2))) if isinstance(gconf, int) else None
 
@@ -1117,25 +1366,57 @@ def stallguard_sweep(
             "duration_s": duration_s,
             "sample_interval_s": sample_interval_s,
             "tcoolthrs": tcoolthrs,
+            "cruise_tstep": cruise_tstep,
             "loaded": loaded,
+            "irun": irun_ctx,
+            "acceleration": accel_ctx,
+            "microsteps": microsteps_ctx,
+            "stealthchop": stealth_ctx,
+            "profile": profile,
+            "chute_min_deg": chute_min_deg if profile == "chute_random" else None,
+            "chute_max_deg": chute_max_deg if profile == "chute_random" else None,
+            "min_delta_deg": min_delta_deg if profile == "chute_random" else None,
+            "pulse_deg": pulse_deg if profile == "pulsed" else None,
+            "dwell_ms": dwell_ms if profile == "pulsed" else None,
+            "jitter_every": jitter_every if profile == "pulsed" else None,
         },
     )
 
     try:
+        # The sweep deliberately stalls the motor (loaded test) and opens the
+        # velocity floor wide — so turn live stall detection OFF for the duration,
+        # or an enabled motor would trip its own incident mid-sweep. This is the
+        # ONE place detection is suppressed; it's restored in the finally.
+        try:
+            target.enable_stall_detection(False)
+        except Exception:
+            pass
+        # Measure with SG reported across the whole speed range; the cruise_tstep
+        # filter is applied at analysis time so we still see the transients in the
+        # chart but don't let them set the threshold.
         target.write_driver_register(TMC_REG_TCOOLTHRS, tcoolthrs)
         target.enable_force(True)
-        # move_at_speed re-asserts the stepper's configured default acceleration.
-        if not bool(target.move_at_speed(signed_speed, force=True)):
-            raise RuntimeError("move_at_speed was not acknowledged")
+        motion.start(time.monotonic())
 
-        time.sleep(min(max(spin_up_s, 0.0), 2.0))
+        # A constant spin needs a moment to reach speed before SG_RESULT is valid;
+        # the pulsed/chute profiles are sampled per-move via moving(), so skip it.
+        if profile == "constant":
+            time.sleep(min(max(spin_up_s, 0.0), 2.0))
 
         wall_start = time.time()
         t_start = time.monotonic()
         while True:
-            t = time.monotonic() - t_start
+            now = time.monotonic()
+            t = now - t_start
             if t >= duration_s:
                 break
+            motion.tick(now)
+            if not motion.moving(now):
+                # Idle dwell between pulses — its SG_RESULT isn't load data.
+                remaining = sample_interval_s - (time.monotonic() - t_start - t)
+                if remaining > 0:
+                    time.sleep(remaining)
+                continue
             sg = _safe_read_register(target, TMC_REG_SG_RESULT)
             drv = _safe_read_register(target, TMC_REG_DRV_STATUS)
             tstep = _safe_read_register(target, TMC_REG_TSTEP)
@@ -1161,6 +1442,7 @@ def stallguard_sweep(
                     "drv_status_raw": drv if isinstance(drv, int) else None,
                     "commanded_speed": signed_speed,
                     "irun": irun_ctx,
+                    "acceleration": accel_ctx,
                     "microsteps": microsteps_ctx,
                     "stealthchop": stealth_ctx,
                     "loaded": loaded,
@@ -1185,26 +1467,48 @@ def stallguard_sweep(
             _halt_stepper(target, force=True)
         except Exception:
             pass
+        # Restore the motor's resting state. If it has live stall detection
+        # configured, put its enforcement velocity floor back and re-enable
+        # detection (we turned it off above); otherwise just zero the floor so the
+        # sweep leaves nothing half-configured.
         try:
-            target.write_driver_register(TMC_REG_TCOOLTHRS, 0)
+            if getattr(target, "stallguard_enabled", False) and target.stallguard_sgthrs is not None:
+                target.write_driver_register(TMC_REG_TCOOLTHRS, target.stallguard_tcoolthrs)
+                target.clear_stall()
+                target.enable_stall_detection(True)
+            else:
+                target.write_driver_register(TMC_REG_TCOOLTHRS, 0)
         except Exception:
             pass
+        # chute_random retunes the chute stepper's speed limits; restore them to
+        # the chute's operating speed so normal aiming isn't left at sweep speed.
+        if chute_restore_speed is not None:
+            try:
+                target.set_speed_limits(16, chute_restore_speed)
+            except Exception:
+                pass
         try:
             lock.release()
         except RuntimeError:
             pass
 
     valid = [s.sg_result for s in samples if s.sg_result >= 0]
+    # Threshold tuning only considers CRUISE samples (TSTEP <= cruise_tstep). At
+    # accel/decel/reversal the velocity is low and SG_RESULT dips even unloaded,
+    # which would drag the floor down and produce a uselessly low threshold. The
+    # chart still shows every sample; only the suggestion is cruise-filtered.
+    cruise = [s.sg_result for s in samples if s.sg_result >= 0 and 0 <= s.tstep <= cruise_tstep]
+    basis = cruise if cruise else valid
     stats: Optional[StallGuardSweepStats] = None
     sgthrs: Optional[int] = None
-    if valid:
-        sg_min = min(valid)
+    if basis:
+        sg_min = min(basis)
         sgthrs = _suggested_sgthrs(sg_min)
         stats = StallGuardSweepStats(
-            samples=len(valid),
+            samples=len(basis),
             sg_min=sg_min,
-            sg_max=max(valid),
-            sg_mean=round(sum(valid) / len(valid), 1),
+            sg_max=max(basis),
+            sg_mean=round(sum(basis) / len(basis), 1),
             suggested_sgthrs=sgthrs,
             suggested_trigger_level=sgthrs * 2,
         )
@@ -1247,6 +1551,44 @@ class StallGuardConfigResponse(BaseModel):
     enabled: bool
 
 
+# Defaults shown in the per-stepper driver settings when a motor has no saved
+# StallGuard config yet. Disabled by default; the numbers are just sane starting
+# points to tune from on the StallGuard page (cruise velocity floor ~150).
+DEFAULT_STALLGUARD_SGTHRS = 50
+DEFAULT_STALLGUARD_ENFORCE_TCOOLTHRS = 150
+
+
+def _stallguard_payload_from_persisted_config(name: str) -> Dict[str, Any]:
+    toml_name = _STEPPER_API_TO_TOML_NAME.get(name, name)
+    # Seed from the motor's built-in default (chute/carousel have tuned ones), so a
+    # fresh machine with no TOML entry still shows its real applied config rather
+    # than a generic placeholder. Motors with no built-in default fall back to the
+    # generic disabled placeholder.
+    builtin = DEFAULT_STEPPER_STALLGUARD.get(toml_name)
+    if builtin is not None:
+        result: Dict[str, Any] = {"sgthrs": builtin[0], "tcoolthrs": builtin[1], "enabled": builtin[2]}
+    else:
+        result = {
+            "sgthrs": DEFAULT_STALLGUARD_SGTHRS,
+            "tcoolthrs": DEFAULT_STALLGUARD_ENFORCE_TCOOLTHRS,
+            "enabled": False,
+        }
+    try:
+        _, config = _read_machine_params_config()
+    except Exception:
+        return result
+    section = config.get("stepper_stallguard", {})
+    entry = section.get(toml_name, {}) if isinstance(section, dict) else {}
+    if isinstance(entry, dict):
+        if isinstance(entry.get("sgthrs"), int):
+            result["sgthrs"] = entry["sgthrs"]
+        if isinstance(entry.get("tcoolthrs"), int):
+            result["tcoolthrs"] = entry["tcoolthrs"]
+        if isinstance(entry.get("enabled"), bool):
+            result["enabled"] = entry["enabled"]
+    return result
+
+
 def _persist_stepper_stallguard(api_name: str, sgthrs: int, tcoolthrs: int, enabled: bool) -> None:
     toml_name = _STEPPER_API_TO_TOML_NAME.get(api_name, api_name)
     params_path, config = _read_machine_params_config()
@@ -1266,9 +1608,26 @@ def _persist_stepper_stallguard(api_name: str, sgthrs: int, tcoolthrs: int, enab
 
 @router.post("/stepper/{stepper}/stallguard-config", response_model=StallGuardConfigResponse)
 def set_stallguard_config(stepper: str, body: StallGuardConfigBody) -> StallGuardConfigResponse:
-    _resolve_stepper(stepper)
+    target = _resolve_stepper(stepper)
     toml_name = _STEPPER_API_TO_TOML_NAME.get(stepper, stepper)
     _persist_stepper_stallguard(stepper, body.sgthrs, body.tcoolthrs, body.enabled)
+
+    # Apply live so the change takes effect on the very next move — no reinit
+    # needed. Stamp the attrs the stall monitor reads, write the driver registers,
+    # and turn detection on/off. When disabled, drop the velocity floor to 0 so
+    # DIAG can never fire. Best-effort: a UART hiccup here still leaves the config
+    # persisted, and hardware init will re-apply it.
+    try:
+        target.stallguard_sgthrs = body.sgthrs
+        target.stallguard_tcoolthrs = body.tcoolthrs
+        target.stallguard_enabled = body.enabled
+        target.write_driver_register(TMC_REG_SGTHRS, body.sgthrs)
+        target.write_driver_register(TMC_REG_TCOOLTHRS, body.tcoolthrs if body.enabled else 0)
+        target.clear_stall()
+        target.enable_stall_detection(bool(body.enabled))
+    except Exception:
+        pass
+
     return StallGuardConfigResponse(
         success=True,
         stepper=stepper,
@@ -1277,3 +1636,174 @@ def set_stallguard_config(stepper: str, body: StallGuardConfigBody) -> StallGuar
         tcoolthrs=body.tcoolthrs,
         enabled=body.enabled,
     )
+
+
+# ---------------------------------------------------------------------------
+# Threshold suggestion — pair-based, from the measured unloaded/loaded gap
+#
+# A single run can't set an accurate SGTHRS: an unloaded run only shows the floor
+# (the ceiling the trigger must stay under) and a loaded run only shows the stall
+# dip (the level the trigger must clear). The accurate trigger sits in the gap
+# between the two, so we take cruise samples from the LATEST run of BOTH kinds for
+# the motor and place the trigger at the geometric midpoint — equal ratio margin
+# above the stall dip and below the normal floor. SGTHRS = trigger / 2 because
+# DIAG fires at SG_RESULT <= 2*SGTHRS.
+#
+# Deliberately the *latest* run of each kind, not a pool of recent ones: pooling
+# sweeps in stale runs at other speeds or from a since-changed driver config
+# (e.g. the old SpreadCycle-hybrid runs whose floor collapsed to ~6), which drags
+# the pooled floor down and yields a uselessly low threshold. The freshest run is
+# the one tuned to the current config. Percentiles within that run still guard
+# against single-sample outliers.
+# ---------------------------------------------------------------------------
+
+_FLOOR_PERCENTILE = 0.05   # unloaded: worst-case normal cruise (low end of floor)
+_DIP_PERCENTILE = 0.10     # loaded: representative stall dip (low end)
+
+
+class StallGuardSuggestionResponse(BaseModel):
+    success: bool
+    stepper: str
+    cruise_tstep: int
+    unloaded_floor: Optional[int]
+    loaded_dip: Optional[int]
+    trigger_level: Optional[int]
+    suggested_sgthrs: Optional[int]
+    enough_data: bool
+    unloaded_runs: int
+    loaded_runs: int
+    detail: str
+
+
+def _percentile(sorted_vals: List[int], q: float) -> Optional[int]:
+    if not sorted_vals:
+        return None
+    idx = int(round(q * (len(sorted_vals) - 1)))
+    return sorted_vals[max(0, min(len(sorted_vals) - 1, idx))]
+
+
+def _cruise_sg(run: Optional[Dict[str, Any]], cruise_tstep: int) -> List[int]:
+    if run is None:
+        return []
+    out: List[int] = []
+    for s in stepper_telemetry.getRunSamples(run["id"]):
+        sg = s.get("sg_result")
+        ts = s.get("tstep")
+        if (
+            isinstance(sg, int)
+            and sg >= 0
+            and isinstance(ts, int)
+            and 0 <= ts <= cruise_tstep
+        ):
+            out.append(sg)
+    return sorted(out)
+
+
+@router.get(
+    "/stepper/{stepper}/stallguard-suggestion",
+    response_model=StallGuardSuggestionResponse,
+)
+def stallguard_suggestion(
+    stepper: str, cruise_tstep: Optional[int] = None
+) -> StallGuardSuggestionResponse:
+    """Pure DB analysis — no hardware. Takes cruise SG from the latest unloaded
+    (sweep) and latest loaded (stall_test) run for this motor and returns the
+    geometric-midpoint trigger between the normal floor and the stall dip."""
+    if stepper not in _STEPPER_API_TO_TOML_NAME:
+        raise HTTPException(status_code=400, detail=f"Unknown stepper '{stepper}'")
+
+    def _latest(source: str) -> Optional[Dict[str, Any]]:
+        rows = stepper_telemetry.listRuns(
+            stepper_name=stepper, source=source, limit=50
+        )
+        for r in rows:  # listRuns is newest-first
+            if r.get("status") == stepper_telemetry.RUN_STATUS_COMPLETED:
+                return r
+        return None
+
+    unloaded_run = _latest(stepper_telemetry.SOURCE_SWEEP)
+    loaded_run = _latest(stepper_telemetry.SOURCE_STALL_TEST)
+
+    if cruise_tstep is None:
+        latest_params = unloaded_run["params"] if unloaded_run else None
+        ct = int(latest_params.get("cruise_tstep", 150)) if isinstance(latest_params, dict) else 150
+    else:
+        ct = cruise_tstep
+    ct = max(1, ct)
+
+    floor = _percentile(_cruise_sg(unloaded_run, ct), _FLOOR_PERCENTILE)
+    dip = _percentile(_cruise_sg(loaded_run, ct), _DIP_PERCENTILE)
+
+    trigger: Optional[int] = None
+    sgthrs: Optional[int] = None
+    enough = False
+    if floor is not None and dip is not None:
+        # Geometric midpoint of the gap. Clamp dip to >=1 so a stall floor that
+        # reaches 0 doesn't collapse the geo-mean to 0.
+        trigger = int(round(math.sqrt(float(floor) * float(max(1, dip)))))
+        sgthrs = max(1, min(255, round(trigger / 2)))
+        enough = True
+        detail = (
+            f"Balanced trigger {trigger} = geo-mean(floor {floor}, dip {dip}) "
+            "from the latest unloaded + latest loaded run."
+        )
+    elif floor is not None:
+        # Provisional: no loaded stall test yet, so we can't see the dip. Fall
+        # back to a fraction of the floor and flag it as unvalidated.
+        trigger = int(round(floor * 0.4))
+        sgthrs = max(1, min(255, round(trigger / 2)))
+        detail = (
+            "No loaded stall test for this motor yet — provisional SGTHRS from the "
+            "unloaded floor only. Run a loaded (held/resisted) sweep to validate."
+        )
+    elif dip is not None:
+        detail = "Only loaded runs found — run an unloaded sweep to measure the normal floor."
+    elif unloaded_run is not None or loaded_run is not None:
+        # Runs exist and completed, but the cruise filter kept nothing from either
+        # — every sample was below cruise velocity (TSTEP > cruise_tstep). This is
+        # what the pulsed/jitter profiles produce: the motor never sustains cruise,
+        # so SG_RESULT is all accel/decel and there's no valid load reading to tune
+        # from. Don't tell the user to re-run sweeps they already ran.
+        have = " + ".join(
+            kind
+            for kind, run in (("unloaded", unloaded_run), ("loaded", loaded_run))
+            if run is not None
+        )
+        detail = (
+            f"Latest {have} run completed but produced 0 cruise samples "
+            f"(none reached TSTEP <= {ct}) — the profile never sustained cruise "
+            "velocity. StallGuard only reads load at constant cruise; use the "
+            "constant profile to calibrate SGTHRS."
+        )
+    else:
+        detail = "No completed runs for this motor yet — run an unloaded and a loaded sweep."
+
+    return StallGuardSuggestionResponse(
+        success=True,
+        stepper=stepper,
+        cruise_tstep=ct,
+        unloaded_floor=floor,
+        loaded_dip=dip,
+        trigger_level=trigger,
+        suggested_sgthrs=sgthrs,
+        enough_data=enough,
+        unloaded_runs=1 if unloaded_run else 0,
+        loaded_runs=1 if loaded_run else 0,
+        detail=detail,
+    )
+
+
+@router.post("/stall-incident/clear")
+def clear_stall_incident() -> Dict[str, Any]:
+    """Operator-acknowledge a stall. Clears the blocking incident; the stall
+    monitor resets the firmware latch and re-arms detection on its next poll."""
+    from stepper_stall_monitor import STEPPER_STALL_INCIDENT_KIND
+
+    gc = shared_state.gc_ref
+    runtime_stats = getattr(gc, "runtime_stats", None) if gc is not None else None
+    if runtime_stats is None or not hasattr(runtime_stats, "clearActiveIncident"):
+        raise HTTPException(status_code=503, detail="runtime stats unavailable")
+    active = runtime_stats.activeIncident() if hasattr(runtime_stats, "activeIncident") else None
+    runtime_stats.clearActiveIncident(kind=STEPPER_STALL_INCIDENT_KIND)
+    cleared = isinstance(active, dict) and active.get("kind") == STEPPER_STALL_INCIDENT_KIND
+    return {"ok": True, "cleared": cleared, "kind": STEPPER_STALL_INCIDENT_KIND}

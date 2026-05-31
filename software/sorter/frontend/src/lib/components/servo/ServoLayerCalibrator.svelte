@@ -14,6 +14,7 @@
 		Keyboard,
 		Cog
 	} from 'lucide-svelte';
+	import ServoSpeedSettings from './ServoSpeedSettings.svelte';
 	import { onMount } from 'svelte';
 	import { getBackendHttpBase, machineHttpBaseUrlFromWsUrl } from '$lib/backend';
 	import { getMachinesContext } from '$lib/machines/context';
@@ -33,6 +34,8 @@
 		closedAngle: number | null;
 		currentAngle: number | null;
 		busy: boolean;
+		lockStatus: 'idle' | 'saving' | 'saved' | 'error';
+		lockError: string;
 	};
 
 	let {
@@ -54,6 +57,24 @@
 	let allowedCounts = $state<number[]>([12, 18, 30]);
 	let jogStep = $state(5);
 	let selectedIndex = $state<number | null>(null);
+
+	// Signature of everything the "Save servo layers" button persists (layer
+	// add/remove, channel, invert, bin count, max/bin, active). Captured at load
+	// and after each save; `dirty` flags the form whenever the two diverge. Open/
+	// closed angles and speeds persist through their own endpoints, so they're
+	// deliberately left out — they don't dirty this form.
+	let savedSignature = $state('');
+	function layerSignature(list: LayerDraft[]): string {
+		return JSON.stringify(
+			list.map((l) => [l.enabled, l.channel, l.invert, l.binCount, l.maxPiecesPerBin.trim()])
+		);
+	}
+	let dirty = $derived(layerSignature(layers) !== savedSignature);
+
+	// Global servo speeds (°/s). null = not overridden (firmware default applies).
+	let openSpeed = $state<number | null>(null);
+	let closeSpeed = $state<number | null>(null);
+	let homingSpeed = $state<number | null>(null);
 
 	// Global angles are no longer used to drive PCA servos, but the /servo
 	// endpoint still round-trips them, so preserve whatever is stored.
@@ -88,6 +109,9 @@
 			backend = servo.backend === 'waveshare' ? 'waveshare' : 'pca9685';
 			globalOpenAngle = typeof servo.open_angle === 'number' ? servo.open_angle : null;
 			globalClosedAngle = typeof servo.closed_angle === 'number' ? servo.closed_angle : null;
+			openSpeed = typeof servo.open_speed === 'number' ? servo.open_speed : null;
+			closeSpeed = typeof servo.close_speed === 'number' ? servo.close_speed : null;
+			homingSpeed = typeof servo.homing_speed === 'number' ? servo.homing_speed : null;
 			port = typeof servo.port === 'string' ? servo.port : null;
 			channelChoices = Array.isArray(servo.available_channel_ids)
 				? servo.available_channel_ids
@@ -125,11 +149,15 @@
 							: '',
 					openAngle: typeof sl.servo_open_angle === 'number' ? sl.servo_open_angle : null,
 					closedAngle: typeof sl.servo_closed_angle === 'number' ? sl.servo_closed_angle : null,
-					currentAngle: null,
-					busy: false
+					currentAngle:
+						typeof sl.servo_current_angle === 'number' ? sl.servo_current_angle : null,
+					busy: false,
+					lockStatus: 'idle',
+					lockError: ''
 				});
 			}
 			layers = next;
+			savedSignature = layerSignature(next);
 			if (selectedIndex !== null && selectedIndex >= layers.length) selectedIndex = null;
 		} catch (e: any) {
 			errorMsg = e.message ?? 'Failed to load servo layers';
@@ -179,13 +207,20 @@
 	}
 
 	async function lockAngle(layerIndex: number, which: 'open' | 'closed') {
+		// The /lock endpoint persists the angle to the backend immediately, so
+		// locking is the save — the per-layer indicator reflects that write.
+		setLayer(layerIndex, { lockStatus: 'saving', lockError: '' });
 		const result = await postLayerAction(layerIndex, 'lock', { which });
 		if (result) {
 			setLayer(layerIndex, {
 				openAngle: typeof result.open_angle === 'number' ? result.open_angle : null,
-				closedAngle: typeof result.closed_angle === 'number' ? result.closed_angle : null
+				closedAngle: typeof result.closed_angle === 'number' ? result.closed_angle : null,
+				lockStatus: 'saved',
+				lockError: ''
 			});
 			statusMsg = result.message ?? `Layer ${layerIndex + 1} ${which} angle locked.`;
+		} else {
+			setLayer(layerIndex, { lockStatus: 'error', lockError: errorMsg ?? 'Save failed' });
 		}
 	}
 
@@ -253,6 +288,9 @@
 					backend: 'pca9685',
 					open_angle: globalOpenAngle,
 					closed_angle: globalClosedAngle,
+					open_speed: openSpeed,
+					close_speed: closeSpeed,
+					homing_speed: homingSpeed,
 					port,
 					channels
 				})
@@ -268,6 +306,23 @@
 		}
 	}
 
+	function nextChannel(): string {
+		// Auto-assign the next channel after the highest one already used, so a
+		// fresh layer lands on an unused channel without manual picking. Falls back
+		// to the first available choice (or blank) when nothing is assigned yet.
+		const used = layers
+			.map((l) => (l.channel.trim().length > 0 ? Number(l.channel) : null))
+			.filter((n): n is number => n !== null && Number.isInteger(n));
+		if (used.length > 0) {
+			const candidate = Math.max(...used) + 1;
+			if (channelChoices.length === 0 || channelChoices.includes(candidate)) {
+				return String(candidate);
+			}
+		}
+		const firstFree = channelChoices.find((c) => !used.includes(c));
+		return firstFree !== undefined ? String(firstFree) : '';
+	}
+
 	function addLayer() {
 		const nextIndex = layers.length;
 		layers = [
@@ -276,20 +331,21 @@
 				layerIndex: nextIndex,
 				label: `Layer ${nextIndex + 1}`,
 				enabled: true,
-				channel: '',
+				channel: nextChannel(),
 				invert: false,
 				binCount: String(allowedCounts[0] ?? 12),
 				maxPiecesPerBin: '',
 				openAngle: null,
 				closedAngle: null,
 				currentAngle: null,
-				busy: false
+				busy: false,
+				lockStatus: 'idle',
+				lockError: ''
 			}
 		];
 	}
 
 	function removeLayer(layerIndex: number) {
-		if (!window.confirm(`Remove Layer ${layerIndex + 1}? Save to apply.`)) return;
 		layers = layers
 			.filter((l) => l.layerIndex !== layerIndex)
 			.map((l, i) => ({ ...l, layerIndex: i, label: `Layer ${i + 1}` }));
@@ -345,6 +401,15 @@
 			positions and lock in the angles — a layer must have both angles locked before it will move
 			during sorting.
 		</div>
+	{/if}
+
+	{#if backend === 'pca9685'}
+		<ServoSpeedSettings
+			bind:openSpeed
+			bind:closeSpeed
+			bind:homingSpeed
+			disabled={loading || saving}
+		/>
 	{/if}
 
 	{#if backend === 'waveshare'}
@@ -517,6 +582,13 @@
 						>
 							<Lock size={14} /> Lock closed
 						</Button>
+						{#if layer.lockStatus === 'saving'}
+							<span class="text-sm text-text-muted">Saving…</span>
+						{:else if layer.lockStatus === 'saved'}
+							<span class="text-sm text-success">Saved</span>
+						{:else if layer.lockStatus === 'error'}
+							<span class="text-sm text-danger" title={layer.lockError}>Failed</span>
+						{/if}
 					</div>
 
 					<div class="h-6 w-px bg-border"></div>
@@ -586,6 +658,11 @@
 			<Button variant="secondary" size="sm" onclick={loadSettings} disabled={loading || saving}>
 				<RotateCcw size={14} /> Reload
 			</Button>
+			{#if dirty}
+				<span class="inline-flex items-center gap-1 bg-warning/15 px-2 py-0.5 text-xs font-medium text-warning">
+					Unsaved changes — save to apply
+				</span>
+			{/if}
 		</div>
 	{/if}
 

@@ -34,6 +34,7 @@ from server.shared_state import (
     setHardwareStartFn,
 )
 from sorter_controller import SorterController
+from stepper_stall_monitor import StepperStallMonitor
 from run_recorder import RunRecorder
 from message_queue.handler import handleServerToMainEvent
 from defs.events import HeartbeatEvent, HeartbeatData, MainThreadToServerCommand
@@ -421,7 +422,22 @@ def main() -> None:
             gc.logger.info("Opening all layer servos...")
             for servo in irl.servos:
                 try:
-                    servo.open()
+                    if getattr(servo, "is_calibrated", True):
+                        if hasattr(servo, "apply_homing_speed"):
+                            servo.apply_homing_speed()
+                        servo.open()
+                    else:
+                        # An uncalibrated servo must never be driven or held. A prior
+                        # calibrator jog leaves the channel energized at a stale angle
+                        # (move_to never releases PWM) and that hold survives a backend
+                        # restart, so a plain open() no-op would leave the servo hunting
+                        # and twitching through homing. Disabling cuts PWM (duty=0) so it
+                        # goes slack and physically cannot move.
+                        servo.enabled = False
+                        gc.logger.info(
+                            f"Servo ch{getattr(servo, 'channel', '?')} uncalibrated — "
+                            "released (PWM off) instead of opening."
+                        )
                 except Exception as e:
                     gc.logger.warning(f"Failed to open servo: {e}. Continuing without initialization.")
             _checkServoBusHealth(gc, irl)
@@ -592,6 +608,8 @@ def main() -> None:
             shared_state.setHardwareStatus(homing_step="Opening servos...")
             for servo in irl.servos:
                 try:
+                    if hasattr(servo, "apply_homing_speed"):
+                        servo.apply_homing_speed()
                     servo.open()
                 except Exception as e:
                     gc.logger.warning(f"Failed to open servo: {e}. Continuing without initialization.")
@@ -603,6 +621,19 @@ def main() -> None:
     setHardwareStartFn(_home_hardware)
     setHardwareInitializeFn(_initialize_hardware)
     setHardwareResetFn(lambda: _cleanup_runtime_hardware("system reset"))
+
+    # StallGuard stall detection: a daemon thread polls the firmware DIAG latch
+    # for every stepper that has an enabled threshold and raises a blocking
+    # `stepper_stall` incident on a stall. Detection is on for all moves (armed at
+    # hardware init), so this watcher needs no machine-state gating. Off the main
+    # loop so the UART reads never hitch operation.
+    if not _noPowerModeActive(gc):
+        stall_monitor = StepperStallMonitor(gc)
+        threading.Thread(
+            target=stall_monitor.run,
+            daemon=True,
+            name="stall-monitor",
+        ).start()
 
     last_heartbeat = time.time()
     last_frame_record = time.time()

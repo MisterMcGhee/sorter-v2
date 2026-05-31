@@ -183,9 +183,16 @@ class Chute:
         )
         if unclamped:
             return angle
-        if angle < 0 or angle > CHUTE_MAX_ANGLE:
+        # The chute travels [0, CHUTE_MAX_ANGLE] and can never cross the home
+        # stop, so wrap the bin onto the circle: it is reachable iff its wrapped
+        # position lands inside the travel window. The arc (CHUTE_MAX_ANGLE, 360)
+        # just before home is the only dead wedge. Wrapping is what lets a
+        # section that home cut through still serve the bins sitting just
+        # clockwise of home — reached the long way round, never across the stop.
+        norm = angle % 360.0
+        if norm > CHUTE_MAX_ANGLE:
             return None
-        return angle
+        return norm
 
     def getAngleForBin(self, address: BinAddress) -> float | None:
         num_bins = self._binsInSection(address.layer_index, address.section_index)
@@ -276,19 +283,36 @@ class Chute:
 
     def home(self) -> bool:
         self.logger.info("Chute: homing via sensor")
+        pos_before = self.current_angle
+        raw_before = self.raw_endstop_active
         self.stepper.home(
             HOME_SPEED_MICROSTEPS_PER_SEC,
             self.home_pin,
             home_pin_active_high=self.endstop_active_high,
         )
         start = time.monotonic()
+        polls = 0
         while not self.stepper.stopped:
+            polls += 1
             if (time.monotonic() - start) * 1000 > HOME_TIMEOUT_MS:
-                self.logger.error("Chute: homing timed out")
+                self.logger.error(
+                    f"Chute: homing timed out after {HOME_TIMEOUT_MS}ms "
+                    f"(polls={polls}, moved={self.current_angle - pos_before:.2f}°, "
+                    f"endstop raw={self.raw_endstop_active} triggered={self.endstop_triggered})"
+                )
                 return False
             time.sleep(0.01)
+        elapsed_ms = (time.monotonic() - start) * 1000
         if not self.endstop_triggered:
-            self.logger.warning("Chute: homing stopped before the endstop triggered")
+            self.logger.warning(
+                "Chute: homing stopped before the endstop triggered "
+                f"(elapsed={elapsed_ms:.0f}ms, polls={polls}, "
+                f"moved={self.current_angle - pos_before:.2f}° from {pos_before:.2f}°, "
+                f"endstop raw {raw_before}->{self.raw_endstop_active} "
+                f"(active_high={self.endstop_active_high}, triggered={self.endstop_triggered})). "
+                "polls<=1 / moved~0 means the firmware reported stopped before motion began (race); "
+                "large moved means it travelled without the switch ever firing."
+            )
             return False
         if not self._backoffToFirstBin():
             return False

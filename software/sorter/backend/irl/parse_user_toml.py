@@ -153,9 +153,13 @@ def loadFeedingModeConfig(
 
 @dataclass
 class MachineConfig:
-    servo_open_angle: int | None = None
-    servo_closed_angle: int | None = None
+    servo_open_speed: int | None = None
+    servo_close_speed: int | None = None
+    servo_homing_speed: int | None = None
     stepper_current_overrides: dict[str, tuple[int, int, int]] = field(default_factory=dict)
+    # canonical stepper name -> (sgthrs, tcoolthrs, enabled). From
+    # [stepper_stallguard.*]; consumed by applyStepperStallguard + the stall monitor.
+    stepper_stallguard: dict[str, tuple[int, int, bool]] = field(default_factory=dict)
 
 
 def loadMachineSpecificParams(gc: GlobalConfig) -> dict[str, object]:
@@ -278,6 +282,72 @@ def _parseStepperCurrentOverrides(
     return overrides
 
 
+# Built-in StallGuard defaults so a fresh machine gets working stall detection on
+# the chute and carousel without any machine.toml [stepper_stallguard.*] block.
+# Keyed by canonical (physical) stepper name; (sgthrs, tcoolthrs, enabled). A
+# machine.toml entry for the same motor overrides its default; other motors get
+# nothing unless their TOML adds them. These were tuned on the rev04 bring-up.
+DEFAULT_STEPPER_STALLGUARD: dict[str, tuple[int, int, bool]] = {
+    "carousel": (148, 150, True),
+    "chute_stepper": (55, 150, True),
+}
+
+
+def _parseStepperStallguard(
+    gc: GlobalConfig,
+    raw: dict[str, object],
+) -> dict[str, tuple[int, int, bool]]:
+    table: object = raw.get("stepper_stallguard")
+    if table is None:
+        return dict(DEFAULT_STEPPER_STALLGUARD)
+
+    if not isinstance(table, dict):
+        gc.logger.warning("stepper_stallguard must be an object. Ignoring StallGuard config.")
+        return dict(DEFAULT_STEPPER_STALLGUARD)
+
+    # Start from the built-in defaults; TOML entries below override per motor.
+    configs: dict[str, tuple[int, int, bool]] = dict(DEFAULT_STEPPER_STALLGUARD)
+    for stepper_name, value in table.items():
+        if not isinstance(stepper_name, str):
+            gc.logger.warning(
+                f"Ignoring invalid stepper key in stallguard config: {stepper_name!r} (must be string)"
+            )
+            continue
+
+        if not isinstance(value, dict):
+            gc.logger.warning(
+                f"Ignoring stallguard config for '{stepper_name}': expected object with sgthrs/tcoolthrs/enabled."
+            )
+            continue
+
+        sgthrs = value.get("sgthrs", -1)  # -1 => missing; rejected by range check below
+        tcoolthrs = value.get("tcoolthrs", 0xFFFFF)
+        enabled = value.get("enabled", True)
+
+        fields_valid = (
+            type(sgthrs) is int
+            and type(tcoolthrs) is int
+            and isinstance(enabled, bool)
+            and 0 <= sgthrs <= 255
+            and 0 <= tcoolthrs <= 0xFFFFF
+        )
+
+        if not fields_valid:
+            gc.logger.warning(
+                f"Ignoring invalid stallguard config for '{stepper_name}': {value!r} "
+                f"(requires sgthrs:0-255, tcoolthrs:0-0xFFFFF, enabled:bool)."
+            )
+            continue
+
+        configs[normalizePhysicalStepperBindingName(stepper_name)] = (
+            int(sgthrs),
+            int(tcoolthrs),
+            bool(enabled),
+        )
+
+    return configs
+
+
 def loadStepperBindingOverrides(
     gc: GlobalConfig,
     machine_specific_params: dict[str, object] | None = None,
@@ -384,10 +454,10 @@ def loadStepperDirectionInverts(
     return overrides
 
 
-def _validateAngle(gc: GlobalConfig, name: str, value: object, default: int | None) -> int | None:
-    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 180:
+def _validateServoSpeed(gc: GlobalConfig, name: str, value: object, default: int | None) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 2000:
         return value
-    gc.logger.warning(f"Invalid {name}={value!r}; expected int 0-180. Using {default}.")
+    gc.logger.warning(f"Invalid {name}={value!r}; expected int 1-2000 (°/s). Using {default}.")
     return default
 
 
@@ -406,18 +476,23 @@ def loadMachineConfig(
 
     servo_params = raw.get("servo")
     if isinstance(servo_params, dict):
-        if "open_angle" in servo_params:
-            config.servo_open_angle = _validateAngle(
-                gc, "servo.open_angle", servo_params.get("open_angle"), None
+        if "open_speed" in servo_params:
+            config.servo_open_speed = _validateServoSpeed(
+                gc, "servo.open_speed", servo_params.get("open_speed"), None
             )
-        if "closed_angle" in servo_params:
-            config.servo_closed_angle = _validateAngle(
-                gc, "servo.closed_angle", servo_params.get("closed_angle"), None
+        if "close_speed" in servo_params:
+            config.servo_close_speed = _validateServoSpeed(
+                gc, "servo.close_speed", servo_params.get("close_speed"), None
+            )
+        if "homing_speed" in servo_params:
+            config.servo_homing_speed = _validateServoSpeed(
+                gc, "servo.homing_speed", servo_params.get("homing_speed"), None
             )
     elif servo_params is not None:
         gc.logger.warning("Ignoring invalid servo config: expected object.")
 
     config.stepper_current_overrides = _parseStepperCurrentOverrides(gc, raw)
+    config.stepper_stallguard = _parseStepperStallguard(gc, raw)
 
     return config
 
@@ -868,6 +943,76 @@ def applyStepperCurrentOverride(
     gc.logger.info(
         f"Stepper '{stepper_name}' current config applied from {source}: "
         f"IRUN={irun}, IHOLD={ihold}, IHOLD_DELAY={ihold_delay}"
+    )
+
+
+# TMC2209 StallGuard registers.
+_TMC_REG_TCOOLTHRS = 0x14
+_TMC_REG_SGTHRS = 0x40
+
+
+def applyStepperStallguard(
+    stepper: "StepperMotor",
+    stepper_name: str,
+    configs: dict[str, tuple[int, int, bool]],
+    gc: GlobalConfig,
+) -> None:
+    """Stamp [stepper_stallguard.*] onto the stepper, write SGTHRS/TCOOLTHRS, and
+    turn DIAG detection ON.
+
+    Simple rule: if a stepper has an enabled entry, detection is on for every
+    move — there is no per-move or per-state arming. It's switched on once here at
+    hardware init and stays on. (Homing doesn't false-trip because it runs far
+    slower than cruise, below the TCOOLTHRS velocity floor where DIAG is inactive.)
+    Steppers with no entry, or enabled=false, are simply left off.
+    """
+    config = configs.get(stepper_name)
+    if config is None:
+        return
+    sgthrs, tcoolthrs, enabled = config
+    stepper.stallguard_sgthrs = sgthrs
+    stepper.stallguard_tcoolthrs = tcoolthrs
+    stepper.stallguard_enabled = enabled
+
+    if not enabled:
+        gc.logger.info(
+            f"Stepper '{stepper_name}' StallGuard configured but disabled "
+            f"(sgthrs={sgthrs}); not arming."
+        )
+        return
+
+    for attempt in range(1, HARDWARE_INIT_COMMAND_ATTEMPTS + 1):
+        try:
+            stepper.write_driver_register(_TMC_REG_SGTHRS, sgthrs)
+            stepper.write_driver_register(_TMC_REG_TCOOLTHRS, tcoolthrs)
+            break
+        except (MCUBusError, OSError, DecodeError) as e:
+            if attempt == HARDWARE_INIT_COMMAND_ATTEMPTS:
+                gc.logger.warning(
+                    f"Failed to apply StallGuard config for '{stepper_name}' "
+                    f"(sgthrs={sgthrs}, tcoolthrs={tcoolthrs}) after "
+                    f"{HARDWARE_INIT_COMMAND_ATTEMPTS} attempts: {e}. Continuing."
+                )
+                return
+            gc.logger.warning(
+                f"Failed to apply StallGuard config for '{stepper_name}' on "
+                f"attempt {attempt}/{HARDWARE_INIT_COMMAND_ATTEMPTS}: {e}. "
+                f"Retrying in {HARDWARE_INIT_RETRY_DELAY_S:.2f}s..."
+            )
+            time.sleep(HARDWARE_INIT_RETRY_DELAY_S)
+
+    try:
+        stepper.clear_stall()
+        stepper.enable_stall_detection(True)
+    except (MCUBusError, OSError, DecodeError) as e:
+        gc.logger.warning(
+            f"Wrote StallGuard regs for '{stepper_name}' but failed to arm DIAG "
+            f"detection: {e}. The stall monitor will retry on its next poll."
+        )
+
+    gc.logger.info(
+        f"Stepper '{stepper_name}' StallGuard armed: "
+        f"sgthrs={sgthrs}, tcoolthrs={tcoolthrs:#x}, enabled={enabled}"
     )
 
 
