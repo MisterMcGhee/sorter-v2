@@ -61,6 +61,13 @@
 	let swPulseDeg = $state(30);
 	let swDwellMs = $state(250);
 	let swJitterEvery = $state(5);
+	// StallGuard register thresholds (TSTEP units; lower TSTEP = faster). Default
+	// = report SG at every speed, pure StealthChop. The "hybrid" preset floors SG
+	// to cruise and switches to SpreadCycle there for a cleaner load signal while
+	// staying quiet at low speed.
+	let swTcoolthrs = $state(1048575);
+	let swTpwmthrs = $state(0);
+	let swHybrid = $state(false);
 	let running = $state(false);
 	let savingThreshold = $state(false);
 
@@ -72,6 +79,18 @@
 
 	function onStepperChange() {
 		swProfile = defaultProfileFor(swStepper);
+	}
+
+	function onHybridToggle() {
+		// Chute cruises at TSTEP ~75–150, transients are >200, so ~200 floors SG to
+		// cruise and puts SpreadCycle there. Tune the raw fields after if needed.
+		if (swHybrid) {
+			swTcoolthrs = 200;
+			swTpwmthrs = 200;
+		} else {
+			swTcoolthrs = 1048575;
+			swTpwmthrs = 0;
+		}
 	}
 
 	function onKeydown(ev: KeyboardEvent) {
@@ -142,6 +161,8 @@
 				duration_s: String(swDuration),
 				loaded: String(swLoaded),
 				profile: swProfile,
+				tcoolthrs: String(swTcoolthrs),
+				tpwmthrs: String(swTpwmthrs),
 			});
 			if (swProfile === 'chute_random') {
 				qs.set('chute_min_deg', String(swChuteMinDeg));
@@ -387,6 +408,31 @@
 				</div>
 			</div>
 		{/if}
+
+		<div class="mt-4 flex flex-wrap items-end gap-4 border-t border-border/40 pt-4">
+			<label class="flex items-center gap-2 text-sm text-text">
+				<input
+					type="checkbox"
+					bind:checked={swHybrid}
+					onchange={onHybridToggle}
+					class="accent-primary"
+				/>
+				SpreadCycle at cruise (hybrid)
+			</label>
+			<label class="flex w-44 flex-col gap-1 text-sm text-text">
+				TCOOLTHRS (SG velocity floor)
+				<Input type="number" bind:value={swTcoolthrs} />
+			</label>
+			<label class="flex w-48 flex-col gap-1 text-sm text-text">
+				TPWMTHRS (SpreadCycle above)
+				<Input type="number" bind:value={swTpwmthrs} />
+			</label>
+			<div class="max-w-md text-sm text-text-muted">
+				TSTEP units (lower = faster). Default reports SG at every speed in StealthChop (quiet but
+				noisy). The hybrid preset (≈200/200) floors StallGuard to cruise and switches to SpreadCycle
+				there — cleaner separation, still quiet at low speed. Set TPWMTHRS=0 for pure StealthChop.
+			</div>
+		</div>
 	</SectionCard>
 
 	<div class="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -471,6 +517,10 @@
 						</span>
 						<span class="text-text-muted">Loaded:</span>
 						<span class="text-text">{selectedRun.params?.loaded ? 'yes' : 'no'}</span>
+						<span class="text-text-muted">TCOOLTHRS:</span>
+						<span class="text-text">{selectedRun.params?.tcoolthrs ?? '—'}</span>
+						<span class="text-text-muted">TPWMTHRS:</span>
+						<span class="text-text">{selectedRun.params?.tpwmthrs ?? '—'}</span>
 					</div>
 					<div class="mb-3 flex items-center gap-4 text-sm">
 						<label class="flex items-center gap-2 text-text">

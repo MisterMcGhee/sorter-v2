@@ -270,6 +270,7 @@ TMC_REG_IOIN = 0x06
 TMC_REG_FACTORY_CONF = 0x07
 TMC_REG_IHOLD_IRUN = 0x10
 TMC_REG_TSTEP = 0x12
+TMC_REG_TPWMTHRS = 0x13
 TMC_REG_TCOOLTHRS = 0x14
 TMC_REG_COOLCONF = 0x42
 TMC_REG_SG_RESULT = 0x41
@@ -1245,6 +1246,7 @@ def stallguard_sweep(
     sample_interval_s: float = 0.02,
     spin_up_s: float = 0.3,
     tcoolthrs: int = DEFAULT_STALLGUARD_TCOOLTHRS,
+    tpwmthrs: int = 0,
     loaded: bool = False,
     label: Optional[str] = None,
     profile: str = "constant",
@@ -1264,6 +1266,8 @@ def stallguard_sweep(
         raise HTTPException(
             status_code=400, detail=f"profile must be one of {', '.join(SWEEP_PROFILES)}"
         )
+    if not (0 <= tpwmthrs <= 0xFFFFF):
+        raise HTTPException(status_code=400, detail="tpwmthrs must be in [0, 0xFFFFF]")
     if duration_s <= 0 or duration_s > MAX_STALLGUARD_SWEEP_DURATION_S:
         raise HTTPException(
             status_code=400,
@@ -1326,6 +1330,7 @@ def stallguard_sweep(
             "duration_s": duration_s,
             "sample_interval_s": sample_interval_s,
             "tcoolthrs": tcoolthrs,
+            "tpwmthrs": tpwmthrs,
             "loaded": loaded,
             "irun": irun_ctx,
             "acceleration": accel_ctx,
@@ -1343,6 +1348,11 @@ def stallguard_sweep(
 
     try:
         target.write_driver_register(TMC_REG_TCOOLTHRS, tcoolthrs)
+        # TPWMTHRS>0 makes the driver auto-switch StealthChop->SpreadCycle once it
+        # crosses this velocity (TSTEP < TPWMTHRS), so it stays quiet at low speed
+        # but measures load in SpreadCycle at cruise. Only meaningful while the
+        # driver is in StealthChop (which it is by default).
+        target.write_driver_register(TMC_REG_TPWMTHRS, tpwmthrs)
         target.enable_force(True)
         motion.start(time.monotonic())
 
@@ -1417,6 +1427,10 @@ def stallguard_sweep(
             pass
         try:
             target.write_driver_register(TMC_REG_TCOOLTHRS, 0)
+        except Exception:
+            pass
+        try:
+            target.write_driver_register(TMC_REG_TPWMTHRS, 0)  # back to pure StealthChop
         except Exception:
             pass
         # chute_random retunes the chute stepper's speed limits; restore them to
