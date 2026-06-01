@@ -152,11 +152,18 @@ class RotatingAndCapturing(Rev01BaseState):
 
         # Use the slot's aggregated in_exit rather than re-running VisionManager.
         exit_zone_started = time.perf_counter()
-        in_exit = perception_service.read_state(4).in_exit
+        c4_state = perception_service.read_state(4)
+        in_exit = c4_state.in_exit
         self.gc.runtime_stats.observePerfMs(
             "classification.rev01.rotate.any_bbox_in_exit_ms",
             (time.perf_counter() - exit_zone_started) * 1000.0,
         )
+        if int(c4_state.n_pieces) >= 2 and not self.ctx.multi_feed_detected:
+            self.ctx.multi_feed_detected = True
+            self.logger.info(
+                f"{LOG_TAG} multi-feed: {c4_state.n_pieces} pieces on channel "
+                f"during capture — routing to MISC, will clear all on discharge"
+            )
         if in_exit and not self._exit_seen:
             self._exit_seen = True
             self.logger.info(f"{LOG_TAG} observed exit-zone overlap during capture sweep")
@@ -278,6 +285,12 @@ class RotatingAndCapturing(Rev01BaseState):
             "classification.rev01.rotate.any_bbox_in_exit_ms",
             (time.perf_counter() - exit_zone_started) * 1000.0,
         )
+        if len(bboxes) >= 2 and not self.ctx.multi_feed_detected:
+            self.ctx.multi_feed_detected = True
+            self.logger.info(
+                f"{LOG_TAG} multi-feed: {len(bboxes)} pieces on channel during "
+                f"capture — routing to MISC, will clear all on discharge"
+            )
         if in_exit and not self._exit_seen:
             self._exit_seen = True
             self.logger.info(

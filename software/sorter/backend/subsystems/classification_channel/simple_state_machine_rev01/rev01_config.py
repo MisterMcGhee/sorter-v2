@@ -5,19 +5,33 @@ from dataclasses import dataclass
 class Rev01Config:
     rotate_speed_usteps_per_s: int = 7000
     capture_sweep_output_deg: float = 180.0
+    # Legacy fixed discharge kick (only used on the non-perception fallback path).
+    # The active perception path closed-loops onto the fall-off centre instead;
+    # see ``discharge_*`` fields below.
     kick_off_output_deg: float = 180.0
     discharge_speed_usteps_per_s: int = 5000
     crop_padding_px: int = 15
-    max_captures: int = 16
+    # Capped to the Brickognize per-request image limit (8) by selectRecognitionCrops.
+    max_captures: int = 8
     rotate_timeout_s: float = 30.0
     classify_timeout_s: float = 30.0
     presence_streak_to_start: int = 2
     empty_streak_to_abort: int = 3
     stuck_in_exit_zone_timeout_s: float = 30.0
     home_offset_output_deg: float = 22.0
-    # Pause between stepper completion and DISCHARGING -> VERIFYING_DISCHARGE.
-    # Settles the carousel before the verifier reads vision.
+    # Legacy non-perception fallback only: pause after the fixed kick-off move
+    # before returning to IDLE so the carousel settles.
     post_discharge_pause_ms: float = 300.0
+
+    # Closed-loop discharge (active perception path). Drive the leading piece's
+    # COM onto the centre of the fall-off zone with repeated moves until it is
+    # within tolerance, capped by a converge time budget. Once parked (or the
+    # budget runs out) and the piece still hasn't fallen, run the jitter
+    # sequence; if that is exhausted too, raise an exit-stuck operator incident.
+    discharge_center_tolerance_deg: float = 3.0
+    discharge_converge_timeout_ms: int = 2000
+    discharge_settle_ms: int = 400
+    discharge_max_move_output_deg: float = 270.0
 
     # Verifying-discharge: after the move-to-angle settles, wait this long
     # before the first exit-zone re-check, then on stuck run up to N jitter
@@ -47,6 +61,10 @@ FIELD_META: list[dict] = [
     {"key": "stuck_in_exit_zone_timeout_s", "label": "Stuck-in-exit-zone warn timeout (s)", "type": "float", "default": _DEFAULTS.stuck_in_exit_zone_timeout_s},
     {"key": "home_offset_output_deg", "label": "Home offset (output deg)", "type": "float", "default": _DEFAULTS.home_offset_output_deg},
     {"key": "post_discharge_pause_ms", "label": "Post-discharge pause (ms)", "type": "float", "default": _DEFAULTS.post_discharge_pause_ms},
+    {"key": "discharge_center_tolerance_deg", "label": "Discharge: fall-off centre tolerance (output deg)", "type": "float", "default": _DEFAULTS.discharge_center_tolerance_deg},
+    {"key": "discharge_converge_timeout_ms", "label": "Discharge: converge time budget (ms)", "type": "int", "default": _DEFAULTS.discharge_converge_timeout_ms},
+    {"key": "discharge_settle_ms", "label": "Discharge: settle before fall re-check (ms)", "type": "int", "default": _DEFAULTS.discharge_settle_ms},
+    {"key": "discharge_max_move_output_deg", "label": "Discharge: max single converge move (output deg)", "type": "float", "default": _DEFAULTS.discharge_max_move_output_deg},
     {"key": "verify_discharge_wait_ms", "label": "Verify-discharge: settle wait before re-check (ms)", "type": "int", "default": _DEFAULTS.verify_discharge_wait_ms},
     {"key": "verify_discharge_max_jitter_attempts", "label": "Verify-discharge: max jitter attempts", "type": "int", "default": _DEFAULTS.verify_discharge_max_jitter_attempts},
     {"key": "jitter_pause_ms", "label": "Jitter: pause between attempts (ms)", "type": "int", "default": _DEFAULTS.jitter_pause_ms},

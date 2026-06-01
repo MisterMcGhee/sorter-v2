@@ -7,7 +7,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from classification.brickognize import _classifyImages
+from classification.brickognize import MAX_QUERY_IMAGES, _classifyImages
 from defs.known_object import ClassificationStatus
 from subsystems.classification_channel.states import ClassificationChannelState
 
@@ -243,7 +243,9 @@ class Classifying(Rev01BaseState):
         self.emitKnownObject()
 
     def selectRecognitionCrops(self, crops: list[np.ndarray]) -> list[np.ndarray]:
-        n = self.ctx.config.max_captures
+        # Hard-cap at the Brickognize per-request image limit regardless of the
+        # configured max_captures — over the limit the API errors the whole call.
+        n = min(self.ctx.config.max_captures, MAX_QUERY_IMAGES)
         if len(crops) <= n:
             return list(crops)
         if not crops:

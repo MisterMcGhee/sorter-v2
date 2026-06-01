@@ -32,6 +32,10 @@ class SimpleStateMachineRev01Context:
         self.classify_thread: Optional[threading.Thread] = None
         self.classify_lock = threading.Lock()
         self.known_object: Optional[KnownObject] = None
+        # Set True the moment two or more pieces are seen on the channel at once
+        # during a cycle. A multi-feed: classification can't be trusted, so the
+        # piece is routed to MISC and the discharge clears every piece off.
+        self.multi_feed_detected: bool = False
 
     def reset(self) -> None:
         self.config = _loadConfig()
@@ -45,3 +49,4 @@ class SimpleStateMachineRev01Context:
         self.classification_error = None
         self.classify_thread = None
         self.known_object = None
+        self.multi_feed_detected = False
