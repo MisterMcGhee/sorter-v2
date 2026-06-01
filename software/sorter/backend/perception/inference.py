@@ -312,7 +312,11 @@ class InferenceWorker:
         without spamming every frame."""
         if self._logger is None:
             return
-        if now_s - self._last_summary_log_ts < 1.0:
+        # Empty frames are the bulk of the volume and carry no debug value once
+        # you know the channel is clear — log them at 10s, real detections at 1s.
+        idle_frame = len(bboxes) == 0 and n_pieces == 0
+        throttle_s = 10.0 if idle_frame else 1.0
+        if now_s - self._last_summary_log_ts < throttle_s:
             return
         self._last_summary_log_ts = now_s
         ch = self._channel_def
