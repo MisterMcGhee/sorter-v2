@@ -32,6 +32,10 @@ class Rev01Config:
     discharge_converge_timeout_ms: int = 2000
     discharge_settle_ms: int = 400
     discharge_max_move_output_deg: float = 270.0
+    # Consecutive stopped-carousel zero-detection reads required before the
+    # channel is believed clear. The runtime detector blinks to 0 constantly;
+    # 1 read used to false-finish the discharge before the piece had moved.
+    discharge_clear_confirm_reads: int = 4
 
     # Verifying-discharge: after the move-to-angle settles, wait this long
     # before the first exit-zone re-check, then on stuck run up to N jitter
@@ -65,6 +69,7 @@ FIELD_META: list[dict] = [
     {"key": "discharge_converge_timeout_ms", "label": "Discharge: converge time budget (ms)", "type": "int", "default": _DEFAULTS.discharge_converge_timeout_ms},
     {"key": "discharge_settle_ms", "label": "Discharge: settle before fall re-check (ms)", "type": "int", "default": _DEFAULTS.discharge_settle_ms},
     {"key": "discharge_max_move_output_deg", "label": "Discharge: max single converge move (output deg)", "type": "float", "default": _DEFAULTS.discharge_max_move_output_deg},
+    {"key": "discharge_clear_confirm_reads", "label": "Discharge: zero-read streak to confirm clear", "type": "int", "default": _DEFAULTS.discharge_clear_confirm_reads},
     {"key": "verify_discharge_wait_ms", "label": "Verify-discharge: settle wait before re-check (ms)", "type": "int", "default": _DEFAULTS.verify_discharge_wait_ms},
     {"key": "verify_discharge_max_jitter_attempts", "label": "Verify-discharge: max jitter attempts", "type": "int", "default": _DEFAULTS.verify_discharge_max_jitter_attempts},
     {"key": "jitter_pause_ms", "label": "Jitter: pause between attempts (ms)", "type": "int", "default": _DEFAULTS.jitter_pause_ms},

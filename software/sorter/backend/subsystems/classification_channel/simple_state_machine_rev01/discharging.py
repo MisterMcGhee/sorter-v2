@@ -45,6 +45,7 @@ class Discharging(Rev01BaseState):
         self._settle_started_at: Optional[float] = None
         self._released = False
         self._incident_raised = False
+        self._clear_streak = 0
         self._seq: Optional[JitterSequence] = None
         # legacy fallback only
         self._kick_started = False
@@ -72,15 +73,29 @@ class Discharging(Rev01BaseState):
         stepper = getattr(self.irl, "carousel_stepper", None)
         moving = stepper is not None and not bool(stepper.stopped)
 
-        # Channel fully clear → every piece is off. Commit the tracked piece to
-        # distribution if we haven't already, clear any exit-stuck incident, done.
+        # The runtime detector blinks to detections=0 for a frame or two
+        # constantly, so a single n==0 is NOT proof the channel is clear. Only
+        # count zero-reads while the carousel is stopped (a moving frame is
+        # motion-unreliable) and require a streak before believing it — otherwise
+        # a dropout false-finishes the discharge before the piece has moved,
+        # piling pieces and re-opening the feed gate early.
         if n == 0 and not moving:
+            self._clear_streak += 1
+        elif n > 0:
+            self._clear_streak = 0
+
+        # Channel confirmed clear → every piece is off. Commit the tracked piece
+        # to distribution if we haven't already, clear any exit-stuck incident.
+        if self._clear_streak >= int(cfg.discharge_clear_confirm_reads) and not moving:
             self._releaseOnce()
             if self._incident_raised:
                 clear_classification_exit_stuck_incident(self.gc)
                 self._incident_raised = False
                 self.logger.info(f"{LOG_TAG} DISCHARGING: channel cleared — resuming")
-            self.logger.info(f"{LOG_TAG} DISCHARGING -> IDLE (channel clear)")
+            self.logger.info(
+                f"{LOG_TAG} DISCHARGING -> IDLE (channel clear, "
+                f"{self._clear_streak} confirmed zero-reads)"
+            )
             return ClassificationChannelState.IDLE
 
         # Discrete positioning moves must finish before we re-read and re-issue.
@@ -95,7 +110,7 @@ class Discharging(Rev01BaseState):
         if self._phase == _Phase.JITTER:
             return self._jitter(cfg, now, in_exit)
         if self._phase == _Phase.STUCK:
-            return self._stuck(now, in_exit)
+            return self._stuck(in_exit)
         return None
 
     def _converge(self, state, cfg, now: float) -> Optional[ClassificationChannelState]:
@@ -177,7 +192,7 @@ class Discharging(Rev01BaseState):
             return None
         return None
 
-    def _stuck(self, now: float, in_exit: bool) -> Optional[ClassificationChannelState]:
+    def _stuck(self, in_exit: bool) -> Optional[ClassificationChannelState]:
         # Hold until the operator physically clears the piece. Full-clear (n == 0)
         # is handled in _step_perception. If the piece merely left the exit band
         # but the channel is not yet clear, retry the converge loop for the rest.
@@ -284,5 +299,6 @@ class Discharging(Rev01BaseState):
         self._settle_started_at = None
         self._released = False
         self._incident_raised = False
+        self._clear_streak = 0
         self._kick_started = False
         self._kick_done_at = None
