@@ -158,11 +158,13 @@ class RotatingAndCapturing(Rev01BaseState):
             "classification.rev01.rotate.any_bbox_in_exit_ms",
             (time.perf_counter() - exit_zone_started) * 1000.0,
         )
-        if int(c4_state.n_pieces) >= 2 and not self.ctx.multi_feed_detected:
-            self.ctx.multi_feed_detected = True
+        if self.ctx.observeMultiFeed(
+            int(c4_state.n_pieces), float(c4_state.ts), self.ctx.config.multi_feed_confirm_reads
+        ):
             self.logger.info(
-                f"{LOG_TAG} multi-feed: {c4_state.n_pieces} pieces on channel "
-                f"during capture — routing to MISC, will clear all on discharge"
+                f"{LOG_TAG} multi-feed: {c4_state.n_pieces} pieces on channel during "
+                f"capture, confirmed over {self.ctx.config.multi_feed_confirm_reads} frames "
+                f"— routing to MISC, will clear all on discharge"
             )
         if in_exit and not self._exit_seen:
             self._exit_seen = True
@@ -285,11 +287,14 @@ class RotatingAndCapturing(Rev01BaseState):
             "classification.rev01.rotate.any_bbox_in_exit_ms",
             (time.perf_counter() - exit_zone_started) * 1000.0,
         )
-        if len(bboxes) >= 2 and not self.ctx.multi_feed_detected:
-            self.ctx.multi_feed_detected = True
+        legacy_ts = float(bbox_frame.timestamp) if bbox_frame is not None else now
+        if self.ctx.observeMultiFeed(
+            len(bboxes), legacy_ts, self.ctx.config.multi_feed_confirm_reads
+        ):
             self.logger.info(
                 f"{LOG_TAG} multi-feed: {len(bboxes)} pieces on channel during "
-                f"capture — routing to MISC, will clear all on discharge"
+                f"capture, confirmed over {self.ctx.config.multi_feed_confirm_reads} frames "
+                f"— routing to MISC, will clear all on discharge"
             )
         if in_exit and not self._exit_seen:
             self._exit_seen = True

@@ -67,8 +67,13 @@ class Discharging(Rev01BaseState):
         n = int(state.n_pieces)
         in_exit = bool(state.in_exit)
 
-        if n >= 2 and not self.ctx.multi_feed_detected:
-            self.ctx.multi_feed_detected = True
+        if self.ctx.observeMultiFeed(
+            n, float(state.ts), self.ctx.config.multi_feed_confirm_reads
+        ):
+            self.logger.info(
+                f"{LOG_TAG} DISCHARGING: multi-feed confirmed "
+                f"({n} pieces over {self.ctx.config.multi_feed_confirm_reads} frames)"
+            )
 
         stepper = getattr(self.irl, "carousel_stepper", None)
         moving = stepper is not None and not bool(stepper.stopped)

@@ -36,6 +36,12 @@ class Rev01Config:
     # channel is believed clear. The runtime detector blinks to 0 constantly;
     # 1 read used to false-finish the discharge before the piece had moved.
     discharge_clear_confirm_reads: int = 4
+    # Consecutive distinct-frame reads with >=2 on-channel pieces required
+    # before latching a multi-feed (which forces the whole cycle to MISC). The
+    # detector regularly splits one piece into two boxes or emits a one-frame
+    # spurious second box; a single such frame used to mis-flag a multi-drop.
+    # Mirror the clear-confirm debounce so one noisy frame can't trip it.
+    multi_feed_confirm_reads: int = 3
 
     # Verifying-discharge: after the move-to-angle settles, wait this long
     # before the first exit-zone re-check, then on stuck run up to N jitter
@@ -70,6 +76,7 @@ FIELD_META: list[dict] = [
     {"key": "discharge_settle_ms", "label": "Discharge: settle before fall re-check (ms)", "type": "int", "default": _DEFAULTS.discharge_settle_ms},
     {"key": "discharge_max_move_output_deg", "label": "Discharge: max single converge move (output deg)", "type": "float", "default": _DEFAULTS.discharge_max_move_output_deg},
     {"key": "discharge_clear_confirm_reads", "label": "Discharge: zero-read streak to confirm clear", "type": "int", "default": _DEFAULTS.discharge_clear_confirm_reads},
+    {"key": "multi_feed_confirm_reads", "label": "Multi-feed: frames of >=2 pieces to confirm", "type": "int", "default": _DEFAULTS.multi_feed_confirm_reads},
     {"key": "verify_discharge_wait_ms", "label": "Verify-discharge: settle wait before re-check (ms)", "type": "int", "default": _DEFAULTS.verify_discharge_wait_ms},
     {"key": "verify_discharge_max_jitter_attempts", "label": "Verify-discharge: max jitter attempts", "type": "int", "default": _DEFAULTS.verify_discharge_max_jitter_attempts},
     {"key": "jitter_pause_ms", "label": "Jitter: pause between attempts (ms)", "type": "int", "default": _DEFAULTS.jitter_pause_ms},
