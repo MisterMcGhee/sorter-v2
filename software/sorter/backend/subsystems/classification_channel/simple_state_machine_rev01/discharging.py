@@ -50,6 +50,7 @@ class Discharging(Rev01BaseState):
         self._incident_raised = False
         self._gave_up = False
         self._clear_streak = 0
+        self._reached_exit = False
         self._seq: Optional[JitterSequence] = None
         # legacy fallback only
         self._kick_started = False
@@ -80,32 +81,46 @@ class Discharging(Rev01BaseState):
                 f"({n} pieces over {cfg.multi_feed_confirm_reads} frames)"
             )
 
+        in_exit = bool(state.in_exit)
+        if in_exit:
+            self._reached_exit = True
+
         stepper = getattr(self.irl, "carousel_stepper", None)
         moving = stepper is not None and not bool(stepper.stopped)
 
-        # The runtime detector blinks to detections=0 for a frame or two
-        # constantly, so a single n==0 is NOT proof the channel is clear. Only
-        # count zero-reads while the carousel is stopped (a moving frame is
-        # motion-unreliable) and require a streak before believing it — otherwise
-        # a dropout false-finishes the discharge before the piece has moved,
-        # piling pieces and re-opening the feed gate early.
-        if n == 0 and not moving:
+        # "My piece has been discharged" is NOT the same as "the channel is
+        # globally empty." A new piece can arrive at the ENTRY end while we push
+        # the current one off the EXIT end — multi-feed (two pieces shared the
+        # cycle), or a piece already in transit when discharge began. Keying
+        # completion off n==0 then never fires: n stays >=1 because of the
+        # newcomer at the entry, so we keep jittering and eventually raise a
+        # FALSE stuck on a piece that already dropped. So completion is either:
+        #   - the channel is fully clear (n==0, the simple case / fallback), OR
+        #   - our piece reached the exit/fall-off zone and has now left it
+        #     (in_exit went True then False), even if something new is sitting
+        #     back at the entry. That newcomer is the NEXT IDLE cycle's job.
+        # The runtime detector blinks, and a moving frame is motion-unreliable,
+        # so require a confirmed streak while stopped before believing it.
+        exit_gone = self._reached_exit and not in_exit
+        clear_now = (n == 0) or exit_gone
+        if clear_now and not moving:
             self._clear_streak += 1
-        elif n > 0:
+        elif not clear_now:
             self._clear_streak = 0
 
-        # SUCCESS — channel confirmed clear. This is the ONLY commit point: the
-        # piece is recorded to distribution here, never on a timeout. The bin is
-        # credited even if an operator physically pulled the stuck piece.
+        # SUCCESS — our piece is confirmed off the channel. This is the ONLY
+        # commit point: the piece is recorded to distribution here, never on a
+        # timeout. The bin is credited even if an operator pulled it by hand.
         if self._clear_streak >= int(cfg.discharge_clear_confirm_reads) and not moving:
             self._releaseOnce()
             if self._incident_raised:
                 clear_classification_exit_stuck_incident(self.gc)
                 self._incident_raised = False
                 self.logger.info(f"{LOG_TAG} DISCHARGING: channel cleared — resuming")
+            reason = "channel empty" if n == 0 else f"piece left exit (n={n} at entry)"
             self.logger.info(
-                f"{LOG_TAG} DISCHARGING -> IDLE (channel clear, "
-                f"{self._clear_streak} confirmed zero-reads)"
+                f"{LOG_TAG} DISCHARGING -> IDLE ({reason}, "
+                f"{self._clear_streak} confirmed reads)"
             )
             return ClassificationChannelState.IDLE
 
@@ -115,9 +130,13 @@ class Discharging(Rev01BaseState):
             return None
 
         # Let an in-flight jitter sequence run to resolution before anything else.
+        # "still stuck" is the inverse of our completion test (NOT just n>0): a
+        # newcomer at the entry keeps n>0 after our piece has left the exit, and
+        # we must not let jitter exhaust into a false stuck on an already-dropped
+        # piece.
         seq = self._seq
         if seq is not None and seq.is_active:
-            phase = seq.tick(still_stuck=(n > 0), now=now)
+            phase = seq.tick(still_stuck=(not clear_now), now=now)
             if phase == JitterPhase.CLEARED:
                 self.logger.info(f"{LOG_TAG} DISCHARGING: jitter cleared the piece")
                 self._markProgress(now)
@@ -292,5 +311,6 @@ class Discharging(Rev01BaseState):
         self._incident_raised = False
         self._gave_up = False
         self._clear_streak = 0
+        self._reached_exit = False
         self._kick_started = False
         self._kick_done_at = None
