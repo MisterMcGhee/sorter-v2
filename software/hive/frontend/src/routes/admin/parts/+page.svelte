@@ -347,27 +347,33 @@
 				</dl>
 			</div>
 
-			<!-- True geometry from LDraw (mm) -->
+			<!-- Physical dimensions (mm), best-available with confidence -->
 			<div>
-				<h3 class="mb-1 text-xs font-semibold uppercase tracking-wider text-text-muted">
-					True dimensions (LDraw, mm)
+				<h3 class="mb-1 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-text-muted">
+					Physical dimensions (mm)
+					{#if detail.dimensions && detail.dimensions.source !== 'none'}
+						<Badge
+							text={detail.dimensions.confidence}
+							variant={detail.dimensions.confidence === 'exact' ? 'success' : detail.dimensions.confidence === 'family' ? 'info' : 'warning'}
+						/>
+					{/if}
 				</h3>
-				{#if detail.geometry}
+				{#if detail.dimensions && detail.dimensions.source !== 'none'}
 					<div class="flex flex-wrap gap-x-4 gap-y-1 text-sm text-text">
-						<span>Bounding box: <span class="font-mono">{detail.geometry.bbox_x_mm} × {detail.geometry.bbox_y_mm} × {detail.geometry.bbox_z_mm}</span> mm</span>
-						<span>Max extent: <span class="font-mono">{detail.geometry.max_extent_mm}</span> mm</span>
-						{#if detail.geometry.volume_mm3 != null}
-							<span>Volume: <span class="font-mono">{detail.geometry.volume_mm3}</span> mm³ <span class="text-text-muted">(approx)</span></span>
+						<span>Bounding box: <span class="font-mono">{detail.dimensions.bbox_x_mm} × {detail.dimensions.bbox_y_mm} × {detail.dimensions.bbox_z_mm ?? '?'}</span> mm</span>
+						<span>Max extent: <span class="font-mono">{detail.dimensions.max_extent_mm}</span> mm</span>
+						{#if detail.dimensions.volume_mm3 != null}
+							<span>Volume: <span class="font-mono">{detail.dimensions.volume_mm3}</span> mm³ <span class="text-text-muted">(approx)</span></span>
 						{/if}
 					</div>
 					<div class="mt-1 text-xs text-text-muted">
-						source: {detail.geometry.geometry_source} (LDraw {detail.geometry.ldraw_id})
-						{#if detail.geometry.physical_parent_part_num}
-							· resolved from parent mold {detail.geometry.physical_parent_part_num}
+						source: {detail.dimensions.source}
+						{#if detail.dimensions.physical_parent_part_num}
+							· from mold {detail.dimensions.physical_parent_part_num}
 						{/if}
 					</div>
 				{:else}
-					<p class="text-sm text-text-muted">No LDraw geometry for this part.</p>
+					<p class="text-sm text-text-muted">No dimension data available for this part.</p>
 				{/if}
 			</div>
 

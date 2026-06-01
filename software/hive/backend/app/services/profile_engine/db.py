@@ -947,8 +947,10 @@ def adminGetPart(conn, part_num):
         })
 
     geometry = getPartGeometry(conn, part_num)
+    dimensions = resolvePartDimensions(conn, part_num)
 
-    return {"part": part, "bricklink": bricklink, "prices": prices, "geometry": geometry}
+    return {"part": part, "bricklink": bricklink, "prices": prices,
+            "geometry": geometry, "dimensions": dimensions}
 
 
 def getPartGeometry(conn, part_num):
@@ -985,6 +987,66 @@ def upsertPartGeometry(conn, part_num, geom, computed_at):
             computed_at,
         ),
     )
+
+
+# Category -> representative part whose LDraw geometry stands in for the whole
+# family (minifig torsos/heads/etc. share one physical shape regardless of print).
+# Used only as a runtime fallback; never stored.
+_CANONICAL_BY_CATEGORY = {
+    "Minifig Upper Body": "973c00",
+    "Minifig Torso Assembly": "973c00",
+    "Minifig Heads": "3626a",
+    "Minifig Head": "3626a",
+}
+
+
+def _geomFields(g):
+    return {
+        "bbox_x_mm": g["bbox_x_mm"], "bbox_y_mm": g["bbox_y_mm"], "bbox_z_mm": g["bbox_z_mm"],
+        "max_extent_mm": g["max_extent_mm"], "volume_mm3": g["volume_mm3"],
+    }
+
+
+def resolvePartDimensions(conn, part_num):
+    # Best-available dimensions for a part, in mm, with a source/confidence flag.
+    # Tier 1: the part's own LDraw geometry (exact).
+    g = getPartGeometry(conn, part_num)
+    if g:
+        src = "ldraw_" + (g.get("geometry_source") or "direct")
+        return {**_geomFields(g), "source": src, "confidence": "exact",
+                "ldraw_id": g.get("ldraw_id"), "physical_parent_part_num": g.get("physical_parent_part_num")}
+
+    # Tier 2: category-canonical family shape (e.g. any minifig torso -> 973).
+    catrow = conn.execute(
+        "SELECT c.name FROM parts p LEFT JOIN categories c ON c.id = p.part_cat_id WHERE p.part_num = ?",
+        (part_num,),
+    ).fetchone()
+    rep = _CANONICAL_BY_CATEGORY.get(catrow[0]) if catrow else None
+    if rep:
+        gg = getPartGeometry(conn, rep)
+        if gg:
+            return {**_geomFields(gg), "source": f"canonical:{rep}", "confidence": "family",
+                    "ldraw_id": gg.get("ldraw_id"), "physical_parent_part_num": rep}
+
+    # Tier 3: BrickStore stud footprint -> mm (x/y only, height unknown).
+    row = conn.execute(
+        "SELECT bi.dim_x_studs, bi.dim_y_studs FROM part_bricklink_ids pbi "
+        "JOIN bricklink_items bi ON bi.item_no = pbi.item_no "
+        "WHERE pbi.part_num = ? AND bi.dim_x_studs IS NOT NULL "
+        "ORDER BY pbi.is_primary DESC LIMIT 1",
+        (part_num,),
+    ).fetchone()
+    if row and row[0] is not None:
+        import math
+        x, y = row[0] * 8.0, row[1] * 8.0
+        return {"bbox_x_mm": round(max(x, y), 2), "bbox_y_mm": round(min(x, y), 2), "bbox_z_mm": None,
+                "max_extent_mm": round(math.hypot(x, y), 2), "volume_mm3": None,
+                "source": "studs_footprint", "confidence": "coarse",
+                "ldraw_id": None, "physical_parent_part_num": None}
+
+    return {"bbox_x_mm": None, "bbox_y_mm": None, "bbox_z_mm": None, "max_extent_mm": None,
+            "volume_mm3": None, "source": "none", "confidence": "none",
+            "ldraw_id": None, "physical_parent_part_num": None}
 
 
 def getPartColorPrice(conn, part_num, rb_color_id, condition="used"):

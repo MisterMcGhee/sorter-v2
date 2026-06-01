@@ -646,6 +646,18 @@ export interface PartsDbGeometry {
 	volume_mm3: number | null;
 }
 
+export interface PartsDbDimensions {
+	bbox_x_mm: number | null;
+	bbox_y_mm: number | null;
+	bbox_z_mm: number | null;
+	max_extent_mm: number | null;
+	volume_mm3: number | null;
+	source: string;
+	confidence: string;
+	ldraw_id: string | null;
+	physical_parent_part_num: string | null;
+}
+
 export interface PartsDbPart {
 	part_num: string;
 	name: string;
@@ -706,6 +718,7 @@ export interface PartsDbPartDetail {
 	bricklink: PartsDbBricklinkLink[];
 	prices: PartsDbPriceRow[];
 	geometry: PartsDbGeometry | null;
+	dimensions: PartsDbDimensions | null;
 }
 
 export interface PartsDbCategory {
