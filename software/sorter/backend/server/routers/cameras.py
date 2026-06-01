@@ -3956,6 +3956,83 @@ def camera_feed_by_role(
             cached_dashboard_shape = shape
         return _apply_dashboard_crop(frame, cached_dashboard_spec)
 
+    # Perception path: when the perception service owns detection for this
+    # role, serve ITS annotations (drawn on the exact frame it inferred) rather
+    # than the legacy VisionManager overlays. This is the single-inference path
+    # — it never triggers VisionManager's inline detection — and the boxes are
+    # glued to their own frame, so they cannot drift ahead of the video the way
+    # last-detection-on-latest-frame overlays do.
+    perception_service = (
+        getattr(shared_state.gc_ref, "perception_service", None)
+        if shared_state.gc_ref is not None
+        else None
+    )
+    if (
+        not direct
+        and want_annotated
+        and color_correct
+        and perception_service is not None
+    ):
+        # Perception's channel for the classification camera is registered under
+        # the source id "carousel" while configs/UI may name it
+        # "classification_channel" — try both names for that one role.
+        _ROLE_ALIASES = {
+            "carousel": "classification_channel",
+            "classification_channel": "carousel",
+        }
+        candidate_sources: list[str] = []
+        for candidate in (config_role, role):
+            if candidate not in candidate_sources:
+                candidate_sources.append(candidate)
+            alias = _ROLE_ALIASES.get(candidate)
+            if alias is not None and alias not in candidate_sources:
+                candidate_sources.append(alias)
+        channel_id = None
+        for candidate in candidate_sources:
+            channel_id = perception_service.channel_id_for_source(candidate)
+            if channel_id is not None:
+                break
+        if channel_id is not None:
+            prof = shared_state.gc_ref.profiler if shared_state.gc_ref is not None else None
+
+            def generate_perception():
+                last_frame_ts: float | None = None
+                while True:
+                    result = perception_service.annotated_feed_frame(channel_id)
+                    if result is None:
+                        time.sleep(0.05)
+                        continue
+                    frame, frame_ts = result
+                    if last_frame_ts == frame_ts:
+                        time.sleep(0.01)
+                        continue
+                    last_frame_ts = frame_ts
+                    shared_state.gc_ref.runtime_stats.observePerfMs(
+                        f"preview.{role}.frame_age_ms",
+                        max(0.0, (time.time() - float(frame_ts)) * 1000.0),
+                    )
+                    if PREVIEW_MAX_WIDTH > 0 and frame.shape[1] > PREVIEW_MAX_WIDTH:
+                        scale = PREVIEW_MAX_WIDTH / float(frame.shape[1])
+                        frame = cv2.resize(
+                            frame,
+                            (PREVIEW_MAX_WIDTH, int(round(frame.shape[0] * scale))),
+                            interpolation=cv2.INTER_AREA,
+                        )
+                    frame = _dashboard_frame(frame)
+                    if prof is not None:
+                        prof.hit(f"encode.{role}.frames")
+                        prof.mark(f"encode.{role}.interval_ms")
+                        with prof.timer(f"encode.{role}.encode_ms"):
+                            chunk = encoder.encode_chunk(frame, quality=55)
+                    else:
+                        chunk = encoder.encode_chunk(frame, quality=55)
+                    yield chunk
+
+            return StreamingResponse(
+                generate_perception(),
+                media_type="multipart/x-mixed-replace; boundary=frame",
+            )
+
     # Live path: use CameraService feed if available
     if not direct and shared_state.camera_service is not None:
         feed = shared_state.camera_service.get_feed(role)

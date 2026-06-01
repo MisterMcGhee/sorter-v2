@@ -29,6 +29,7 @@ from blob_manager import (
     setFeederDetectionConfig,
     setHiveConfig,
 )
+from perception.overlay import drawChannelZones
 from server import shared_state
 from server.classification_training import getClassificationTrainingManager
 from vision.detection_registry import (
@@ -39,73 +40,6 @@ from vision.detection_registry import (
 )
 
 router = APIRouter()
-
-
-ZONE_DROP_COLOR = (255, 128, 0)
-ZONE_EXIT_COLOR = (0, 64, 255)
-ZONE_PRECISE_COLOR = (255, 0, 255)
-_ZONE_OVERLAY_CACHE: dict[tuple, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
-
-
-def _channel_zone_overlay(channel: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
-    if channel is None:
-        return None
-    exit_only_sections = frozenset(channel.exit_sections - channel.precise_sections)
-    key = (
-        int(channel.channel_id),
-        tuple(int(v) for v in channel.mask.shape[:2]),
-        round(float(channel.center[0]), 3),
-        round(float(channel.center[1]), 3),
-        round(float(channel.radius1_angle_image), 3),
-        tuple(sorted(int(v) for v in channel.drop_sections)),
-        tuple(sorted(int(v) for v in exit_only_sections)),
-        tuple(sorted(int(v) for v in channel.precise_sections)),
-    )
-    cached = _ZONE_OVERLAY_CACHE.get(key)
-    if cached is not None:
-        return cached
-
-    mask = np.asarray(channel.mask)
-    if mask.ndim != 2 or mask.size == 0:
-        return None
-    on_channel = mask > 0
-    ys, xs = np.nonzero(on_channel)
-    h, w = mask.shape[:2]
-    overlay = np.zeros((h, w, 3), dtype=np.uint8)
-    drop_mask = np.zeros((h, w), dtype=np.uint8)
-    exit_mask = np.zeros((h, w), dtype=np.uint8)
-    precise_mask = np.zeros((h, w), dtype=np.uint8)
-    if xs.size == 0:
-        result = (overlay, drop_mask, exit_mask, precise_mask)
-        _ZONE_OVERLAY_CACHE[key] = result
-        return result
-
-    rel = (
-        np.degrees(np.arctan2(ys.astype(np.float64) - float(channel.center[1]), xs.astype(np.float64) - float(channel.center[0])))
-        - float(channel.radius1_angle_image)
-    ) % 360.0
-    sections = np.floor(rel).astype(np.int32) % 360
-
-    precise_sections = set(int(v) for v in channel.precise_sections)
-    exit_only = set(int(v) for v in exit_only_sections)
-    drop_sections = set(int(v) for v in channel.drop_sections)
-
-    if precise_sections:
-        precise_hit = np.isin(sections, list(precise_sections))
-        precise_mask[ys[precise_hit], xs[precise_hit]] = 255
-        overlay[ys[precise_hit], xs[precise_hit]] = ZONE_PRECISE_COLOR
-    if exit_only:
-        exit_hit = np.isin(sections, list(exit_only))
-        exit_mask[ys[exit_hit], xs[exit_hit]] = 255
-        overlay[ys[exit_hit], xs[exit_hit]] = ZONE_EXIT_COLOR
-    if drop_sections:
-        drop_hit = np.isin(sections, list(drop_sections))
-        drop_mask[ys[drop_hit], xs[drop_hit]] = 255
-        overlay[ys[drop_hit], xs[drop_hit]] = ZONE_DROP_COLOR
-
-    result = (overlay, drop_mask, exit_mask, precise_mask)
-    _ZONE_OVERLAY_CACHE[key] = result
-    return result
 
 
 def _draw_perception_debug(
@@ -135,25 +69,7 @@ def _draw_perception_debug(
             (255, 255, 255), max(1, thick - 1),
         )
 
-    zone_overlay = _channel_zone_overlay(channel)
-    if zone_overlay is not None:
-        overlay_img, drop_mask, exit_mask, precise_mask = zone_overlay
-        zone_pixels = np.any(overlay_img != 0, axis=2)
-        blended = img.copy()
-        blended[zone_pixels] = overlay_img[zone_pixels]
-        img = cv2.addWeighted(blended, 0.22, img, 0.78, 0)
-        for zone_mask, color in (
-            (drop_mask, ZONE_DROP_COLOR),
-            (exit_mask, ZONE_EXIT_COLOR),
-            (precise_mask, ZONE_PRECISE_COLOR),
-        ):
-            contours, _ = cv2.findContours(zone_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if contours:
-                cv2.drawContours(img, contours, -1, color, max(1, thick - 1))
-
-    if channel is not None:
-        contours, _ = cv2.findContours(channel.mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(img, contours, -1, (255, 255, 0), thick)
+    drawChannelZones(img, channel, thick)
 
     on_set = {tuple(int(v) for v in b) for b in on_bboxes}
     for b in raw_bboxes:  # rejected raw → orange (drawn first)

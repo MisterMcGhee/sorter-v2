@@ -30,6 +30,7 @@ from .arcs import bboxInsideChannelMask
 from .capture import CaptureWorker
 from .channel import CHANNEL_REGISTRY, SECTION_DEG, ChannelDef, channelDefFromBlob
 from .inference import InferenceWorker, OnExitEdge
+from .overlay import renderFeedOverlay
 from .runtime import InferenceRuntime, RknnYoloRuntime
 from .state import ChannelState, EMPTY_STATE, LatestStateSlot
 
@@ -363,6 +364,33 @@ class PerceptionService:
 
     def source_id_assertion_count(self) -> int:
         return sum(w.source_id_assertions for w in self._workers.values())
+
+    def channel_id_for_source(self, camera_source_id: str) -> Optional[int]:
+        for channel_id, channel in self._channels.items():
+            if channel.camera_source_id == camera_source_id:
+                return channel_id
+        return None
+
+    def annotated_feed_frame(self, channel_id: int):
+        """``(annotated_bgr, frame_timestamp)`` for the live feed — the clean
+        operating overlay (zones + on-channel boxes the machine acts on) drawn
+        on the exact frame the model inferred against, so boxes never drift off
+        the pixels. Reuses the last inference cycle; runs NO new inference.
+        ``None`` until the worker has completed a cycle."""
+        worker = self._workers.get(channel_id)
+        channel = self._channels.get(channel_id)
+        if worker is None or channel is None:
+            return None
+        debug = worker.latest_debug
+        if debug is None:
+            return None
+        frame = debug.get("frame")
+        if frame is None:
+            return None
+        annotated = renderFeedOverlay(
+            frame.bgr, channel, debug.get("on_channel_bboxes") or []
+        )
+        return annotated, frame.timestamp
 
     def request_full_frame_debug(self, channel_id: int, ttl_s: float = 10.0) -> bool:
         """Turn on the worker's on-demand full-frame (uncropped) inference for a
