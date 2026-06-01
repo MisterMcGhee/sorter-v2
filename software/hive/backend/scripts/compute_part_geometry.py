@@ -22,36 +22,16 @@ def main():
     conn = sqlite3.connect(db_path)
     profile_db.runMigrations(conn)
 
-    print("building LDraw file index...")
-    index = lg.buildFileIndex(ldraw_root)
-    print(f"  {len(index)} resolvable .dat files")
-    resolver = lg._Resolver(index)
-
-    rows = conn.execute("SELECT part_num, external_ids FROM parts").fetchall()
-    total = len(rows)
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    result = lg.computeAllGeometry(
+        conn, ldraw_root, profile_db.upsertPartGeometry, now,
+        progress_fn=lambda c, t, m: print(f"  {m}"),
+    )
 
-    direct = parent = none = 0
-    for i, (part_num, ext_json) in enumerate(rows):
-        ext = json.loads(ext_json) if ext_json else {}
-        ldraw_ids = [str(x) for x in ext.get("LDraw", [])]
-        geom = lg.resolveGeometry(resolver, part_num, ldraw_ids)
-        if geom:
-            profile_db.upsertPartGeometry(conn, part_num, geom, now)
-            if geom["geometry_source"] == "direct":
-                direct += 1
-            else:
-                parent += 1
-        else:
-            none += 1
-        if (i + 1) % 5000 == 0:
-            conn.commit()
-            print(f"  {i+1}/{total}  direct={direct} parent={parent} none={none}")
-    conn.commit()
-
-    have = direct + parent
+    have = result["computed"]
+    total = result["total"]
     print(f"\nDONE: {have}/{total} parts with geometry ({100*have/total:.1f}%)")
-    print(f"  direct={direct}  parent={parent}  none={none}")
+    print(f"  direct={result['direct']}  parent={result['parent']}")
 
     print("\nspot-check:")
     for pid in ["3001", "3005", "3023", "3068b", "973pb2833", "3001pr0042"]:

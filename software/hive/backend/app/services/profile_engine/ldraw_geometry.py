@@ -1,9 +1,13 @@
 import os
 import re
+import json
+import zipfile
+import urllib.request
 
 import numpy as np
 
 LDU_MM = 0.4  # 1 LDraw Unit = 0.4 mm
+LDRAW_COMPLETE_URL = "https://library.ldraw.org/library/updates/complete.zip"
 
 # strip a printed/decorated/assembly suffix to the underlying physical mold id
 _SUFFIX_RE = re.compile(r'^(\d+[a-z]?)(p[a-z0-9]+|pr\d+|pb\d+|c\d{2}[a-z]?|d\d+|s\d+)$')
@@ -125,6 +129,51 @@ def _computeGeomForDat(resolver: _Resolver, path: str) -> dict | None:
         "max_extent_mm": round(max_extent, 2),
         "volume_mm3": round(volume, 1) if volume is not None else None,
     }
+
+
+def ensureLibrary(library_dir: str, url: str = LDRAW_COMPLETE_URL) -> str:
+    root = os.path.join(library_dir, "ldraw")
+    if os.path.isdir(os.path.join(root, "parts")):
+        return root
+    os.makedirs(library_dir, exist_ok=True)
+    zip_path = os.path.join(library_dir, "complete.zip")
+    if not os.path.exists(zip_path):
+        urllib.request.urlretrieve(url, zip_path)
+    with zipfile.ZipFile(zip_path) as z:
+        z.extractall(library_dir)
+    return root
+
+
+def computeAllGeometry(conn, ldraw_root, upsert_fn, computed_at,
+                       progress_fn=None, should_stop_fn=None) -> dict:
+    index = buildFileIndex(ldraw_root)
+    resolver = _Resolver(index)
+    rows = conn.execute("SELECT part_num, external_ids FROM parts").fetchall()
+    total = len(rows)
+    direct = parent = none = 0
+    for i, (part_num, ext_json) in enumerate(rows):
+        if should_stop_fn and should_stop_fn():
+            conn.commit()
+            return {"total": total, "computed": direct + parent, "direct": direct,
+                    "parent": parent, "stopped": True}
+        ext = json.loads(ext_json) if ext_json else {}
+        ldraw_ids = [str(x) for x in ext.get("LDraw", [])]
+        geom = resolveGeometry(resolver, part_num, ldraw_ids)
+        if geom:
+            upsert_fn(conn, part_num, geom, computed_at)
+            if geom["geometry_source"] == "direct":
+                direct += 1
+            else:
+                parent += 1
+        else:
+            none += 1
+        if (i + 1) % 1000 == 0:
+            conn.commit()
+            if progress_fn:
+                progress_fn(i + 1, total, f"Geometry: {i+1}/{total} ({direct+parent} computed)")
+    conn.commit()
+    return {"total": total, "computed": direct + parent, "direct": direct,
+            "parent": parent, "stopped": False}
 
 
 def resolveGeometry(resolver: _Resolver, part_num: str, ldraw_ids: list[str]) -> dict | None:
