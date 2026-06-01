@@ -181,9 +181,20 @@ def runBroadcaster(gc: GlobalConfig) -> None:
     while shared_state.server_loop is None:
         time.sleep(0.01)
 
+    # Per-piece rate limit for known_object events on the live socket. A piece in
+    # the rotate/capture phase emits one known_object PER CAMERA FRAME (hundreds
+    # per second across a run); the broadcaster and the browser can't keep up and
+    # fall many seconds behind. The UI only needs the latest state a few times a
+    # second, so we coalesce per piece and sample at this interval — but always
+    # send IMMEDIATELY on a stage/classification_status change so transitions stay
+    # instant. uuid -> (last_send_mono, stage, status).
+    KNOWN_OBJECT_THROTTLE_S = 0.1
+    ko_last_broadcast: dict = {}
+
     while True:
         latest_frame_commands = {}
         pending_commands = []
+        ko_latest: dict = {}
 
         # Backlog gauge: how deep the queue is BEFORE we drain it. A persistently
         # large value means the broadcaster can't keep up with producers and
@@ -198,8 +209,30 @@ def runBroadcaster(gc: GlobalConfig) -> None:
 
             if command.tag == "frame":
                 latest_frame_commands[command.data.camera] = command
+            elif command.tag == "known_object":
+                # Coalesce per piece (latest wins) using cheap attribute access;
+                # we only model_dump() the events we actually send below, so a
+                # piece emitting at camera-frame rate with a growing image list
+                # doesn't cost a full serialization per frame.
+                ko_latest[command.data.uuid] = command
             else:
                 pending_commands.append(command)
+
+        # Pick which coalesced known_objects actually reach the socket.
+        now_mono = time.monotonic()
+        for uuid, command in ko_latest.items():
+            stage = command.data.stage
+            status = command.data.classification_status
+            last = ko_last_broadcast.get(uuid)
+            changed = last is None or last[1] != stage or last[2] != status
+            due = last is None or (now_mono - last[0]) >= KNOWN_OBJECT_THROTTLE_S
+            if changed or due:
+                ko_last_broadcast[uuid] = (now_mono, stage, status)
+                pending_commands.append(command)
+        if len(ko_last_broadcast) > 256:
+            cutoff = now_mono - 30.0
+            for uuid in [u for u, v in ko_last_broadcast.items() if v[0] < cutoff]:
+                del ko_last_broadcast[uuid]
 
         pending_commands.extend(latest_frame_commands.values())
 
