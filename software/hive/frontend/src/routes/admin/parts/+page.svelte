@@ -160,6 +160,11 @@
 						label: 'Per-color price rows',
 						value: overview.coverage.price_color_rows_mapped_to_rb,
 						tone: overview.coverage.price_color_rows_mapped_to_rb > 0 ? ('ok' as const) : ('neutral' as const)
+					},
+					{
+						label: 'Parts with LDraw geometry',
+						value: overview.coverage.parts_with_ldraw_geometry,
+						tone: overview.coverage.parts_with_ldraw_geometry > 0 ? ('ok' as const) : ('neutral' as const)
 					}
 				]
 			: []
@@ -340,6 +345,30 @@
 						{:else}—{/if}
 					</dd>
 				</dl>
+			</div>
+
+			<!-- True geometry from LDraw (mm) -->
+			<div>
+				<h3 class="mb-1 text-xs font-semibold uppercase tracking-wider text-text-muted">
+					True dimensions (LDraw, mm)
+				</h3>
+				{#if detail.geometry}
+					<div class="flex flex-wrap gap-x-4 gap-y-1 text-sm text-text">
+						<span>Bounding box: <span class="font-mono">{detail.geometry.bbox_x_mm} × {detail.geometry.bbox_y_mm} × {detail.geometry.bbox_z_mm}</span> mm</span>
+						<span>Max extent: <span class="font-mono">{detail.geometry.max_extent_mm}</span> mm</span>
+						{#if detail.geometry.volume_mm3 != null}
+							<span>Volume: <span class="font-mono">{detail.geometry.volume_mm3}</span> mm³ <span class="text-text-muted">(approx)</span></span>
+						{/if}
+					</div>
+					<div class="mt-1 text-xs text-text-muted">
+						source: {detail.geometry.geometry_source} (LDraw {detail.geometry.ldraw_id})
+						{#if detail.geometry.physical_parent_part_num}
+							· resolved from parent mold {detail.geometry.physical_parent_part_num}
+						{/if}
+					</div>
+				{:else}
+					<p class="text-sm text-text-muted">No LDraw geometry for this part.</p>
+				{/if}
 			</div>
 
 			<!-- External IDs from Rebrickable -->

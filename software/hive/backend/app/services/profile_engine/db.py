@@ -775,6 +775,7 @@ def adminCatalogOverview(conn):
     price_rows_with_rb_color = conn.execute(
         "SELECT COUNT(*) FROM price_guides WHERE rb_color_id IS NOT NULL"
     ).fetchone()[0]
+    parts_with_geometry = _tableCount(conn, "part_geometry")
     return {
         "tables": {
             "parts": parts_total,
@@ -796,6 +797,7 @@ def adminCatalogOverview(conn):
             "bricklink_ids_without_item": orphan_bl_ids,
             "bricklink_items_with_dims": parts_with_dims,
             "price_color_rows_mapped_to_rb": price_rows_with_rb_color,
+            "parts_with_ldraw_geometry": parts_with_geometry,
         },
     }
 
@@ -944,7 +946,45 @@ def adminGetPart(conn, part_num):
             "used_qty": row[8], "used_avg": row[9], "used_min": row[10], "used_max": row[11],
         })
 
-    return {"part": part, "bricklink": bricklink, "prices": prices}
+    geometry = getPartGeometry(conn, part_num)
+
+    return {"part": part, "bricklink": bricklink, "prices": prices, "geometry": geometry}
+
+
+def getPartGeometry(conn, part_num):
+    row = conn.execute(
+        "SELECT ldraw_id, physical_parent_part_num, geometry_source, "
+        "bbox_x_mm, bbox_y_mm, bbox_z_mm, max_extent_mm, volume_mm3 "
+        "FROM part_geometry WHERE part_num = ?",
+        (part_num,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "ldraw_id": row[0],
+        "physical_parent_part_num": row[1],
+        "geometry_source": row[2],
+        "bbox_x_mm": row[3],
+        "bbox_y_mm": row[4],
+        "bbox_z_mm": row[5],
+        "max_extent_mm": row[6],
+        "volume_mm3": row[7],
+    }
+
+
+def upsertPartGeometry(conn, part_num, geom, computed_at):
+    conn.execute(
+        "INSERT OR REPLACE INTO part_geometry "
+        "(part_num, ldraw_id, physical_parent_part_num, geometry_source, "
+        "bbox_x_mm, bbox_y_mm, bbox_z_mm, max_extent_mm, volume_mm3, computed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            part_num, geom.get("ldraw_id"), geom.get("physical_parent_part_num"),
+            geom.get("geometry_source"), geom.get("bbox_x_mm"), geom.get("bbox_y_mm"),
+            geom.get("bbox_z_mm"), geom.get("max_extent_mm"), geom.get("volume_mm3"),
+            computed_at,
+        ),
+    )
 
 
 def getPartColorPrice(conn, part_num, rb_color_id, condition="used"):

@@ -630,8 +630,20 @@ export interface PartsDbOverview {
 		bricklink_ids_without_item: number;
 		bricklink_items_with_dims: number;
 		price_color_rows_mapped_to_rb: number;
+		parts_with_ldraw_geometry: number;
 	};
 	sync: Record<string, unknown>;
+}
+
+export interface PartsDbGeometry {
+	ldraw_id: string | null;
+	physical_parent_part_num: string | null;
+	geometry_source: string | null;
+	bbox_x_mm: number | null;
+	bbox_y_mm: number | null;
+	bbox_z_mm: number | null;
+	max_extent_mm: number | null;
+	volume_mm3: number | null;
 }
 
 export interface PartsDbPart {
@@ -693,6 +705,7 @@ export interface PartsDbPartDetail {
 	};
 	bricklink: PartsDbBricklinkLink[];
 	prices: PartsDbPriceRow[];
+	geometry: PartsDbGeometry | null;
 }
 
 export interface PartsDbCategory {
