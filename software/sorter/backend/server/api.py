@@ -23,7 +23,6 @@ from blob_manager import (
     setMachineNickname,
 )
 from runtime_variables import VARIABLE_DEFS
-from run_recorder import RECORDS_DIR
 from server.camera_discovery import shutdownCameraDiscovery
 from server.set_progress_sync import getSetProgressSyncWorker
 from server.waveshare_inventory import get_waveshare_inventory_manager
@@ -737,64 +736,25 @@ def getPerfHistory(window_s: float = 300.0) -> PerfHistoryResponse:
 
 @app.get("/runtime-stats/records", response_model=RuntimeStatsRecordsResponse)
 def listRuntimeStatsRecords() -> RuntimeStatsRecordsResponse:
-    if not RECORDS_DIR.exists():
-        return RuntimeStatsRecordsResponse(records=[])
+    import runtime_stat_records
 
-    records: List[RuntimeStatsRecordItem] = []
-    for path in sorted(RECORDS_DIR.glob("*.json"), reverse=True):
-        try:
-            with open(path, "r") as f:
-                data = json.load(f)
-        except Exception:
-            continue
-        runtime_stats = data.get("runtime_stats_final")
-        if not isinstance(runtime_stats, dict):
-            continue
-        run_id = data.get("run_id")
-        started_at = data.get("started_at")
-        ended_at = data.get("ended_at")
-        total_pieces = data.get("total_pieces")
-        if not isinstance(run_id, str):
-            continue
-        if not isinstance(started_at, (int, float)):
-            continue
-        if not isinstance(ended_at, (int, float)):
-            continue
-        if not isinstance(total_pieces, int):
-            continue
-        records.append(
-            RuntimeStatsRecordItem(
-                record_id=path.name,
-                run_id=run_id,
-                started_at=float(started_at),
-                ended_at=float(ended_at),
-                total_pieces=total_pieces,
-            )
-        )
-    return RuntimeStatsRecordsResponse(records=records)
+    return RuntimeStatsRecordsResponse(
+        records=[RuntimeStatsRecordItem(**r) for r in runtime_stat_records.listRuns()]
+    )
 
 
 @app.get("/runtime-stats/record/{record_id}", response_model=RuntimeStatsResponse)
 def getRuntimeStatsRecord(record_id: str) -> RuntimeStatsResponse:
-    safe_name = Path(record_id).name
-    if safe_name != record_id:
-        raise HTTPException(status_code=400, detail="Invalid record id")
-    path = RECORDS_DIR / safe_name
-    if not path.exists():
+    import runtime_stat_records
+
+    snapshot = runtime_stat_records.getSnapshot(record_id)
+    if snapshot is None:
         raise HTTPException(status_code=404, detail="Record not found")
-    try:
-        with open(path, "r") as f:
-            data = json.load(f)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed reading record: {e}")
-    runtime_stats = data.get("runtime_stats_final")
-    if not isinstance(runtime_stats, dict):
-        raise HTTPException(status_code=404, detail="runtime_stats_final missing")
-    return RuntimeStatsResponse(payload=runtime_stats)
+    return RuntimeStatsResponse(payload=snapshot)
 
 
 # ---------------------------------------------------------------------------
-# Records (sorting history across all saved runs)
+# Records (durable per-piece sorting history, backed by the local_state DB)
 # ---------------------------------------------------------------------------
 
 
@@ -815,6 +775,7 @@ class RecordPieceItem(BaseModel):
     seen_at: Optional[float]
     classification_status: Optional[str]
     part_id: Optional[str]
+    part_name: Optional[str]
     color_id: Optional[str]
     color_name: Optional[str]
     category_id: Optional[str]
@@ -829,100 +790,23 @@ class RecordsPiecesResponse(BaseModel):
     pieces: List[RecordPieceItem]
 
 
-def _loadAllRecordedPieces() -> List[RecordPieceItem]:
-    if not RECORDS_DIR.exists():
-        return []
-    pieces: List[RecordPieceItem] = []
-    for path in RECORDS_DIR.glob("*.json"):
-        try:
-            with open(path, "r") as f:
-                data = json.load(f)
-        except Exception:
-            continue
-        run_id = data.get("run_id")
-        if not isinstance(run_id, str):
-            continue
-        started_at = data.get("started_at")
-        run_started = started_at if isinstance(started_at, (int, float)) else None
-        raw_pieces = data.get("pieces")
-        if not isinstance(raw_pieces, list):
-            continue
-        for p in raw_pieces:
-            if not isinstance(p, dict):
-                continue
-            uuid = p.get("uuid")
-            if not isinstance(uuid, str):
-                continue
-            created_at = p.get("created_at")
-            seen_at = created_at if isinstance(created_at, (int, float)) else run_started
-            bin_raw = p.get("destination_bin")
-            dest_bin = (
-                [int(v) for v in bin_raw]
-                if isinstance(bin_raw, list) and len(bin_raw) > 0
-                else None
-            )
-            pieces.append(
-                RecordPieceItem(
-                    uuid=uuid,
-                    run_id=run_id,
-                    seen_at=float(seen_at) if seen_at is not None else None,
-                    classification_status=p.get("classification_status"),
-                    part_id=p.get("part_id"),
-                    color_id=p.get("color_id"),
-                    color_name=p.get("color_name"),
-                    category_id=p.get("category_id"),
-                    confidence=p.get("confidence"),
-                    destination_bin=dest_bin,
-                )
-            )
-    pieces.sort(key=lambda it: it.seen_at if it.seen_at is not None else 0.0, reverse=True)
-    return pieces
-
-
 @app.get("/api/records/overview", response_model=RecordsOverviewResponse)
 def getRecordsOverview() -> RecordsOverviewResponse:
-    run_ids: set = set()
-    if RECORDS_DIR.exists():
-        for path in RECORDS_DIR.glob("*.json"):
-            try:
-                with open(path, "r") as f:
-                    data = json.load(f)
-            except Exception:
-                continue
-            rid = data.get("run_id")
-            if isinstance(rid, str):
-                run_ids.add(rid)
+    import piece_records
 
-    pieces = _loadAllRecordedPieces()
-    classified = sum(1 for p in pieces if p.classification_status == "classified")
-    distributed = sum(1 for p in pieces if p.destination_bin is not None)
-    unique_parts = {p.part_id for p in pieces if p.part_id}
-    unique_colors = {p.color_id for p in pieces if p.color_id}
-    seen_times = [p.seen_at for p in pieces if p.seen_at is not None]
-
-    return RecordsOverviewResponse(
-        total_runs=len(run_ids),
-        total_pieces=len(pieces),
-        classified_pieces=classified,
-        distributed_pieces=distributed,
-        unique_parts=len(unique_parts),
-        unique_colors=len(unique_colors),
-        first_seen=min(seen_times) if seen_times else None,
-        last_seen=max(seen_times) if seen_times else None,
-    )
+    return RecordsOverviewResponse(**piece_records.getOverview())
 
 
 @app.get("/api/records/pieces", response_model=RecordsPiecesResponse)
 def getRecordsPieces(offset: int = 0, limit: int = 50) -> RecordsPiecesResponse:
-    offset = max(0, offset)
-    limit = max(1, min(limit, 200))
-    pieces = _loadAllRecordedPieces()
-    page = pieces[offset : offset + limit]
+    import piece_records
+
+    total, rows = piece_records.listPieces(offset=offset, limit=limit)
     return RecordsPiecesResponse(
-        total=len(pieces),
-        offset=offset,
-        limit=limit,
-        pieces=page,
+        total=total,
+        offset=max(0, offset),
+        limit=max(1, min(limit, 200)),
+        pieces=[RecordPieceItem(**r) for r in rows],
     )
 
 
