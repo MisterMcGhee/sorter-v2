@@ -17,6 +17,12 @@ class Rev01Config:
     classify_timeout_s: float = 30.0
     presence_streak_to_start: int = 2
     empty_streak_to_abort: int = 3
+    # Consecutive zero-piece reads in IDLE required before declaring the channel
+    # clear and opening the C3->C4 feed gate. Without this a single detector
+    # dropout (the bbox blinks off for a frame while a piece is still there)
+    # flips ready=True and C3 pushes a second piece in → double feed. Symmetric
+    # to presence_streak_to_start on the arrival side.
+    idle_clear_confirm_reads: int = 3
     stuck_in_exit_zone_timeout_s: float = 30.0
     home_offset_output_deg: float = 22.0
     # Legacy non-perception fallback only: pause after the fixed kick-off move
@@ -75,6 +81,7 @@ FIELD_META: list[dict] = [
     {"key": "classify_timeout_s", "label": "Classify timeout (s)", "type": "float", "default": _DEFAULTS.classify_timeout_s},
     {"key": "presence_streak_to_start", "label": "Presence streak to start rotation", "type": "int", "default": _DEFAULTS.presence_streak_to_start},
     {"key": "empty_streak_to_abort", "label": "Empty streak to abort rotation", "type": "int", "default": _DEFAULTS.empty_streak_to_abort},
+    {"key": "idle_clear_confirm_reads", "label": "Idle: zero-read streak to confirm clear (open feed gate)", "type": "int", "default": _DEFAULTS.idle_clear_confirm_reads},
     {"key": "stuck_in_exit_zone_timeout_s", "label": "Stuck-in-exit-zone warn timeout (s)", "type": "float", "default": _DEFAULTS.stuck_in_exit_zone_timeout_s},
     {"key": "home_offset_output_deg", "label": "Home offset (output deg)", "type": "float", "default": _DEFAULTS.home_offset_output_deg},
     {"key": "post_discharge_pause_ms", "label": "Post-discharge pause (ms)", "type": "float", "default": _DEFAULTS.post_discharge_pause_ms},

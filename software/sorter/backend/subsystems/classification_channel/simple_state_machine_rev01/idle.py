@@ -18,6 +18,7 @@ class Idle(Rev01BaseState):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._presence_streak = 0
+        self._clear_streak = 0
         self.logger.info(f"{LOG_TAG} IDLE state constructed")
 
     def step(self) -> Optional[ClassificationChannelState]:
@@ -63,9 +64,24 @@ class Idle(Rev01BaseState):
 
         if state.n_pieces == 0:
             self._presence_streak = 0
-            self.setClassificationReady(True, "channel clear")
+            self._clear_streak += 1
+            # Asymmetry guard: we require presence_streak_to_start confirmed
+            # reads to BELIEVE a piece arrived, but a single zero-read used to
+            # flip ready=True instantly. The detector blinks to 0 for a frame or
+            # two with a piece still on the channel; a premature ready=True lets
+            # C3 push a second piece in while the first is merely undetected →
+            # double feed. Require a confirmed clear streak too.
+            if self._clear_streak >= self.ctx.config.idle_clear_confirm_reads:
+                self.setClassificationReady(True, "channel clear")
+            else:
+                self.setClassificationReady(
+                    False,
+                    f"confirming clear ({self._clear_streak}/"
+                    f"{self.ctx.config.idle_clear_confirm_reads})",
+                )
             return None
 
+        self._clear_streak = 0
         # Channel is occupied. Always not-ready.
         self.setClassificationReady(False, f"{state.n_pieces} piece(s) on channel")
 
@@ -109,8 +125,17 @@ class Idle(Rev01BaseState):
         )
         if not bboxes:
             self._presence_streak = 0
-            self.setClassificationReady(True, "channel clear")
+            self._clear_streak += 1
+            if self._clear_streak >= self.ctx.config.idle_clear_confirm_reads:
+                self.setClassificationReady(True, "channel clear")
+            else:
+                self.setClassificationReady(
+                    False,
+                    f"confirming clear ({self._clear_streak}/"
+                    f"{self.ctx.config.idle_clear_confirm_reads})",
+                )
             return None
+        self._clear_streak = 0
 
         actionable_started = time.perf_counter()
         actionable = self.bboxesOutsideExitZone(bboxes)
@@ -148,3 +173,4 @@ class Idle(Rev01BaseState):
     def cleanup(self) -> None:
         super().cleanup()
         self._presence_streak = 0
+        self._clear_streak = 0
