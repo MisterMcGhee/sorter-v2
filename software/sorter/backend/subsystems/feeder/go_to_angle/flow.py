@@ -1,4 +1,5 @@
 import time
+from dataclasses import replace
 from typing import Optional, TYPE_CHECKING
 
 from states.base_state import BaseState
@@ -63,6 +64,9 @@ class GoToAngleFeeding(BaseState):
         # may not be ready at __init__ in test contexts). Only channels running
         # in fast-eject mode get one.
         self._eject_controllers: dict[int, EjectController] = {}
+        # Per-channel monotonic timestamp of the last frame that reported a piece
+        # in the drop zone. Drives the C2/C3 drop-zone occupancy latch.
+        self._drop_seen_at: dict[int, float] = {}
         machine_setup = getattr(irl_config, "machine_setup", None)
         self._classification_setup = bool(
             machine_setup is not None
@@ -392,6 +396,25 @@ class GoToAngleFeeding(BaseState):
     # Rev04 perception path
     # ---------------------------------------------------------------------
 
+    def _latch_drop(self, ch: int, state, now: float, cfg: GoToAngleConfig):
+        """Persist drop-zone occupancy for one feeder channel.
+
+        Once a piece is seen in the drop zone we consider the zone occupied for
+        ``drop_zone_persistence_ms`` after the last positive frame — a one/two
+        frame detection dropout no longer reads as 'empty'. Only ``in_drop`` is
+        latched; exit/precise/COM fields pass through untouched (the eject path
+        must still see the live exit state). 0 disables the latch."""
+        window_ms = cfg.drop_zone_persistence_ms
+        if window_ms <= 0:
+            return state
+        if state.in_drop:
+            self._drop_seen_at[ch] = now
+            return state
+        last = self._drop_seen_at.get(ch)
+        if last is not None and (now - last) * 1000.0 <= window_ms:
+            return replace(state, in_drop=True)
+        return state
+
     def _step_perception(self, cfg: GoToAngleConfig, perception_service) -> Optional[FeederState]:
         """The new mode-pair flow: read perception state, apply cascade, move.
 
@@ -413,9 +436,16 @@ class GoToAngleFeeding(BaseState):
         c2 = states.get(2, EMPTY_STATE)
         c3 = states.get(3, EMPTY_STATE)
         c4 = states.get(4, EMPTY_STATE)
-        actions = cascade(c2, c3, c4)
 
         now_mono = time.monotonic()
+        # Hold C2/C3 drop-zone occupancy across brief detector dropouts so the
+        # cascade (and the ``not c3.in_drop`` upstream gate below) see a stable
+        # "occupied" instead of flickering empty for a frame. Applied before the
+        # cascade so every consumer reads the same latched value.
+        c2 = self._latch_drop(2, c2, now_mono, cfg)
+        c3 = self._latch_drop(3, c3, now_mono, cfg)
+
+        actions = cascade(c2, c3, c4)
 
         if cfg.enable_ch3:
             # C3's downstream is the classification channel (C4). Ready = C4

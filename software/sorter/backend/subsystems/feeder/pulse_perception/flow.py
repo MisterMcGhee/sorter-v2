@@ -1,4 +1,5 @@
 import time
+from dataclasses import replace
 from typing import Optional, TYPE_CHECKING
 
 from states.base_state import BaseState
@@ -63,6 +64,9 @@ class PulsePerceptionFeeding(BaseState):
         self._config_loaded_at: float = 0.0
         self._classification_pending_until: float = 0.0
         self._ch3_was_at_exit: bool = False
+        # Per-channel monotonic timestamp of the last frame that reported a piece
+        # in the drop zone. Drives the C2/C3 drop-zone occupancy latch.
+        self._drop_seen_at: dict[int, float] = {}
         machine_setup = getattr(irl_config, "machine_setup", None)
         self._classification_setup = bool(
             machine_setup is not None
@@ -140,6 +144,25 @@ class PulsePerceptionFeeding(BaseState):
             return False
         return bool(self.shared.classification_ready)
 
+    def _latch_drop(self, ch: int, state, now: float, cfg: PulsePerceptionConfig):
+        """Persist drop-zone occupancy for one feeder channel.
+
+        Once a piece is seen in the drop zone we consider the zone occupied for
+        ``drop_zone_persistence_ms`` after the last positive frame — a one/two
+        frame detection dropout no longer reads as 'empty'. Only ``in_drop`` is
+        latched; the exit fields pass through untouched so exit handling still
+        sees the live state. 0 disables the latch."""
+        window_ms = cfg.drop_zone_persistence_ms
+        if window_ms <= 0:
+            return state
+        if state.in_drop:
+            self._drop_seen_at[ch] = now
+            return state
+        last = self._drop_seen_at.get(ch)
+        if last is not None and (now - last) * 1000.0 <= window_ms:
+            return replace(state, in_drop=True)
+        return state
+
     def step(self) -> Optional[FeederState]:
         cfg = self._cfg()
 
@@ -162,6 +185,11 @@ class PulsePerceptionFeeding(BaseState):
         c4 = states.get(4, EMPTY_STATE)
 
         now_mono = time.monotonic()
+        # Hold C2/C3 drop-zone occupancy across brief detector dropouts so the
+        # per-channel action (and the ``not c3.in_drop`` upstream gate below) see
+        # a stable "occupied" instead of flickering empty for a frame.
+        c2 = self._latch_drop(2, c2, now_mono, cfg)
+        c3 = self._latch_drop(3, c3, now_mono, cfg)
 
         if cfg.enable_ch3:
             # C3's downstream is the classification channel (C4). Ready = C4
