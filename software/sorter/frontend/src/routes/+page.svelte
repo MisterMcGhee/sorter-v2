@@ -1359,6 +1359,7 @@
 									</div>
 								</div>
 							</div>
+							{#if exitIncident?.kind !== 'classification_exit_stuck'}
 							<div class="mt-3 grid grid-cols-2 gap-2 text-xs">
 								<div class="bg-bg/70 px-2 py-1.5">
 									<div class="text-text-muted">
@@ -1395,6 +1396,7 @@
 									</div>
 								{/if}
 							</div>
+							{/if}
 							{#if exitIncidentCanTestRelease(exitIncident)}
 								<div class="mt-3 bg-bg/70 px-3 py-2">
 									<div class="flex items-center justify-between gap-3">
