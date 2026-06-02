@@ -39,6 +39,17 @@ def _incidentHandlingOff(kind: str) -> bool:
         return False
 
 
+def _allowMultiCategoryBins() -> bool:
+    try:
+        from toml_config import getBinAssignmentConfig
+
+        return bool(
+            getBinAssignmentConfig().get("allow_multiple_categories_per_bin", False)
+        )
+    except Exception:
+        return False
+
+
 class Positioning(BaseState):
     def __init__(
         self,
@@ -729,6 +740,11 @@ class Positioning(BaseState):
 
         piece_counts = get_current_bin_piece_counts()
         first_unassigned: Optional[tuple[BinAddress, "Bin"]] = None
+        # Least-loaded shared-bin candidate, used only when every bin is
+        # already assigned and multi-category bins are enabled: (num_categories,
+        # piece_count, address, bin). Picking the bin with the fewest categories
+        # (tie-break: fewest pieces) spreads new categories evenly.
+        best_combine: Optional[tuple[int, int, BinAddress, "Bin"]] = None
         has_usable_layers = False
 
         # Debug trace — categorizes every bin we looked at and why it was
@@ -771,6 +787,15 @@ class Positioning(BaseState):
                         full_bins += 1
                     if not b.category_ids and first_unassigned is None:
                         first_unassigned = (address, b)
+                    if (
+                        category_id != MISC_CATEGORY
+                        and b.category_ids
+                        and not is_full
+                        and MISC_CATEGORY not in b.category_ids
+                    ):
+                        candidate = (len(b.category_ids), count, address, b)
+                        if best_combine is None or candidate[:2] < best_combine[:2]:
+                            best_combine = candidate
 
         if not has_usable_layers:
             self.logger.warning(
@@ -798,6 +823,26 @@ class Positioning(BaseState):
             setBinCategories(extractCategories(self.layout))
             self.logger.info(
                 f"Positioning: assigned category {category_id} to bin at layer={address.layer_index}, section={address.section_index}, bin={address.bin_index}"
+            )
+            return address, True
+
+        # Every bin is already assigned and none is empty. If the operator
+        # enabled multi-category bins, keep sorting by combining this category
+        # into the least-loaded existing bin rather than dumping to the discard
+        # passthrough. Checked here (rather than per-piece up top) so it only
+        # costs a TOML read once bins are actually exhausted.
+        if (
+            category_id != MISC_CATEGORY
+            and best_combine is not None
+            and _allowMultiCategoryBins()
+        ):
+            _, _, address, b = best_combine
+            b.category_ids.append(category_id)
+            setBinCategories(extractCategories(self.layout))
+            self.logger.info(
+                f"Positioning: combined category {category_id} into shared bin at "
+                f"layer={address.layer_index}, section={address.section_index}, "
+                f"bin={address.bin_index} (now holds {b.category_ids})"
             )
             return address, True
 

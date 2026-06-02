@@ -574,6 +574,40 @@ def setDashboardConfig(updates: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Bin assignment preferences
+# ---------------------------------------------------------------------------
+
+
+def getBinAssignmentConfig() -> dict[str, Any]:
+    """Bin-assignment behavior. When allow_multiple_categories_per_bin is True,
+    once every bin already has an assignment the distributor keeps sorting new
+    categories by combining them into existing bins (picking the least-loaded
+    one) instead of falling through to the misc/discard passthrough."""
+    config = _read_toml()
+    section = config.get("bins")
+    allow_multiple = False
+    if isinstance(section, dict) and isinstance(
+        section.get("allow_multiple_categories_per_bin"), bool
+    ):
+        allow_multiple = section["allow_multiple_categories_per_bin"]
+    return {"allow_multiple_categories_per_bin": allow_multiple}
+
+
+def setBinAssignmentConfig(updates: dict[str, Any]) -> dict[str, Any]:
+    def updater(config: dict[str, Any]) -> None:
+        existing = config.get("bins")
+        base = dict(existing) if isinstance(existing, dict) else {}
+        if "allow_multiple_categories_per_bin" in updates:
+            base["allow_multiple_categories_per_bin"] = bool(
+                updates["allow_multiple_categories_per_bin"]
+            )
+        config["bins"] = base
+
+    _update_toml(updater)
+    return getBinAssignmentConfig()
+
+
+# ---------------------------------------------------------------------------
 # Classification training config
 # ---------------------------------------------------------------------------
 

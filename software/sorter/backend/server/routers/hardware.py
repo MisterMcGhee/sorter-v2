@@ -2918,6 +2918,21 @@ def get_bins_layout() -> Dict[str, Any]:
     }
 
 
+@router.get("/api/bins/settings")
+def get_bins_settings() -> Dict[str, Any]:
+    from toml_config import getBinAssignmentConfig
+
+    return {"ok": True, **getBinAssignmentConfig()}
+
+
+@router.post("/api/bins/settings")
+def set_bins_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from toml_config import setBinAssignmentConfig
+
+    merged = setBinAssignmentConfig(payload or {})
+    return {"ok": True, **merged}
+
+
 @router.post("/api/bins/move-to")
 def move_to_bin(payload: MoveToBinPayload) -> Dict[str, Any]:
     """Move chute to a specific bin and open the correct layer servo."""
