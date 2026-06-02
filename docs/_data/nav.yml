@@ -52,6 +52,8 @@ sections:
         pages:
           - title: Architecture
             url: /sorter/architecture/
+          - title: Dev flow
+            url: /sorter/dev-flow/
           - title: Camera media pipeline
             url: /sorter/camera-media-pipeline/
           - title: Sorting profile reference

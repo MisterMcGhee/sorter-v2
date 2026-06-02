@@ -206,7 +206,7 @@
 					class="inline-flex items-center gap-1.5 border border-border bg-bg px-3 py-1.5 text-sm font-medium text-text transition-colors hover:bg-surface"
 				>
 					<Power size={14} />
-					Hard Restart Backend
+					Restart Backend
 				</button>
 				<button
 					type="button"
