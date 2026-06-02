@@ -207,6 +207,40 @@ def setGoToAngleConfig(updates: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Feeder pulse-perception tuning config
+# ---------------------------------------------------------------------------
+
+
+def getPulsePerceptionConfig() -> dict[str, Any]:
+    from subsystems.feeder.pulse_perception.config import (
+        PulsePerceptionConfig, configToDict,
+    )
+    config = _read_toml()
+    section = config.get("feeder_pulse_perception")
+    defaults = configToDict(PulsePerceptionConfig())
+    if isinstance(section, dict):
+        return {**defaults, **{k: v for k, v in section.items() if k in defaults}}
+    return defaults
+
+
+def setPulsePerceptionConfig(updates: dict[str, Any]) -> dict[str, Any]:
+    from subsystems.feeder.pulse_perception.config import (
+        PulsePerceptionConfig, configToDict,
+    )
+    defaults = configToDict(PulsePerceptionConfig())
+    valid = {k: v for k, v in updates.items() if k in defaults}
+
+    def updater(config: dict[str, Any]) -> None:
+        existing = config.get("feeder_pulse_perception")
+        base = dict(existing) if isinstance(existing, dict) else {}
+        base.update(valid)
+        config["feeder_pulse_perception"] = base
+
+    _update_toml(updater)
+    return getPulsePerceptionConfig()
+
+
+# ---------------------------------------------------------------------------
 # Detection configs
 # ---------------------------------------------------------------------------
 
