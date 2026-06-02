@@ -118,6 +118,16 @@ class InferenceWorker:
         # hot path does a zero-copy slice, and the model resizes a smaller region
         # so inference preprocessing is cheaper, not more expensive.
         self._crop_rect = self._compute_crop_rect(channel_def.mask)
+        # When this channel has secondary (foreign) zones defined, infer on the
+        # FULL frame instead of the primary-polygon crop, so pieces sitting in
+        # those zones (outside the primary crop) are actually detected and we can
+        # verify the secondary-zone filtering/tagging end to end. This is a
+        # verification aid, not the production crop: on the 4K carousel a
+        # full-frame → model-input resize shrinks small on-channel pieces toward
+        # the detectability floor (see the crop rationale above), so primary
+        # detection may degrade while foreign zones are present.
+        if channel_def.secondary_zones:
+            self._crop_rect = None
         self._conf_threshold = conf_threshold
         self._on_exit_edge = on_exit_edge
         self._runtime_stats = runtime_stats
