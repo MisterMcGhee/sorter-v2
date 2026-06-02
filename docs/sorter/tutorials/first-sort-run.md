@@ -75,5 +75,4 @@ The full happy path: profile → start → feed → classify → distribute → 
 ## Next
 
 - Edit a profile: **Profiles → Edit**. Schema: [profile reference]({{ '/sorter/profile-reference/' | relative_url }}).
-- Read the [architecture]({{ '/sorter/architecture/' | relative_url }}) to understand what runs under the hood.
 - Bookmark [troubleshooting]({{ '/sorter/troubleshooting/' | relative_url }}).

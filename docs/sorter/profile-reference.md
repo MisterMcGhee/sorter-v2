@@ -177,5 +177,4 @@ Routes everything to a single "Other" bin. Useful as a known-good baseline when 
 
 ## Related
 
-- [Sorter architecture]({{ '/sorter/architecture/' | relative_url }}) — how the profile is consumed by the distribution state machine.
 - [Sorter troubleshooting]({{ '/sorter/troubleshooting/' | relative_url }}) — symptoms for profile-related misrouting.
