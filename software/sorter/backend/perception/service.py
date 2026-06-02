@@ -343,6 +343,40 @@ class PerceptionService:
             return None
         return worker.latest_detections
 
+    def secondary_zone_occupied(
+        self,
+        channel_id: int,
+        *,
+        source_channel: Optional[int] = None,
+        zone_type: Optional[str] = None,
+    ) -> bool:
+        """Does ``channel_id``'s camera currently see a piece inside a secondary
+        (foreign) zone matching the filter? e.g. ``secondary_zone_occupied(4,
+        source_channel=3)`` answers "does the classification camera see a piece in
+        C3's annotated exit/precise zone." Returns ``False`` when the channel is
+        unwired, has no matching secondary zone, or has produced no detection yet
+        — so a consumer that gates on this is a no-op until a zone is drawn.
+        Cheap: a handful of set lookups over the last cycle's tagged detections."""
+        worker = self._workers.get(channel_id)
+        channel = self._channels.get(channel_id)
+        if worker is None or channel is None:
+            return False
+        matching_ids = {
+            z.id
+            for z in channel.secondary_zones
+            if (source_channel is None or z.source_channel == source_channel)
+            and (zone_type is None or z.zone_type == zone_type)
+        }
+        if not matching_ids:
+            return False
+        detections = worker.latest_detections
+        if not detections:
+            return False
+        for d in detections:
+            if any(sid in matching_ids for sid in d.secondary_zone_ids):
+                return True
+        return False
+
     def channel_center(self, channel_id: int):
         """Center pixel of the channel's rotation arc as ``(cx, cy)``, or
         ``None`` if the channel isn't wired in this service instance."""
