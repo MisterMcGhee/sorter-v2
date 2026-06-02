@@ -23,6 +23,7 @@ import numpy as np
 from .arcs import (
     attributeBboxes,
     bboxInsideChannelMask,
+    bboxInsideMask,
     comInPreciseZone,
     exitComForwardDeg,
     exitComForwardToCenterDeg,
@@ -30,6 +31,7 @@ from .arcs import (
 )
 from .capture import CaptureWorker, PerceptionFrame
 from .channel import ChannelDef
+from .detection import Detection
 from .runtime import InferenceRuntime
 from .state import ChannelState, LatestStateSlot
 
@@ -143,6 +145,11 @@ class InferenceWorker:
         # GIL-atomic dict ref; never read on the hot path.
         self._latest_debug: Optional[dict] = None
 
+        # Latest in-crop detections tagged with zone provenance (primary +
+        # secondary). GIL-atomic list ref. Display/tag only — the slot and
+        # ``latest_raw`` stay primary-only, so the state machine is unaffected.
+        self._latest_detections: Optional[list[Detection]] = None
+
         # On-demand full-frame debug inference. When a request bumps this
         # timestamp, the loop ALSO runs the model on the WHOLE frame (no crop)
         # for the next few seconds, so the debug page can compare cropped
@@ -192,6 +199,30 @@ class InferenceWorker:
         """Last full-frame (uncropped) debug result — persisted across cycles.
         GIL-atomic read."""
         return self._latest_full_frame
+
+    @property
+    def latest_detections(self) -> Optional[list[Detection]]:
+        """Latest in-crop detections tagged with primary/secondary zone
+        membership. GIL-atomic read — display/tag only."""
+        return self._latest_detections
+
+    def _tag_detections(self, all_bboxes: list) -> list[Detection]:
+        """Wrap each in-crop bbox with its zone provenance: ``in_primary`` (inside
+        the channel polygon mask) and the ids of any secondary zones whose mask
+        contains the bbox center. A few mask indices per bbox — cheap."""
+        ch = self._channel_def
+        zones = ch.secondary_zones
+        out: list[Detection] = []
+        for b in all_bboxes:
+            bbox = (int(b[0]), int(b[1]), int(b[2]), int(b[3]))
+            in_primary = bboxInsideChannelMask(bbox, ch)
+            sids = (
+                tuple(z.id for z in zones if bboxInsideMask(bbox, z.mask))
+                if zones
+                else ()
+            )
+            out.append(Detection(bbox=bbox, in_primary=in_primary, secondary_zone_ids=sids))
+        return out
 
     def request_full_frame_debug(self, ttl_s: float = 10.0) -> None:
         """Ask the loop to ALSO run a full-frame (uncropped) inference for the
@@ -436,9 +467,16 @@ class InferenceWorker:
                 )
                 self._slot.write(state)
                 self._latest_raw = (list(bboxes), frame)
+                # Tag ALL in-crop detections (not just on-channel) with zone
+                # provenance so the overlay can show foreign-zone hits and future
+                # consumers can ask which zone a piece is in. Off the hot read
+                # path — the slot above stays primary-only.
+                detections = self._tag_detections(raw_bboxes_full)
+                self._latest_detections = detections
                 self._latest_debug = {
                     "raw_bboxes": raw_bboxes_full,
                     "on_channel_bboxes": list(bboxes),
+                    "detections": detections,
                     "crop_rect": self._crop_rect,
                     "frame": frame,
                     "infer_ms": infer_ms,

@@ -22,6 +22,17 @@ ON_CHANNEL_COLOR = (0, 255, 0)
 REJECTED_COLOR = (0, 165, 255)
 CHANNEL_OUTLINE_COLOR = (255, 255, 0)
 
+# Secondary (foreign) zones: same hue family as the matching primary zone type
+# but drawn as a thin desaturated outline (no fill) so they read as "observed,
+# not acted on." A detection that lands in any secondary zone is boxed in cyan.
+SECONDARY_ZONE_COLORS = {
+    "drop": (200, 160, 120),
+    "exit": (120, 140, 220),
+    "precise": (200, 120, 200),
+}
+SECONDARY_ZONE_DEFAULT_COLOR = (180, 180, 180)
+SECONDARY_DETECTION_COLOR = (255, 255, 0)
+
 _ZONE_OVERLAY_CACHE: dict[tuple, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
 
 
@@ -129,14 +140,57 @@ def drawDetectionBoxes(
         )
 
 
-def renderFeedOverlay(frame_bgr: np.ndarray, channel: Any, on_bboxes: list) -> np.ndarray:
+def drawSecondaryZones(img: np.ndarray, channel: Any, scale: float, thick: int) -> None:
+    """Outline each foreign (secondary) zone the camera observes, with a label
+    like ``C3 exit``. Outline only — no fill — so it's visually distinct from
+    the channel's own acted-on zones."""
+    zones = getattr(channel, "secondary_zones", None)
+    if not zones:
+        return
+    line_thick = max(1, thick - 1)
+    for zone in zones:
+        color = SECONDARY_ZONE_COLORS.get(zone.zone_type, SECONDARY_ZONE_DEFAULT_COLOR)
+        mask = np.asarray(zone.mask)
+        if mask.ndim != 2 or mask.size == 0:
+            continue
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if not contours:
+            continue
+        cv2.drawContours(img, contours, -1, color, line_thick)
+        biggest = max(contours, key=cv2.contourArea)
+        m = cv2.moments(biggest)
+        if m["m00"] > 0:
+            lx = int(m["m10"] / m["m00"])
+            ly = int(m["m01"] / m["m00"])
+            label = f"C{zone.source_channel} {zone.zone_type}"
+            cv2.putText(
+                img, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX,
+                max(0.4, 0.5 * scale), color, max(1, line_thick), cv2.LINE_AA
+            )
+
+
+def renderFeedOverlay(
+    frame_bgr: np.ndarray, channel: Any, on_bboxes: list, detections: list | None = None
+) -> np.ndarray:
     """The clean operating-feed look: zone outlines plus the green on-channel
     boxes the machine acts on. No spec panel, no rejected (orange) boxes — that
-    diagnostic detail stays on the perception-debug page."""
+    diagnostic detail stays on the perception-debug page.
+
+    ``detections`` (tagged ``Detection`` objects) is optional; when present, any
+    detection that fell in a secondary zone is boxed in cyan to show "seen but
+    not acted on." Primary on-channel boxes stay green."""
     img = frame_bgr.copy()
     w = img.shape[1]
     s = max(1.0, w / 1280.0)
     thick = max(2, int(round(2 * s)))
     drawChannelZones(img, channel, thick)
+    drawSecondaryZones(img, channel, s, thick)
+    if detections:
+        secondary_hits = [
+            d.bbox for d in detections if not d.in_primary and d.secondary_zone_ids
+        ]
+        drawDetectionBoxes(img, secondary_hits, SECONDARY_DETECTION_COLOR, s, thick)
     drawDetectionBoxes(img, on_bboxes, ON_CHANNEL_COLOR, s, thick)
     return img

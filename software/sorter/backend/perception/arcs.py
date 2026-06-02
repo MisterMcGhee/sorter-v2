@@ -36,6 +36,18 @@ def bboxInsideChannelMask(bbox: Bbox, channel: ChannelDef) -> bool:
     return bool(channel.mask[iy, ix])
 
 
+def bboxInsideMask(bbox: Bbox, mask: np.ndarray) -> bool:
+    """Center-in-mask test against an arbitrary filled mask — the same membership
+    rule as ``bboxInsideChannelMask`` but for a secondary-zone mask. Used to tag
+    detections with the foreign zones they fall in (display/tag only)."""
+    cx, cy = bboxCenter(bbox)
+    h, w = mask.shape[:2]
+    ix, iy = int(cx), int(cy)
+    if not (0 <= ix < w and 0 <= iy < h):
+        return False
+    return bool(mask[iy, ix])
+
+
 def bboxSections(bbox: Bbox, channel: ChannelDef) -> frozenset[int]:
     """Section ids touched by a small set of sample points on the bbox.
 

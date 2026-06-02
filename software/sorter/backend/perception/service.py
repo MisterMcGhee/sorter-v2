@@ -210,6 +210,7 @@ class PerceptionService:
                     channel_angles=disk.channel_angles,
                     arc_params=disk.arc_params,
                     frame_shape=gathered.frame_shape,
+                    secondary_zones=disk.secondary_zones,
                 )
                 if channel_def is None:
                     continue
@@ -332,6 +333,16 @@ class PerceptionService:
         on_channel = [b for b in bboxes if bboxInsideChannelMask(b, channel)]
         return on_channel, frame
 
+    def read_detections(self, channel_id: int):
+        """Latest in-crop ``Detection`` list for this channel, each tagged with
+        ``in_primary`` and the secondary-zone ids it falls in. Display/tag only —
+        the state machine still reads the primary-only slot / ``latest_raw``.
+        Returns ``None`` if the channel isn't wired or hasn't produced a cycle."""
+        worker = self._workers.get(channel_id)
+        if worker is None:
+            return None
+        return worker.latest_detections
+
     def channel_center(self, channel_id: int):
         """Center pixel of the channel's rotation arc as ``(cx, cy)``, or
         ``None`` if the channel isn't wired in this service instance."""
@@ -388,7 +399,10 @@ class PerceptionService:
         if frame is None:
             return None
         annotated = renderFeedOverlay(
-            frame.bgr, channel, debug.get("on_channel_bboxes") or []
+            frame.bgr,
+            channel,
+            debug.get("on_channel_bboxes") or [],
+            detections=debug.get("detections"),
         )
         return annotated, frame.timestamp
 
@@ -569,6 +583,7 @@ class _DiskInputs:
     channel_angles: dict
     arc_params: dict
     algo_by_channel: Dict[int, str]
+    secondary_zones: dict
 
 
 @dataclass(frozen=True)
@@ -602,6 +617,7 @@ def _read_disk_inputs(gc: Any) -> _DiskInputs:
     raw_polygons = getChannelPolygons() or {}
     channel_angles = raw_polygons.get("channel_angles") or {}
     arc_params = raw_polygons.get("arc_params") or {}
+    secondary_zones = raw_polygons.get("secondary_zones") or {}
     polygon_blob = raw_polygons.get("polygons") or {}
     saved_polygons: Dict[str, np.ndarray] = {}
     for key in ("second_channel", "third_channel", "classification_channel"):
@@ -620,6 +636,7 @@ def _read_disk_inputs(gc: Any) -> _DiskInputs:
         channel_angles=channel_angles,
         arc_params=arc_params,
         algo_by_channel=algo_by_channel,
+        secondary_zones=secondary_zones if isinstance(secondary_zones, dict) else {},
     )
 
 
@@ -650,10 +667,12 @@ def _gather_channel(
     core_name = _core_for_channel(channel_id)
     conf = float(ctx.resolved_conf.get(channel_id, 0.25))
     arc_entry = disk.arc_params.get(polygon_key) or disk.arc_params.get(angle_key)
+    secondary_entry = disk.secondary_zones.get(polygon_key)
     poly_arr = np.asarray(polygon)
     cd_hash = hashlib.md5(
         poly_arr.tobytes()
         + repr(arc_entry).encode("utf-8", "replace")
+        + repr(secondary_entry).encode("utf-8", "replace")
         + repr(float(disk.channel_angles.get(angle_key, 0.0))).encode()
         + repr(tuple(frame_shape)).encode()
     ).hexdigest()
