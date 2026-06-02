@@ -459,7 +459,7 @@
 								class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-text transition-colors hover:bg-bg"
 							>
 								<RotateCcw size={14} class="text-text-muted" />
-								Hard Restart Backend
+								Restart Backend
 							</button>
 						</div>
 					</div>
@@ -606,7 +606,7 @@
 		</div>
 	</Modal>
 
-	<Modal bind:open={restartConfirmOpen} title="Hard Restart Backend?">
+	<Modal bind:open={restartConfirmOpen} title="Restart Backend?">
 		<div class="flex flex-col gap-4">
 			<div class="flex items-start gap-3">
 				<div
