@@ -512,15 +512,19 @@ def _resolve_algorithm_id_per_channel(
     feeder_config: dict | None,
     carousel_config: dict | None,
 ) -> Dict[int, str]:
-    """Return {channel_id: algorithm_id} as configured on disk."""
+    """Return {channel_id: algorithm_id}, read 1:1 from each subsystem's own
+    TOML slot — NO fallback. ch4 (the classification C4 / carousel station)
+    reads ``detection.carousel.algorithm``; the C-channels read their own
+    ``detection.feeder.algorithm_by_role`` entry. An unset slot leaves that
+    channel unwired (no detector) rather than silently inheriting another
+    subsystem's model — the operator picks a model per subsystem explicitly."""
     out: Dict[int, str] = {}
-    feeder_default = (feeder_config or {}).get("algorithm")
     feeder_by_role = (feeder_config or {}).get("algorithm_by_role") or {}
     for ch_id, (role, _polygon_key, _angle_key) in CHANNEL_REGISTRY.items():
         if ch_id == 4:
-            algo = (carousel_config or {}).get("algorithm") or feeder_by_role.get(role) or feeder_default
+            algo = (carousel_config or {}).get("algorithm")
         else:
-            algo = feeder_by_role.get(role) or feeder_default
+            algo = feeder_by_role.get(role)
         if isinstance(algo, str) and algo:
             out[ch_id] = algo
     return out
