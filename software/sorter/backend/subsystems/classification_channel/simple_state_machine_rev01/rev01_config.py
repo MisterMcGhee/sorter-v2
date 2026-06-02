@@ -39,12 +39,6 @@ class Rev01Config:
     # move. When it runs out with the channel still occupied, raise the stuck
     # incident and hold (works from anywhere on the channel, not just the exit).
     discharge_total_timeout_ms: int = 30000
-    # No-forward-progress window: if the COM-to-centre gap hasn't improved by
-    # more than discharge_progress_eps_deg for this long, the piece is stalled
-    # (parked at the exit and won't drop, or jammed earlier) — fire a jitter
-    # burst to unstick it.
-    discharge_stall_ms: int = 2000
-    discharge_progress_eps_deg: float = 2.0
     # How long the exit must read clear CONTINUOUSLY before we believe the piece
     # dropped and commit it. Time-based, not a stopped-read count: a piece is
     # only in the exit for a detection or two, so requiring N stopped reads
@@ -65,6 +59,13 @@ class Rev01Config:
     # spurious second box; a single such frame used to mis-flag a multi-drop.
     # Mirror the clear-confirm debounce so one noisy frame can't trip it.
     multi_feed_confirm_reads: int = 3
+
+    # Jitter unstick: the ONLY trigger. If a piece sits in the FALL-OFF region
+    # (the exit-only sub-arc, NOT the precise staging band — perception's
+    # ``in_exit_majority``) continuously for this long, shake it loose. A piece
+    # that drops on its own is in the fall-off for only a frame or two, so it
+    # never reaches this; only a genuinely parked piece does.
+    discharge_jitter_dwell_ms: int = 250
 
     # Verifying-discharge: after the move-to-angle settles, wait this long
     # before the first exit-zone re-check, then on stuck run up to N jitter
@@ -97,12 +98,11 @@ FIELD_META: list[dict] = [
     {"key": "post_discharge_pause_ms", "label": "Post-discharge pause (ms)", "type": "float", "default": _DEFAULTS.post_discharge_pause_ms},
     {"key": "discharge_center_tolerance_deg", "label": "Discharge: fall-off centre tolerance (output deg)", "type": "float", "default": _DEFAULTS.discharge_center_tolerance_deg},
     {"key": "discharge_max_move_output_deg", "label": "Discharge: max single converge move (output deg)", "type": "float", "default": _DEFAULTS.discharge_max_move_output_deg},
-    {"key": "discharge_total_timeout_ms", "label": "Discharge: total budget before stuck incident (ms)", "type": "int", "default": _DEFAULTS.discharge_total_timeout_ms},
-    {"key": "discharge_stall_ms", "label": "Discharge: no-progress window before jitter (ms)", "type": "int", "default": _DEFAULTS.discharge_stall_ms},
-    {"key": "discharge_progress_eps_deg", "label": "Discharge: min gap improvement to count as progress (deg)", "type": "float", "default": _DEFAULTS.discharge_progress_eps_deg},
+    {"key": "discharge_total_timeout_ms", "label": "Discharge: total budget before give-up (ms)", "type": "int", "default": _DEFAULTS.discharge_total_timeout_ms},
     {"key": "discharge_clear_confirm_ms", "label": "Discharge: continuous-clear window to confirm drop (ms)", "type": "int", "default": _DEFAULTS.discharge_clear_confirm_ms},
     {"key": "discharge_giveup_settle_ms", "label": "Discharge: settle delay before auto-crediting on give-up (ms)", "type": "int", "default": _DEFAULTS.discharge_giveup_settle_ms},
     {"key": "multi_feed_confirm_reads", "label": "Multi-feed: frames of >=2 pieces to confirm", "type": "int", "default": _DEFAULTS.multi_feed_confirm_reads},
+    {"key": "discharge_jitter_dwell_ms", "label": "Discharge: dwell in fall-off region before jitter (ms)", "type": "int", "default": _DEFAULTS.discharge_jitter_dwell_ms},
     {"key": "verify_discharge_wait_ms", "label": "Verify-discharge: settle wait before re-check (ms)", "type": "int", "default": _DEFAULTS.verify_discharge_wait_ms},
     {"key": "verify_discharge_max_jitter_attempts", "label": "Verify-discharge: max jitter attempts", "type": "int", "default": _DEFAULTS.verify_discharge_max_jitter_attempts},
     {"key": "jitter_pause_ms", "label": "Jitter: pause between attempts (ms)", "type": "int", "default": _DEFAULTS.jitter_pause_ms},

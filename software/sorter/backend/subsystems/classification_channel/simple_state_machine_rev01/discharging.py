@@ -11,48 +11,37 @@ from .constants import LOG_TAG
 class Discharging(Rev01BaseState):
     """Closed-loop discharge (active perception path).
 
-    Success is defined by ONE signal: the channel reading physically clear
-    (``n_pieces == 0`` for a confirmed streak). Everything else — the COM gap,
-    ``in_exit`` — is only guidance for how to move, never proof the piece left.
+    The carousel drives the piece's center-of-mass to the centre of the fall-off
+    zone so it can drop. Completion is ONE signal: the channel reads physically
+    clear (``n_pieces == 0``, or our piece reached the exit and left it) for a
+    short continuous window.
 
-    Each tick we drive the leading piece's center-of-mass toward the CENTER of
-    the fall-off zone with bounded forward moves, re-reading perception after
-    each. While the gap keeps shrinking we keep converging. If forward progress
-    stalls (no improvement for ``discharge_stall_ms`` — whether the piece is
-    parked at the exit and won't drop, OR jammed somewhere earlier on the
-    channel) we fire a jitter burst to unstick it. A single overall budget
-    (``discharge_total_timeout_ms``, NOT reset per move) and jitter exhaustion
-    are the only escapes other than success.
+    Jitter has exactly ONE trigger: a piece sitting in the FALL-OFF region (the
+    exit-only sub-arc — ``in_exit_majority`` — NOT the precise staging band) for
+    longer than ``discharge_jitter_dwell_ms``. A piece that drops on its own is
+    only in the fall-off for a frame or two, so it never arms the jitter; only a
+    piece that parks there and won't fall does. There is no gap/no-progress stall
+    heuristic — that fired the jitter on pieces that had already dropped.
 
-    Giving up does NOT raise an operator incident. The exit-stuck incident was
-    a chronic false positive: a fresh piece arriving at the ENTRY keeps
-    ``n_pieces`` > 0 while the dispensed piece has already dropped off the EXIT,
-    so the confirmed-clear test never lands and we "give up" on a piece that
-    already left. Rather than pop a dialog the operator just clears by clicking
-    Resolve (without removing anything), we replicate that resolution
-    automatically: wait ``discharge_giveup_settle_ms`` for the channel to settle
-    (the success path still fires if perception confirms clear in that window),
-    then credit the piece and return to IDLE.
+    Giving up (the total-budget backstop, or jitter exhausted) does NOT raise an
+    operator incident: it settles for ``discharge_giveup_settle_ms`` then credits
+    the piece and returns to IDLE — the same as an operator clicking
+    Resolve-without-removing on the old stuck dialog.
 
     The piece is committed to distribution (``_releaseOnce``) on confirmed clear
-    or on this give-up settle.
-
-    The loop repeats until EVERY piece is off the channel, so a multi-feed (two
-    pieces sharing one cycle) clears both — the trailing piece included.
-
-    On the non-perception fallback path there is no per-piece COM signal, so it
-    degrades to the legacy single fixed kick-off move and returns to IDLE.
+    or on the give-up settle. The loop repeats until every piece is off, so a
+    multi-feed clears both. On the non-perception fallback path there is no
+    per-piece signal, so it degrades to a single fixed kick-off move.
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._discharge_started_at: Optional[float] = None
-        self._last_progress_at: Optional[float] = None
-        self._best_gap: float = float("inf")
         self._released = False
         self._gave_up = False
         self._gave_up_at: Optional[float] = None
         self._clear_since: Optional[float] = None
+        self._in_falloff_since: Optional[float] = None
         self._reached_exit = False
         self._seq: Optional[JitterSequence] = None
         # legacy fallback only
@@ -73,7 +62,6 @@ class Discharging(Rev01BaseState):
         cfg = self.ctx.config
         if self._discharge_started_at is None:
             self._discharge_started_at = now
-            self._last_progress_at = now
 
         state = perception_service.read_state(4)
         n = int(state.n_pieces)
@@ -88,24 +76,24 @@ class Discharging(Rev01BaseState):
         if in_exit:
             self._reached_exit = True
 
+        # The ONLY thing that arms the jitter: the piece is in the FALL-OFF part
+        # of the exit zone (the exit-only sub-arc, NOT the precise staging band).
+        # ``in_exit_majority`` is exactly "majority in the fall-off region, not
+        # precise". Track how long it has held continuously.
+        in_falloff = bool(state.in_exit_majority)
+        if in_falloff:
+            if self._in_falloff_since is None:
+                self._in_falloff_since = now
+        else:
+            self._in_falloff_since = None
+
         stepper = getattr(self.irl, "carousel_stepper", None)
         moving = stepper is not None and not bool(stepper.stopped)
 
-        # "My piece has been discharged" is NOT the same as "the channel is
-        # globally empty." A new piece can arrive at the ENTRY end while we push
-        # the current one off the EXIT end — multi-feed (two pieces shared the
-        # cycle), or a piece already in transit when discharge began. Keying
-        # completion off n==0 then never fires: n stays >=1 because of the
-        # newcomer at the entry, so we keep jittering and eventually raise a
-        # FALSE stuck on a piece that already dropped. So completion is either:
-        #   - the channel is fully clear (n==0, the simple case / fallback), OR
-        #   - our piece reached the exit/fall-off zone and has now left it
-        #     (in_exit went True then False), even if something new is sitting
-        #     back at the entry. That newcomer is the NEXT IDLE cycle's job.
-        # The runtime detector blinks, so we debounce by requiring the clear to
-        # hold CONTINUOUSLY for a short time window (below), not by counting
-        # stopped reads — a piece that's only in the exit for a detection or two
-        # never racks up a stopped-read streak, so the old count gate stalled it.
+        # Completion: channel fully clear (n==0) OR our piece reached the exit
+        # and has since left it (in_exit True->False), even if a newcomer sits at
+        # the entry. Require it to hold continuously so a one-frame detector blink
+        # can't false-finish.
         exit_gone = self._reached_exit and not in_exit
         clear_now = (n == 0) or exit_gone
         if clear_now:
@@ -114,14 +102,8 @@ class Discharging(Rev01BaseState):
         else:
             self._clear_since = None
 
-        # SUCCESS — the exit has read clear CONTINUOUSLY long enough that we
-        # trust the piece dropped. Time-based, NOT a stopped-read count: once
-        # discharge is underway and the exit goes clear, a brief unbroken window
-        # is all we need, and we do NOT wait for the carousel to come to rest. A
-        # one-frame detector blink can't satisfy it (the window resets on any
-        # non-clear read); a real drop holds clear and commits within
-        # ``discharge_clear_confirm_ms``. This is the ONLY commit point — the bin
-        # is credited here, never on a timeout, even if an operator pulled it.
+        # SUCCESS — clear held long enough; commit the piece. This is the ONLY
+        # commit point, never on a timeout.
         clear_ms = 0.0 if self._clear_since is None else (now - self._clear_since) * 1000.0
         if self._clear_since is not None and clear_ms >= float(cfg.discharge_clear_confirm_ms):
             self._releaseOnce()
@@ -131,15 +113,8 @@ class Discharging(Rev01BaseState):
             )
             return ClassificationChannelState.IDLE
 
-        # Gave up: convergence + jitter could not CONFIRM the channel clear
-        # within budget. This is overwhelmingly a false alarm — the dispensed
-        # piece dropped off the exit and a newcomer at the entry is keeping
-        # n>0 — so we no longer raise an operator incident. Instead we wait
-        # ``discharge_giveup_settle_ms`` for the channel to settle (the success
-        # check above still fires if perception confirms clear in that window),
-        # then do exactly what an operator clicking Resolve-without-removing
-        # did: credit the piece and hand back to IDLE, which re-reads the
-        # channel from scratch and resumes the normal feed flow.
+        # Gave up (total-budget backstop or jitter exhausted): settle, credit the
+        # piece, return to IDLE — no operator incident.
         if self._gave_up:
             settle_s = float(cfg.discharge_giveup_settle_ms) / 1000.0
             settled = self._gave_up_at is not None and (now - self._gave_up_at) >= settle_s
@@ -152,17 +127,13 @@ class Discharging(Rev01BaseState):
                 return ClassificationChannelState.IDLE
             return None
 
-        # Let an in-flight jitter sequence run to resolution before anything else.
-        # "still stuck" is the inverse of our completion test (NOT just n>0): a
-        # newcomer at the entry keeps n>0 after our piece has left the exit, and
-        # we must not let jitter exhaust into a false stuck on an already-dropped
-        # piece.
+        # Let an in-flight jitter run to resolution first.
         seq = self._seq
         if seq is not None and seq.is_active:
             phase = seq.tick(still_stuck=(not clear_now), now=now)
             if phase == JitterPhase.CLEARED:
                 self.logger.info(f"{LOG_TAG} DISCHARGING: jitter cleared the piece")
-                self._markProgress(now)
+                self._in_falloff_since = None
                 return None
             if phase == JitterPhase.EXHAUSTED:
                 self._giveUp(now)
@@ -173,9 +144,7 @@ class Discharging(Rev01BaseState):
         if moving:
             return None
 
-        # Hard total budget — the real escape hatch, from ANY position on the
-        # channel (not just the exit zone). One clock for the whole discharge,
-        # never reset per move, so a jammed piece cannot loop forever.
+        # Hard total budget — the only "stuck anywhere on the channel" backstop.
         total_ms = (now - self._discharge_started_at) * 1000.0
         if total_ms >= float(cfg.discharge_total_timeout_ms):
             self.logger.error(
@@ -185,33 +154,32 @@ class Discharging(Rev01BaseState):
             self._giveUp(now)
             return None
 
-        # Track forward progress on the COM-to-fall-off-centre gap. A shrinking
-        # gap resets the stall clock; a flat gap (parked, or physically jammed)
-        # lets it run out and triggers jitter.
+        # JITTER — the one and only trigger: a piece parked in the fall-off
+        # region for longer than the dwell. Pieces that drop on their own pass
+        # through too fast to ever reach it.
+        falloff_ms = (
+            0.0 if self._in_falloff_since is None else (now - self._in_falloff_since) * 1000.0
+        )
+        if self._in_falloff_since is not None and falloff_ms >= float(
+            cfg.discharge_jitter_dwell_ms
+        ):
+            self._startJitter(cfg, now, falloff_ms)
+            return None
+
+        # Closed-loop converge: drive the COM toward the fall-off centre so the
+        # piece is delivered to where it can drop. With no center signal but a
+        # piece present, nudge forward by a default step.
         real_gap = state.exit_com_forward_to_center_deg
         if real_gap is None:
             real_gap = state.exit_com_forward_deg
-        if real_gap is not None and abs(real_gap) < self._best_gap - float(
-            cfg.discharge_progress_eps_deg
-        ):
-            self._best_gap = abs(real_gap)
-            self._last_progress_at = now
-
-        last_progress = self._last_progress_at if self._last_progress_at is not None else now
-        stalled = (now - last_progress) * 1000.0 >= float(cfg.discharge_stall_ms)
-        if stalled:
-            self._startJitter(cfg, now)
-            return None
-
-        # Closed-loop converge: drive the COM toward the fall-off centre. With no
-        # center signal but a piece present, nudge forward by a default step.
         move_gap = (
             real_gap
             if real_gap is not None
             else min(float(cfg.discharge_max_move_output_deg), 30.0)
         )
         if abs(move_gap) <= float(cfg.discharge_center_tolerance_deg):
-            # At centre but not yet clear — wait; the stall timer will jitter it.
+            # Delivered to the fall-off centre — wait. If it drops, clear-confirm
+            # ends the cycle; if it parks here, the fall-off dwell arms the jitter.
             return None
         move = min(max(0.0, move_gap), float(cfg.discharge_max_move_output_deg))
         if move <= 0.0:
@@ -219,13 +187,7 @@ class Discharging(Rev01BaseState):
         self.startOutputMove(move, cfg.discharge_speed_usteps_per_s)
         return None
 
-    def _markProgress(self, now: float) -> None:
-        # Reopen a fresh converge progress window (e.g. after jitter shifts the
-        # piece) so the stall timer measures time since the LAST useful move.
-        self._best_gap = float("inf")
-        self._last_progress_at = now
-
-    def _startJitter(self, cfg, now: float) -> None:
+    def _startJitter(self, cfg, now: float, falloff_ms: float) -> None:
         seq = self._getOrBuildSeq(cfg)
         if seq is None:
             self.logger.warning(
@@ -235,8 +197,8 @@ class Discharging(Rev01BaseState):
             return
         if not seq.is_active:
             self.logger.info(
-                f"{LOG_TAG} DISCHARGING: no forward progress for "
-                f"{cfg.discharge_stall_ms}ms — jitter unstick"
+                f"{LOG_TAG} DISCHARGING: piece stuck in fall-off region for "
+                f"{falloff_ms:.0f}ms — jitter unstick"
             )
             seq.start()
 
@@ -327,12 +289,11 @@ class Discharging(Rev01BaseState):
         if self._seq is not None:
             self._seq.reset()
         self._discharge_started_at = None
-        self._last_progress_at = None
-        self._best_gap = float("inf")
         self._released = False
         self._gave_up = False
         self._gave_up_at = None
         self._clear_since = None
+        self._in_falloff_since = None
         self._reached_exit = False
         self._kick_started = False
         self._kick_done_at = None
