@@ -160,27 +160,15 @@ def drawChannelZones(img: np.ndarray, channel: Any, thick: int) -> None:
     th, tw = img.shape[:2]
     zone_overlay = _scaledZoneArrays(channel, th, tw)
     if zone_overlay is not None:
-        overlay_img, drop_mask, exit_mask, precise_mask = zone_overlay
-        # Low-opacity fill of each zone in its own colour, then a thin
-        # anti-aliased outline on top.
+        # Zones are shown as a low-opacity colour fill only — no outlines.
+        overlay_img = zone_overlay[0]
         zone_pixels = np.any(overlay_img != 0, axis=2)
         if zone_pixels.any():
             blended = img.copy()
             blended[zone_pixels] = overlay_img[zone_pixels]
             img[:] = cv2.addWeighted(blended, 0.15, img, 0.85, 0)
-        for zone_mask, color in (
-            (drop_mask, ZONE_DROP_COLOR),
-            (exit_mask, ZONE_EXIT_COLOR),
-            (precise_mask, ZONE_PRECISE_COLOR),
-        ):
-            contours, _ = cv2.findContours(
-                zone_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-            )
-            if contours:
-                cv2.drawContours(img, contours, -1, color, thick, cv2.LINE_AA)
     if channel is not None:
-        # Outermost (channel) outline drawn at the SAME thinness as the zone
-        # lines — no thicker.
+        # Thin outermost channel outline.
         outline = _scaledMask(channel.mask, th, tw, (_zoneKey(channel), "outline"))
         contours, _ = cv2.findContours(
             outline, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE

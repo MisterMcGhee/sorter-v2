@@ -50,6 +50,20 @@ _PERCEPTION_ROLE_ALIASES = {
 }
 
 
+def is_perception_role(role: str) -> bool:
+    """Whether a camera role belongs to the perception stack — a STATIC fact
+    from ``CHANNEL_REGISTRY``, with NO dependency on a built service instance.
+    The feed endpoint uses this so a perception role is routed to the perception
+    renderer even on a fresh boot before ``PerceptionService`` exists (it shows
+    raw video until perception is ready, never the legacy VisionManager
+    overlay)."""
+    registry_sources = {src for (src, _poly, _ang) in CHANNEL_REGISTRY.values()}
+    for candidate in (role, _PERCEPTION_ROLE_ALIASES.get(role)):
+        if candidate is not None and candidate in registry_sources:
+            return True
+    return False
+
+
 # RK3588 has three NPU cores. We pin each perception channel to a fixed
 # core; the order matches CHANNEL_REGISTRY insertion order so C2/C3/C4
 # always land on the same cores boot to boot.
@@ -437,11 +451,7 @@ class PerceptionService:
         a perception role's annotations come only from perception, never the
         legacy VisionManager overlay, even while the channel is still warming up
         (in which case the feed shows raw video, not someone else's boxes)."""
-        registry_sources = {src for (src, _poly, _ang) in CHANNEL_REGISTRY.values()}
-        for candidate in (role, _PERCEPTION_ROLE_ALIASES.get(role)):
-            if candidate is not None and candidate in registry_sources:
-                return True
-        return False
+        return is_perception_role(role)
 
     def channel_id_for_role(self, role: str) -> Optional[int]:
         """Built channel id for a role (with the carousel/classification alias),
