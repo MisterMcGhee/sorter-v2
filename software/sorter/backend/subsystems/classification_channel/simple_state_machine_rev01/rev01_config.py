@@ -45,10 +45,20 @@ class Rev01Config:
     # burst to unstick it.
     discharge_stall_ms: int = 2000
     discharge_progress_eps_deg: float = 2.0
-    # Consecutive stopped-carousel zero-detection reads required before the
-    # channel is believed clear. The runtime detector blinks to 0 constantly;
-    # 1 read used to false-finish the discharge before the piece had moved.
-    discharge_clear_confirm_reads: int = 4
+    # How long the exit must read clear CONTINUOUSLY before we believe the piece
+    # dropped and commit it. Time-based, not a stopped-read count: a piece is
+    # only in the exit for a detection or two, so requiring N stopped reads
+    # stalled it. The detector blinks, so the window must be unbroken — a single
+    # non-clear frame resets it — which rejects one-frame blinks without needing
+    # the carousel to be at rest.
+    discharge_clear_confirm_ms: int = 500
+    # When convergence + jitter exhaust without a confirmed clear, the piece has
+    # almost always already dropped (a newcomer at the entry is holding n>0). We
+    # no longer raise an operator incident; instead we wait this long for the
+    # channel to settle (the confirmed-clear success path still fires if
+    # perception sees it clear in this window), then credit the piece and return
+    # to IDLE — exactly what an operator clicking Resolve-without-removing did.
+    discharge_giveup_settle_ms: int = 1500
     # Consecutive distinct-frame reads with >=2 on-channel pieces required
     # before latching a multi-feed (which forces the whole cycle to MISC). The
     # detector regularly splits one piece into two boxes or emits a one-frame
@@ -90,7 +100,8 @@ FIELD_META: list[dict] = [
     {"key": "discharge_total_timeout_ms", "label": "Discharge: total budget before stuck incident (ms)", "type": "int", "default": _DEFAULTS.discharge_total_timeout_ms},
     {"key": "discharge_stall_ms", "label": "Discharge: no-progress window before jitter (ms)", "type": "int", "default": _DEFAULTS.discharge_stall_ms},
     {"key": "discharge_progress_eps_deg", "label": "Discharge: min gap improvement to count as progress (deg)", "type": "float", "default": _DEFAULTS.discharge_progress_eps_deg},
-    {"key": "discharge_clear_confirm_reads", "label": "Discharge: zero-read streak to confirm clear", "type": "int", "default": _DEFAULTS.discharge_clear_confirm_reads},
+    {"key": "discharge_clear_confirm_ms", "label": "Discharge: continuous-clear window to confirm drop (ms)", "type": "int", "default": _DEFAULTS.discharge_clear_confirm_ms},
+    {"key": "discharge_giveup_settle_ms", "label": "Discharge: settle delay before auto-crediting on give-up (ms)", "type": "int", "default": _DEFAULTS.discharge_giveup_settle_ms},
     {"key": "multi_feed_confirm_reads", "label": "Multi-feed: frames of >=2 pieces to confirm", "type": "int", "default": _DEFAULTS.multi_feed_confirm_reads},
     {"key": "verify_discharge_wait_ms", "label": "Verify-discharge: settle wait before re-check (ms)", "type": "int", "default": _DEFAULTS.verify_discharge_wait_ms},
     {"key": "verify_discharge_max_jitter_attempts", "label": "Verify-discharge: max jitter attempts", "type": "int", "default": _DEFAULTS.verify_discharge_max_jitter_attempts},
