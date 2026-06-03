@@ -10,13 +10,13 @@
 	import AppHeader from '$lib/components/AppHeader.svelte';
 	import CameraFeed from '$lib/components/CameraFeed.svelte';
 	import CollapsibleSection from '$lib/components/CollapsibleSection.svelte';
+	import Modal from '$lib/components/Modal.svelte';
 	import RecentObjects from '$lib/components/RecentObjects.svelte';
 	import ResizeHandle from '$lib/components/ResizeHandle.svelte';
-	import SampleCollectionSpeedPanel from '$lib/components/SampleCollectionSpeedPanel.svelte';
 	import SidebarBottomTabs from '$lib/components/SidebarBottomTabs.svelte';
 	import SortingStatusCard from '$lib/components/SortingStatusCard.svelte';
 	import { buildDashboardFeedCrops, type DashboardFeedCrop } from '$lib/dashboard/crops';
-	import { AlertTriangle, Check, Eye, EyeOff, Play, X } from 'lucide-svelte';
+	import { AlertTriangle, Check, Eye, EyeOff, Info, Play, X } from 'lucide-svelte';
 
 	const SIDEBAR_MIN = 300;
 	const SIDEBAR_MAX = 900;
@@ -180,7 +180,6 @@
 	let machineSetup = $state<'standard_carousel' | 'classification_channel' | 'manual_carousel'>(
 		'standard_carousel'
 	);
-	let showSampleCapture = $state(false);
 	let exitIncidentActionPending = $state(false);
 	let exitIncidentActionError = $state<string | null>(null);
 	let stallIncidentActionPending = $state(false);
@@ -362,6 +361,44 @@
 	function incidentNumber(incident: Record<string, unknown> | null, key: string): number | null {
 		const value = incident?.[key];
 		return typeof value === 'number' && Number.isFinite(value) ? value : null;
+	}
+
+	let incidentDetailsOpen = $state(false);
+	let incidentDetailsTarget = $state<Record<string, unknown> | null>(null);
+	let incidentDetailsTitle = $state('Incident details');
+
+	function openIncidentDetails(incident: Record<string, unknown> | null, title: string) {
+		if (!incident) return;
+		incidentDetailsTarget = incident;
+		incidentDetailsTitle = title || 'Incident details';
+		incidentDetailsOpen = true;
+	}
+
+	function formatIncidentDetailValue(key: string, value: unknown): string {
+		if (value === null || value === undefined || value === '') return '—';
+		if (typeof value === 'number') {
+			if (!Number.isFinite(value)) return String(value);
+			if ((key === 'triggered_at' || key.endsWith('_at')) && value > 1_000_000_000) {
+				return new Date(value * 1000).toLocaleString();
+			}
+			return Number.isInteger(value) ? String(value) : Number(value.toFixed(3)).toString();
+		}
+		if (typeof value === 'boolean') return value ? 'true' : 'false';
+		if (typeof value === 'string') return value;
+		try {
+			return JSON.stringify(value);
+		} catch {
+			return String(value);
+		}
+	}
+
+	function incidentDetailEntries(
+		incident: Record<string, unknown> | null
+	): Array<{ key: string; value: string }> {
+		if (!incident) return [];
+		return Object.keys(incident)
+			.sort((a, b) => a.localeCompare(b))
+			.map((key) => ({ key, value: formatIncidentDetailValue(key, incident[key]) }));
 	}
 
 	function fmtIncidentNumber(value: number | null, suffix = '', digits = 1): string {
@@ -995,7 +1032,6 @@
 			const res = await fetch(`${baseUrl}/api/system/dashboard-config`);
 			if (!res.ok) return;
 			const payload = await res.json();
-			showSampleCapture = Boolean(payload?.show_sample_capture);
 			const definitions = normalizeIncidentDefinitions(payload?.incident_definitions);
 			incidentDefinitions = definitions;
 			const handling =
@@ -1513,6 +1549,15 @@
 									<X size={13} />
 									Incident Solved
 								</button>
+								<button
+									type="button"
+									onclick={() => openIncidentDetails(exitIncident, exitIncidentTitle(exitIncident))}
+									title="Incident details"
+									class="ml-auto inline-flex min-h-10 items-center gap-1.5 px-2 py-1.5 text-xs font-medium text-text-muted transition-colors hover:bg-bg/70 hover:text-text"
+								>
+									<Info size={14} />
+									Details
+								</button>
 							</div>
 							{#if exitIncidentActionError}
 								<div class="mt-2 text-xs text-danger">{exitIncidentActionError}</div>
@@ -1557,6 +1602,15 @@
 								>
 									<Check size={13} />
 									Stall Cleared — Resume
+								</button>
+								<button
+									type="button"
+									onclick={() => openIncidentDetails(stallIncident, 'Motor Stall')}
+									title="Incident details"
+									class="ml-auto inline-flex min-h-10 items-center gap-1.5 px-2 py-1.5 text-xs font-medium text-text-muted transition-colors hover:bg-bg/70 hover:text-text"
+								>
+									<Info size={14} />
+									Details
 								</button>
 							</div>
 							{#if stallIncidentActionError}
@@ -1630,11 +1684,6 @@
 							{/if}
 						</div>
 					</CollapsibleSection>
-					{#if showSampleCapture}
-						<CollapsibleSection title="Sample Capture" storageKey="sampleCapture">
-							<SampleCollectionSpeedPanel baseUrl={currentBackendBaseUrl()} {hardwareState} />
-						</CollapsibleSection>
-					{/if}
 					<CollapsibleSection title="Recent Pieces" storageKey="recent" grow>
 						<RecentObjects />
 					</CollapsibleSection>
@@ -1657,3 +1706,19 @@
 		{/if}
 	</div>
 </div>
+<Modal bind:open={incidentDetailsOpen} title={incidentDetailsTitle}>
+	{#if incidentDetailsTarget}
+		<dl class="flex flex-col divide-y divide-border/40">
+			{#each incidentDetailEntries(incidentDetailsTarget) as entry (entry.key)}
+				<div class="flex items-start justify-between gap-4 py-1.5">
+					<dt class="shrink-0 font-mono text-xs text-text-muted">{entry.key}</dt>
+					<dd class="max-w-[65%] break-words text-right font-mono text-sm text-text">
+						{entry.value}
+					</dd>
+				</div>
+			{/each}
+		</dl>
+	{:else}
+		<div class="text-sm text-text-muted">No incident details available.</div>
+	{/if}
+</Modal>

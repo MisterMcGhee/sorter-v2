@@ -198,12 +198,14 @@ def publish_classification_exit_stuck_incident(
     jitter_attempts: int,
     converge_ms: float,
 ) -> bool:
-    """A piece on the C4 channel could not be discharged — either it reached the
-    fall-off zone and would not drop, or it jammed earlier on the channel and
-    made no forward progress within the discharge budget, with jitter recovery
-    unable to free it. It is physically stuck — the operator must clear it. The
-    discharge holds (channel gate stays not-ready) until perception sees the
-    channel clear, then auto-clears this incident."""
+    """Stall-watchdog incident: the C4 state machine made NO transition for the
+    watchdog window while perception still reads a piece on the channel — the
+    flow is wedged in some state. This is the ONLY remaining publisher of
+    ``classification_exit_stuck``; the discharge give-up path no longer raises an
+    incident (it settles and auto-credits instead). So any incident of this kind
+    is unambiguously the stall watchdog — the payload also carries
+    ``source="stall_watchdog"`` to make that explicit in logs/UI. Auto-clears
+    when perception sees the channel clear."""
     kind = CLASSIFICATION_EXIT_STUCK_INCIDENT_KIND
     if _incident_handling_off(kind):
         return False
@@ -224,6 +226,7 @@ def publish_classification_exit_stuck_incident(
     piece_uuid = str(getattr(piece, "uuid", "") or "")
     payload: dict[str, Any] = {
         "kind": kind,
+        "source": "stall_watchdog",
         "severity": "critical",
         "status": "waiting_for_operator",
         "awaiting_operator": True,
@@ -234,13 +237,13 @@ def publish_classification_exit_stuck_incident(
         "piece_uuid": piece_uuid,
         "piece_short": piece_uuid[:8],
         "jitter_attempts": int(jitter_attempts),
-        "converge_ms": float(converge_ms),
+        "stalled_ms": float(converge_ms),
         "triggered_at": time.time(),
-        "rule": "c4_piece_would_not_discharge_within_budget_after_jitter",
+        "rule": "c4_no_state_transition_with_piece_on_channel",
         "resolution": "operator_clear_stuck_c4_piece_then_auto_resumes",
         "operator_message": (
-            "A piece is physically stuck in the classification channel and could "
-            "not be discharged by jitter. Remove it to continue."
+            "The C4 classification flow stopped making progress with a piece still "
+            "on the channel. Remove the piece (or clear the jam) to continue."
         ),
     }
     runtime_stats.setActiveIncident(payload)

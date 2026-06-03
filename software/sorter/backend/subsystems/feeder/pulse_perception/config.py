@@ -34,6 +34,13 @@ class PulsePerceptionConfig:
     enable_ch1: bool = True
     enable_ch2: bool = True
     enable_ch3: bool = True
+    # Latch C2/C3 drop-zone occupancy: once a piece is seen in the drop zone,
+    # keep reporting that zone occupied until this many ms have passed with NO
+    # drop-zone detection. Smooths over one/two-frame detector dropouts so the
+    # upstream channel doesn't read the zone as empty and pulse another piece in
+    # on top of one that's still there. Only ``in_drop`` is latched (not exit),
+    # and only for C2 and C3. 0 disables (raw per-frame state).
+    drop_zone_persistence_ms: int = 1000
 
 
 _DEFAULTS = PulsePerceptionConfig()
@@ -55,6 +62,7 @@ FIELD_META: list[dict] = [
     {"section": "Channels", "key": "enable_ch1", "label": "Enable C1 (bulk)", "type": "bool", "default": _DEFAULTS.enable_ch1},
     {"section": "Channels", "key": "enable_ch2", "label": "Enable C2", "type": "bool", "default": _DEFAULTS.enable_ch2},
     {"section": "Channels", "key": "enable_ch3", "label": "Enable C3", "type": "bool", "default": _DEFAULTS.enable_ch3},
+    {"section": "Detection persistence", "key": "drop_zone_persistence_ms", "label": "C2/C3 drop-zone occupancy hold (ms)", "type": "int", "default": _DEFAULTS.drop_zone_persistence_ms},
 ]
 
 

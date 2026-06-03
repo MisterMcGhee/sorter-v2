@@ -1,3 +1,4 @@
+import inspect
 import statistics
 import time
 from collections import OrderedDict
@@ -311,11 +312,32 @@ class RuntimeStatsCollector:
         self._last_updated_at = event["exited_at"]
 
     def setActiveIncident(self, incident: dict[str, Any]) -> None:
-        """Publish the single operator-facing incident currently blocking flow."""
+        """Publish the single operator-facing incident currently blocking flow.
+
+        Every incident is stamped with a ``source`` identifying the code that
+        raised it (``<module>.<function>``), unless the publisher set one
+        explicitly (e.g. ``stall_watchdog``). Re-publishes that carry a payload
+        from an already-active incident keep that incident's original source."""
         payload = dict(incident)
         payload["updated_at"] = float(time.time())
+        if not payload.get("source"):
+            payload["source"] = self._deriveIncidentSource()
         self._active_incident = payload
         self._last_updated_at = payload["updated_at"]
+
+    @staticmethod
+    def _deriveIncidentSource() -> str:
+        # Walk past this helper and setActiveIncident to the actual publisher.
+        try:
+            frame = inspect.currentframe()
+            if frame is None or frame.f_back is None or frame.f_back.f_back is None:
+                return "unknown"
+            caller = frame.f_back.f_back
+            module = str(caller.f_globals.get("__name__", "")).rsplit(".", 1)[-1]
+            func = caller.f_code.co_name
+            return f"{module}.{func}" if module else func
+        except Exception:
+            return "unknown"
 
     def activeIncident(self) -> dict[str, Any] | None:
         """Return the currently active blocking incident, if any."""

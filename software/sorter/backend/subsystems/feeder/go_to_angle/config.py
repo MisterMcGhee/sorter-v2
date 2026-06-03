@@ -33,6 +33,15 @@ class GoToAngleConfig:
     enable_ch2: bool = True
     enable_ch3: bool = True
 
+    # --- Drop-zone detection persistence --------------------------------
+    # Latch C2/C3 drop-zone occupancy: once a piece is seen in the drop zone,
+    # keep reporting that zone occupied until this many ms have passed with NO
+    # drop-zone detection. Smooths over one/two-frame detector dropouts so the
+    # upstream channel doesn't read the zone as empty and feed another piece in
+    # on top of one that's still there. Only ``in_drop`` is latched (not exit /
+    # precise / COM), and only for C2 and C3. 0 disables (raw per-frame state).
+    drop_zone_persistence_ms: int = 1000
+
     # --- Fast eject -----------------------------------------------------
     # Per-channel exit-handling strategy. When fast-eject is enabled for a
     # channel, instead of metering the piece into the exit with precise pulses,
@@ -100,6 +109,7 @@ FIELD_META: list[dict] = [
     {"section": "Channels", "key": "enable_ch1", "label": "Enable C1 (bulk)", "type": "bool", "default": _DEFAULTS.enable_ch1},
     {"section": "Channels", "key": "enable_ch2", "label": "Enable C2", "type": "bool", "default": _DEFAULTS.enable_ch2},
     {"section": "Channels", "key": "enable_ch3", "label": "Enable C3", "type": "bool", "default": _DEFAULTS.enable_ch3},
+    {"section": "Detection persistence", "key": "drop_zone_persistence_ms", "label": "C2/C3 drop-zone occupancy hold (ms)", "type": "int", "default": _DEFAULTS.drop_zone_persistence_ms},
     {"section": "Fast eject (C3)", "key": "ch2_fast_eject_enabled", "label": "C2 fast eject", "type": "bool", "default": _DEFAULTS.ch2_fast_eject_enabled},
     {"section": "Fast eject (C3)", "key": "ch3_fast_eject_enabled", "label": "C3 fast eject", "type": "bool", "default": _DEFAULTS.ch3_fast_eject_enabled},
     {"section": "Fast eject (C3)", "key": "fast_eject_min_step_deg", "label": "Min advance step (output deg)", "type": "float", "default": _DEFAULTS.fast_eject_min_step_deg},
