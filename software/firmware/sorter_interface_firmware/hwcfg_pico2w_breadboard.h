@@ -1,5 +1,9 @@
-// Pico 2W (RP2350) breadboard — feeder + classification channel
-// ENGINEER: Replace all pin numbers below with your actual wiring.
+// Pico 2W (RP2350) breadboard — feeder bring-up, 3 motors, STEP/DIR standalone
+//
+// Wiring source: three_motor_wiring_reference.html
+//   BTT TMC2209 ×3 in STEP/DIR (standalone) mode — NO UART wired.
+//   MS1/MS2 tied to GND on every driver => 1/8 microstepping (hardware-fixed).
+//   Motor run current is set by each driver's VREF potentiometer, NOT software.
 //
 // IMPORTANT: This board is an RP2350 (Pico 2 W). Configure CMake with
 //   -DPICO_BOARD=pico2_w
@@ -7,51 +11,58 @@
 
 const char* const HW_ID = "pico2w_breadboard";
 
-const uint8_t STEPPER_COUNT = 4;
-const uint8_t STEPPER_STEP_PINS[] = {/* CH0_STEP */ 0, /* CH1_STEP */ 0, /* CH2_STEP */ 0, /* CH3_STEP */ 0};
-const uint8_t STEPPER_DIR_PINS[]  = {/* CH0_DIR  */ 0, /* CH1_DIR  */ 0, /* CH2_DIR  */ 0, /* CH3_DIR  */ 0};
+// Three drivers wired (Motor 1, 2, 3). C4 classification motor is not present.
+const uint8_t STEPPER_COUNT = 3;
 
-// Feeder role: these exact names are required by the backend.
-// CH0 → classification_channel (C4)
-// CH1 → third_c_channel_rotor (C3)
-// CH2 → second_c_channel_rotor (C2)
-// CH3 → first_c_channel_rotor (C1 bulk)
+// Motor 1: STEP=GP2 DIR=GP3 EN=GP4
+// Motor 2: STEP=GP5 DIR=GP6 EN=GP7
+// Motor 3: STEP=GP8 DIR=GP9 EN=GP10
+const uint8_t STEPPER_STEP_PINS[] = {2, 5, 8};
+const uint8_t STEPPER_DIR_PINS[]  = {3, 6, 9};
+
+// Feeder role: these exact names are how the backend discovers each channel.
+// Logical-name remapping is possible at runtime via machine.toml [stepper_bindings]
+// and [stepper_direction_inverts] — no reflash needed to swap roles or flip spin.
+//   Motor 1 -> first_c_channel_rotor  (C1 bulk)
+//   Motor 2 -> second_c_channel_rotor (C2)
+//   Motor 3 -> third_c_channel_rotor  (C3)
 #ifdef FIRMWARE_ROLE_DISTRIBUTION
 const char* const STEPPER_NAMES[] = {
     "chute_stepper",
     "distribution_aux_1",
-    "distribution_aux_2",
-    "distribution_aux_3"
+    "distribution_aux_2"
 };
 #else
 const char* const STEPPER_NAMES[] = {
-    "carousel",                // classification channel (C4) — backend aliases this
-    "third_c_channel_rotor",
+    "first_c_channel_rotor",
     "second_c_channel_rotor",
-    "first_c_channel_rotor"
+    "third_c_channel_rotor"
 };
 #endif
 
-// Single UART bus for all 4 TMC2209 drivers.
-// Preprocessor macro, not a const — gates #if TMC_UART_BUS_COUNT > 1.
+// --- TMC2209 UART: NOT WIRED on this breadboard ---------------------------
+// The drivers run standalone (STEP/DIR). The firmware still compiles a UART
+// bus and emits config writes at boot; with nothing connected to PDN_UART
+// those writes are uart_write_blocking() into the void (non-blocking, never
+// waits for a reply) and are simply ignored by the hardware. Pins below are
+// otherwise-unused GPIOs so the UART peripheral has somewhere to point.
 #define TMC_UART_BUS_COUNT 1
 uart_inst_t* const TMC_UART_BUSES[] = {uart0};
-const int TMC_UART_BUS_TX_PINS[] = {/* TX_PIN */ 0};
-const int TMC_UART_BUS_RX_PINS[] = {/* RX_PIN */ 0};
+const int TMC_UART_BUS_TX_PINS[] = {0};   // GP0 — not connected
+const int TMC_UART_BUS_RX_PINS[] = {1};   // GP1 — not connected
 const int TMC_UART_BAUDRATE = 400000;
 
-// TMC2209 UART addresses (0–3, set via MS1/MS2 pins on each driver)
-const uint8_t TMC_UART_BUS_INDEX[] = {0, 0, 0, 0};
-const uint8_t TMC_UART_ADDRESSES[] = {/* addr_ch0 */ 0, /* addr_ch1 */ 1, /* addr_ch2 */ 2, /* addr_ch3 */ 3};
+// Addresses are irrelevant without UART; kept distinct for completeness.
+const uint8_t TMC_UART_BUS_INDEX[] = {0, 0, 0};
+const uint8_t TMC_UART_ADDRESSES[] = {0, 1, 2};
 
-// nEN tied low (always enabled) or wired per channel
-const int STEPPER_nEN_PINS[] = {0, 0, 0, 0};
+// nEN (enable) is active-LOW and wired per motor to GP4 / GP7 / GP10.
+const int STEPPER_nEN_PINS[] = {4, 7, 10};
 
-// DIAG pins NOT wired on breadboard — set all to -1 to disable StallGuard.
-const int STEPPER_DIAG_PINS[] = {-1, -1, -1, -1};
+// DIAG/StallGuard not wired — -1 disables per-channel stall checking.
+const int STEPPER_DIAG_PINS[] = {-1, -1, -1};
 
-// No endstops needed for classification_channel mode (optical spoke homing)
-// Set to 0 unless physical hall/endstop sensors are wired.
+// No endstops wired (classification uses optical spoke homing later).
 const uint8_t DIGITAL_INPUT_COUNT = 0;
 const int digital_input_pins[] = {0};
 
@@ -59,10 +70,10 @@ const uint8_t DIGITAL_OUTPUT_COUNT = 0;
 const int digital_output_pins[] = {0};
 const int FAN0_OUTPUT_CHANNEL = -1;
 
-// I2C for servo expansion (PCA9685) — not needed if --disable servos is used,
-// but the firmware still compiles it in. Wire or leave unconnected.
-i2c_inst_t* const I2C_PORT = i2c1;
-const int I2C_SDA_PIN = /* SDA_PIN */ 0;
-const int I2C_SCL_PIN = /* SCL_PIN */ 0;
+// I2C for PCA9685 servo expansion — not wired. Backend should run with
+// `--disable servos`. Pins point at free GPIOs so the firmware compiles/boots.
+i2c_inst_t* const I2C_PORT = i2c0;
+const int I2C_SDA_PIN = 20;   // GP20 — not connected
+const int I2C_SCL_PIN = 21;   // GP21 — not connected
 
 const uint8_t SERVO_I2C_ADDRESS = 0x40;
