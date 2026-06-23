@@ -1282,11 +1282,24 @@ def _applyGpioLeds(
 def _requiredCanonicalStepperNames(
     machine_setup: MachineSetupDefinition,
     stepper_binding_overrides: dict[str, str],
+    gc: GlobalConfig | None = None,
 ) -> list[str]:
-    logical_required: list[str] = ["chute"]
+    # Subsystems disabled at launch (e.g. --disable chute / c_channel_1) are not
+    # physically present, so they must not be treated as required for hardware
+    # discovery. gc=None preserves the original strict behavior for callers
+    # (e.g. the setup wizard) that report against the full expected set.
+    disable_chute = bool(getattr(gc, "disable_chute", False))
+    disable_c_channels = getattr(gc, "disable_c_channels", set()) or set()
+    disable_carousel = bool(getattr(gc, "disable_carousel", False))
+
+    logical_required: list[str] = []
+    if not disable_chute:
+        logical_required.append("chute")
     if machine_setup.automatic_feeder:
-        logical_required.extend(["c_channel_1", "c_channel_2", "c_channel_3"])
-    if machine_setup.uses_carousel_transport:
+        for ch in (1, 2, 3):
+            if ch not in disable_c_channels:
+                logical_required.append(f"c_channel_{ch}")
+    if machine_setup.uses_carousel_transport and not disable_carousel:
         logical_required.append("carousel")
     return [
         stepper_binding_overrides.get(logical, LOGICAL_STEPPER_BINDING_BASES[logical])
@@ -1330,7 +1343,7 @@ def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
     servo_channel_config = loadServoChannelConfig(gc, machine_specific_params)
     mcu_ports = MCUBus.enumerate_buses()
     required_stepper_names = _requiredCanonicalStepperNames(
-        config.machine_setup, stepper_binding_overrides
+        config.machine_setup, stepper_binding_overrides, gc
     )
     gc.logger.info(
         f"Required steppers for machine_setup={config.machine_setup.key}: "
