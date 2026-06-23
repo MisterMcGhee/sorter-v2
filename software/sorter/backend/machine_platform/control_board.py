@@ -351,6 +351,21 @@ def _detect_board_profile(sorter_interface: SorterInterface) -> BoardProfile:
         return SKR_PICO_FEEDER_PROFILE
     if physical_names == _BASICALLY_FEEDER_NAMES:
         return BASICALLY_FEEDER_PROFILE
+    # Feeder board that reports a subset of the known feeder steppers — e.g. a
+    # breadboard build with only C2/C3/C4 wired and C1 not yet installed. Treat
+    # it as a feeder and canonicalize the names it does report, so discovery and
+    # binding see c_channel_2_rotor / c_channel_3_rotor / carousel rather than
+    # the raw physical names left by the generic identity fallback.
+    if physical_names and physical_names <= _BASICALLY_FEEDER_NAMES:
+        return BoardProfile(
+            family=BASICALLY_FEEDER_PROFILE.family,
+            role="feeder",
+            physical_to_canonical_stepper_names={
+                name: BASICALLY_FEEDER_PROFILE.physical_to_canonical_stepper_names[name]
+                for name in physical_names
+            },
+            input_aliases=BASICALLY_FEEDER_PROFILE.input_aliases,
+        )
     if "chute_stepper" in physical_names:
         if digital_output_count >= 5:
             return SKR_PICO_DISTRIBUTION_PROFILE

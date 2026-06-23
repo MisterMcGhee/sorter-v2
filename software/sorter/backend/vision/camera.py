@@ -122,7 +122,18 @@ def _is_macos_camera_index_available(source: int | str | None) -> bool:
     if platform.system() != "Darwin" or not isinstance(source, int) or _refresh_macos_cameras is None:
         return True
     try:
-        return any(int(camera.index) == source for camera in _refresh_macos_cameras())
+        for camera in _refresh_macos_cameras():
+            raw = int(camera.index)
+            # cv2-enumerate-cameras reports AVFoundation indices offset by the
+            # backend id (CAP_AVFOUNDATION = 1200): index = backend + ordinal.
+            # But cv2.VideoCapture(ordinal, CAP_AVFOUNDATION) — the open path
+            # below — wants the bare ordinal, and modern OpenCV rejects the
+            # offset form ("out device of bound (0-3)"). Accept either form so
+            # the gate matches the open path regardless of library versions.
+            backend = int(getattr(camera, "backend", 0) or 0)
+            if source == raw or source == raw - backend:
+                return True
+        return False
     except Exception:
         return True
 

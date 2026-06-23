@@ -1282,11 +1282,24 @@ def _applyGpioLeds(
 def _requiredCanonicalStepperNames(
     machine_setup: MachineSetupDefinition,
     stepper_binding_overrides: dict[str, str],
+    gc: GlobalConfig | None = None,
 ) -> list[str]:
-    logical_required: list[str] = ["chute"]
+    # Subsystems disabled at launch (e.g. --disable chute / c_channel_1) are not
+    # physically present, so they must not be treated as required for hardware
+    # discovery. gc=None preserves the original strict behavior for callers
+    # (e.g. the setup wizard) that report against the full expected set.
+    disable_chute = bool(getattr(gc, "disable_chute", False))
+    disable_c_channels = getattr(gc, "disable_c_channels", set()) or set()
+    disable_carousel = bool(getattr(gc, "disable_carousel", False))
+
+    logical_required: list[str] = []
+    if not disable_chute:
+        logical_required.append("chute")
     if machine_setup.automatic_feeder:
-        logical_required.extend(["c_channel_1", "c_channel_2", "c_channel_3"])
-    if machine_setup.uses_carousel_transport:
+        for ch in (1, 2, 3):
+            if ch not in disable_c_channels:
+                logical_required.append(f"c_channel_{ch}")
+    if machine_setup.uses_carousel_transport and not disable_carousel:
         logical_required.append("carousel")
     return [
         stepper_binding_overrides.get(logical, LOGICAL_STEPPER_BINDING_BASES[logical])
@@ -1330,7 +1343,7 @@ def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
     servo_channel_config = loadServoChannelConfig(gc, machine_specific_params)
     mcu_ports = MCUBus.enumerate_buses()
     required_stepper_names = _requiredCanonicalStepperNames(
-        config.machine_setup, stepper_binding_overrides
+        config.machine_setup, stepper_binding_overrides, gc
     )
     gc.logger.info(
         f"Required steppers for machine_setup={config.machine_setup.key}: "
@@ -1576,25 +1589,31 @@ def mkIRLInterface(config: IRLConfig, gc: GlobalConfig) -> IRLInterface:
     from subsystems.distribution.chute import Chute
 
     if distribution_board is None:
-        raise RuntimeError("Distribution board not found — cannot initialize chute homing")
-    chute_calibration = loadChuteCalibrationConfig(
-        gc, machine_specific_params, dict(distribution_board.input_aliases)
-    )
-    chute_home_pin = distribution_board.get_input(chute_calibration.home_pin_channel)
-    if chute_home_pin is None:
-        raise RuntimeError(
-            f"Distribution board chute home input channel {chute_calibration.home_pin_channel} is unavailable."
+        gc.logger.warning(
+            "Distribution board not found — chute homing disabled. "
+            "Distribution subsystem will remain in IDLE."
         )
-    irl_interface.chute = Chute(
-        gc,
-        irl_interface.chute_stepper,
-        chute_home_pin,
-        irl_interface.distribution_layout,
-        num_sections=chute_calibration.num_sections,
-        section_width_deg=chute_calibration.section_width_deg,
-        first_section_offset_deg=chute_calibration.first_section_offset_deg,
-        endstop_active_high=chute_calibration.endstop_active_high,
-        operating_speed_microsteps_per_second=chute_calibration.operating_speed_microsteps_per_second,
-    )
+        irl_interface.chute = None
+    else:
+        chute_calibration = loadChuteCalibrationConfig(
+            gc, machine_specific_params, dict(distribution_board.input_aliases)
+        )
+        chute_home_pin = distribution_board.get_input(chute_calibration.home_pin_channel)
+        if chute_home_pin is None:
+            raise RuntimeError(
+                f"Distribution board chute home input channel "
+                f"{chute_calibration.home_pin_channel} is unavailable."
+            )
+        irl_interface.chute = Chute(
+            gc,
+            irl_interface.chute_stepper,
+            chute_home_pin,
+            irl_interface.distribution_layout,
+            num_sections=chute_calibration.num_sections,
+            section_width_deg=chute_calibration.section_width_deg,
+            first_section_offset_deg=chute_calibration.first_section_offset_deg,
+            endstop_active_high=chute_calibration.endstop_active_high,
+            operating_speed_microsteps_per_second=chute_calibration.operating_speed_microsteps_per_second,
+        )
 
     return irl_interface
