@@ -50,6 +50,12 @@ from threading import Lock
 _PROFILE_BUS = os.environ.get("SORTER_PROFILE_BUS") == "1"
 _PROFILE_BUS_MIN_MS = float(os.environ.get("SORTER_PROFILE_BUS_MIN_MS", "20"))
 
+# USB product IDs for the Pico SDK CDC (stdio) interface, by RP2 family.
+# The stdio-USB PID differs between chips: RP2040 (original Pico) enumerates
+# as 0x000A, while RP2350 (Pico 2 / Pico 2 W) enumerates as 0x0009. Accept
+# both so feeder/distribution boards are discovered regardless of chip.
+_PICO_CDC_PIDS = frozenset({0x000A, 0x0009})
+
 
 MAX_PAYLOAD_SIZE = (
     254 - 8
@@ -232,20 +238,29 @@ class MCUBus:
         raise last_exc if last_exc is not None else MCUBusError("send_command exhausted retries with no error")
 
     @classmethod
-    def enumerate_buses(cls, vid=0x2E8A, pid=0x000A) -> list[str]:
+    def enumerate_buses(cls, vid=0x2E8A, pid=None) -> list[str]:
         """Enumerate available serial ports that could be used for the MCU bus. Filtered by VID and PID
 
         Args:
             vid: The USB Vendor ID to filter by (default 0x2e8a, Raspberry Pi Foundation)
-            pid: The USB Product ID to filter by (default 0x000a, Pico SDK CDC UART)
+            pid: The USB Product ID(s) to accept. ``None`` (default) accepts the
+                known Pico SDK CDC PIDs across RP2040 (0x000A) and RP2350
+                (0x0009). May also be a single int or an iterable of ints.
 
         Returns:
             A list of serial port names (e.g. ["/dev/ttyUSB0", "/dev/ttyUSB1"])
         """
         import serial.tools.list_ports
 
+        if pid is None:
+            accepted_pids = _PICO_CDC_PIDS
+        elif isinstance(pid, int):
+            accepted_pids = frozenset({pid})
+        else:
+            accepted_pids = frozenset(pid)
+
         ports = serial.tools.list_ports.comports()
-        return [port.device for port in ports if port.vid == vid and port.pid == pid]
+        return [port.device for port in ports if port.vid == vid and port.pid in accepted_pids]
 
     def scan_devices(self, min_address=0, max_address=15) -> list[int]:
         """Scan the bus for devices by sending a ping command to each address in the specified range.
