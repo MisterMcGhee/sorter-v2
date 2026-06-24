@@ -565,4 +565,10 @@ def maybeRunSpokeHome(
     )
     if motor_microsteps == 0:
         return True
+    # Apply the same tuned C4 speed/acceleration profile the normal sector moves
+    # use (see C4SectorMove.apply_to_stepper) before driving the motor. Without
+    # this the homing move runs at the stepper's untuned default speed with no
+    # acceleration ramp, producing a loud, rapid spin-up even though the move
+    # distance is correct.
+    platter.motion_profile.apply_to_stepper(stepper)
     return bool(stepper.move_steps(int(motor_microsteps)))
