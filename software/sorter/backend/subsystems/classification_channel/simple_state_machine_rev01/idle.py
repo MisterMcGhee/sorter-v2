@@ -91,7 +91,7 @@ class Idle(Rev01BaseState):
         # ctx.config.jitter_* fields + dwell tracking + carousel_stepper.jitter)
         # can be wired here symmetrically to GoToAngleFeeding when a C4 exit
         # piece exceeds jitter_exit_dwell_ms.
-        if state.in_drop or (state.n_pieces > 0 and not state.in_exit):
+        if state.in_drop or (state.n_pieces > 0 and not state.in_exit_majority):
             self._presence_streak += 1
         else:
             self._presence_streak = 0
